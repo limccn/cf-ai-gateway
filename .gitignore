@@ -1,0 +1,16 @@
+node_modules/
+dist/*
+!dist/dsh-plugin.js
+/assets/
+.deepseek-vl/
+*.log
+
+.agents/
+.claude/
+.codex/
+.cache/
+
+AGENTS.md
+package-lock.json
+
+.trellis/
