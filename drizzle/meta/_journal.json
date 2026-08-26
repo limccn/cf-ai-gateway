@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1787630976235,
+      "tag": "0000_long_maelstrom",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787632379820,
+      "tag": "0001_tricky_winter_soldier",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787634558453,
+      "tag": "0002_tidy_la_nuit",
+      "breakpoints": true
+    }
+  ]
+}

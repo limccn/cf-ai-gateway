@@ -1,0 +1,11 @@
+{
+  // 测试专用 tsconfig（M4）：主 tsconfig 有意排除 tests/（cloudflare:test / cloudflare:workers
+  // 等模块需要 vitest-pool-workers + workers-types 提供的 ambient 类型，与 src 的 `types: []`
+  // 冲突）。vitest 本身只做转译不做类型检查，故测试类型检查在此单独完成；
+  // `npm run typecheck` = tsc src + tsc tests 双跑。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/vitest-pool-workers/types", "@cloudflare/workers-types"]
+  },
+  "include": ["tests", "src/env.d.ts", "worker-configuration.d.ts"]
+}

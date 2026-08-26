@@ -1,0 +1,1 @@
+ALTER TABLE `providers` ADD `api_key_prefix` text DEFAULT '' NOT NULL;

@@ -1,0 +1,102 @@
+# Cloudflare Workers configuration for AI API Gateway.
+# 本地开发（Miniflare）：`npm run dev`（vite dev）。
+# 生产部署从零步骤见 docs/DEPLOY.md（创建 D1/KV/Queue → 迁移 → secrets/vars → OAuth App → 首个 admin → deploy）。
+# 双环境：顶层 = production（wrangler deploy），[env.staging] = staging（wrangler deploy --env staging）。
+
+name = "cf-ai-gateway"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- 自定义域名（部署时自动创建/绑定；wrangler v4 已移除 `wrangler domains` 子命令，改用配置声明） ---
+# lmlh.net 已托管在 Cloudflare，custom_domain = true 会自动验证并绑定。
+routes = [
+  { pattern = "router.lmlh.net", custom_domain = true },
+]
+
+# --- 静态资源（M6）：Vite 构建产物（React SPA）由 Worker 托管 ---
+# 注意：TOML 中顶层键必须写在任何 [table]/[[array]] 表头之前，否则会被并入最后一个表。
+# run_worker_first = true：全部请求先到 Worker（Hono 处理 /api/*、/v1/*），
+# 其余路径由 Worker 内 env.ASSETS.fetch() 兜底托管。
+# not_found_handling=single-page-application：React Router 深链（/login、/keys 等）回退 index.html。
+# assets 为顶层属性，staging 环境继承同一构建产物。directory 显式声明（vite-plugin 重定向配置不携带 env 段，
+# 直接 `wrangler deploy --config wrangler.toml` 时必须有 directory）。
+assets = { binding = "ASSETS", directory = "dist/client", run_worker_first = true, not_found_handling = "single-page-application" }
+
+# --- D1：事实库（users / api_keys / providers / balance_tx / request_logs / usage_daily / models） ---
+# database_id 由 `wrangler d1 create` 生成后替换（见 docs/DEPLOY.md 步骤 1）。
+[[d1_databases]]
+binding = "DB"
+database_name = "cf-ai-gateway-db"
+database_id = "423999d8-9a76-4620-b92b-257a731095aa"
+migrations_dir = "drizzle"
+
+# --- KV：响应缓存 + 限流固定窗口计数器（M4 使用） ---
+# id 由 `wrangler kv namespace create` 生成后替换（见 docs/DEPLOY.md 步骤 2）。
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "b2df81c497db415a8202019aaf96689c"
+
+# --- Queues：用量聚合异步管道（M5 使用） ---
+[[queues.producers]]
+binding = "USAGE_QUEUE"
+queue = "usage-aggregation"
+
+[[queues.consumers]]
+queue = "usage-aggregation"
+max_batch_size = 32
+max_retries = 3
+
+# --- Cron：request_logs 保留期清理（M5 5.4；UTC 每日 02:00；本地 wrangler dev 不自动触发） ---
+[triggers]
+crons = ["0 2 * * *"]
+
+# --- 非敏感运行时配置（分类依据 spec backend/environment.md §本项目约定） ---
+# 治理规则：
+# - 真实 secret（GATEWAY_SECRET_KEY / BETTER_AUTH_SECRET / GITHUB_CLIENT_SECRET）→ wrangler secret put / .dev.vars，禁止入本文件。
+# - PII 与环境差异值（邮箱白名单/站点 URL/Client ID）→ "{KEY}" 插值引用：
+#   值由 .dev.vars（本地）、部署端同名 vars/secret（Cloudflare dashboard 或 CI 导出）解析；缺失即失败（fail-fast）。
+# - 资源 ID（D1/KV/Queue）为基础设施标识符（非秘密），wrangler 要求 toml 字面量，保留内联（见上）。
+[vars]
+BETTER_AUTH_URL = "{BETTER_AUTH_URL}"
+GITHUB_CLIENT_ID = "{GITHUB_CLIENT_ID}"
+GITHUB_ALLOWED_EMAILS = "{GITHUB_ALLOWED_EMAILS}"
+REQUEST_LOG_RETENTION_DAYS = "{REQUEST_LOG_RETENTION_DAYS}"
+
+# ====================================================================
+# Staging 环境（cf-ai-gateway-staging；wrangler deploy --env staging）
+# 与 production 完全隔离：独立 D1/KV/Queue/域名。vars 不继承顶层，需完整声明。
+# ====================================================================
+[env.staging]
+name = "cf-ai-gateway-staging"
+routes = [
+  { pattern = "stg-router.lmlh.net", custom_domain = true },
+]
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "cf-ai-gateway-db-staging"
+database_id = "091397f3-8d57-45cc-bf17-f71aa4e5e424"
+migrations_dir = "drizzle"
+
+[[env.staging.kv_namespaces]]
+binding = "CACHE_KV"
+id = "f76273f56e9347d3a73cd1561fddba60"
+
+[[env.staging.queues.producers]]
+binding = "USAGE_QUEUE"
+queue = "usage-aggregation-staging"
+
+[[env.staging.queues.consumers]]
+queue = "usage-aggregation-staging"
+max_batch_size = 32
+max_retries = 3
+
+[env.staging.triggers]
+crons = ["0 2 * * *"]
+
+[env.staging.vars]
+BETTER_AUTH_URL = "{BETTER_AUTH_URL}"
+GITHUB_CLIENT_ID = "{GITHUB_CLIENT_ID}"
+GITHUB_ALLOWED_EMAILS = "{GITHUB_ALLOWED_EMAILS}"
+REQUEST_LOG_RETENTION_DAYS = "{REQUEST_LOG_RETENTION_DAYS}"

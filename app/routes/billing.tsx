@@ -1,0 +1,344 @@
+// /billing — 账单页（M6 6.3 + M8）：余额卡片 + 管理员代充/扣减 + 真实流水表
+// （GET /api/me/transactions，分页 + type 过滤；无伪造数据）。
+import { useState, type FormEvent } from "react";
+import { CreditCard, Wallet } from "lucide-react";
+import { z } from "zod";
+import { useSession } from "@/hooks/use-session";
+import { useUsers } from "@/modules/users/hooks/use-users";
+import { useAdjustBalance } from "@/modules/users/hooks/use-adjust-balance";
+import { useMeTransactions } from "@/modules/billing/hooks/use-me-transactions";
+import type { BalanceTxType, TransactionItem } from "@/modules/billing/types";
+import type { UserResponse } from "@/modules/users/types";
+import { formatDateTime, formatNumber, formatUsd } from "@/lib/format";
+import { PageContainer } from "@/components/layout/page-container";
+import { PageHeader } from "@/components/layout/page-header";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import { EmptyState, ErrorState } from "@/components/ui/states";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+
+const PAGE_SIZE = 20;
+
+const adjustFormSchema = z.object({
+  userId: z.string().min(1, "Select a user"),
+  amount: z.coerce
+    .number("Enter a number")
+    .refine((v) => v !== 0, { message: "Amount must not be zero" }),
+  note: z.string().max(500, "Max 500 characters").optional(),
+});
+
+type TypeFilter = "all" | BalanceTxType;
+
+function typeBadgeVariant(type: BalanceTxType): "success" | "secondary" | "destructive" {
+  if (type === "recharge") {
+    return "success";
+  }
+  if (type === "usage") {
+    return "destructive";
+  }
+  return "secondary";
+}
+
+function AmountCell({ amount }: { amount: number }) {
+  const positive = amount > 0;
+  return (
+    <span className={positive ? "text-success" : "text-foreground"}>
+      {positive ? "+" : ""}
+      {formatUsd(amount)}
+    </span>
+  );
+}
+
+export default function BillingPage() {
+  const { user } = useSession();
+  const isAdmin = user?.role === "admin";
+
+  const usersQuery = useUsers(isAdmin ? { limit: 100 } : { limit: 1, enabled: false });
+
+  const [userId, setUserId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
+  const adjustBalance = useAdjustBalance();
+
+  // ===== 流水表：type 过滤 + 分页 =====
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
+  const [offset, setOffset] = useState(0);
+  const transactionsQuery = useMeTransactions({
+    ...(typeFilter !== "all" ? { type: typeFilter } : {}),
+    limit: PAGE_SIZE,
+    offset,
+  });
+
+  const switchTypeFilter = (next: TypeFilter) => {
+    setTypeFilter(next);
+    setOffset(0);
+  };
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setErrors({});
+    const parsed = adjustFormSchema.safeParse({
+      userId,
+      amount,
+      note: note.length > 0 ? note : undefined,
+    });
+    if (!parsed.success) {
+      setErrors(Object.fromEntries(parsed.error.issues.map((i) => [String(i.path[0] ?? "root"), i.message])));
+      return;
+    }
+    try {
+      await adjustBalance.mutateAsync({
+        id: parsed.data.userId,
+        amount: parsed.data.amount,
+        ...(parsed.data.note !== undefined ? { note: parsed.data.note } : {}),
+      });
+      setAmount("");
+      setNote("");
+    } catch {
+      // 错误显示在表单下方
+    }
+  };
+
+  const users = usersQuery.data?.items ?? [];
+  const selectedUser = users.find((u: UserResponse) => u.id === userId);
+
+  const items: TransactionItem[] = transactionsQuery.data?.items ?? [];
+  const total = transactionsQuery.data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
+
+  return (
+    <PageContainer>
+      <PageHeader title="Billing" description="Balance and transaction history" />
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Wallet className="size-4 text-primary" aria-hidden="true" />
+              Current balance
+            </CardTitle>
+            <CardDescription>Prepaid balance used by your API traffic</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-4xl font-semibold tracking-tight">
+              {user?.balance === null || user?.balance === undefined
+                ? "—"
+                : formatUsd(user.balance)}
+            </p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Contact an administrator to top up your balance.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <CreditCard className="size-4 text-primary" aria-hidden="true" />
+              Ledger summary
+            </CardTitle>
+            <CardDescription>Totals from your transaction history</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">Total transactions</span>
+              <span className="font-medium">{formatNumber(total)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">Types</span>
+              <span className="font-mono text-xs">recharge / usage / adjust</span>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 流水表 */}
+      <Card className="mt-6">
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle>Transactions</CardTitle>
+            <CardDescription>
+              {formatNumber(total)} total — page {currentPage} of {totalPages}
+            </CardDescription>
+          </div>
+          <div className="flex items-center gap-2">
+            <Label htmlFor="billing-type" className="sr-only">
+              Transaction type
+            </Label>
+            <Select
+              id="billing-type"
+              value={typeFilter}
+              onChange={(e) => switchTypeFilter(e.target.value as TypeFilter)}
+              className="w-40"
+            >
+              <option value="all">All types</option>
+              <option value="recharge">Recharge</option>
+              <option value="usage">Usage</option>
+              <option value="adjust">Adjustment</option>
+            </Select>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={offset === 0}
+              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            >
+              Prev
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={offset + PAGE_SIZE >= total}
+              onClick={() => setOffset(offset + PAGE_SIZE)}
+            >
+              Next
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {transactionsQuery.isLoading ? (
+            <div className="px-6 py-8 text-center text-sm text-muted-foreground">Loading…</div>
+          ) : transactionsQuery.isError ? (
+            <div className="p-6">
+              <ErrorState
+                message={transactionsQuery.error.message}
+                onRetry={() => transactionsQuery.refetch()}
+              />
+            </div>
+          ) : items.length === 0 ? (
+            <div className="px-6 pb-6">
+              <EmptyState title="No transactions yet" description="Balance adjustments and API usage charges will appear here." />
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Time</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Amount</TableHead>
+                    <TableHead>Note</TableHead>
+                    <TableHead>Request</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {items.map((tx) => (
+                    <TableRow key={tx.id}>
+                      <TableCell className="text-muted-foreground">
+                        {formatDateTime(tx.createdAt)}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={typeBadgeVariant(tx.type)}>{tx.type}</Badge>
+                      </TableCell>
+                      <TableCell className="font-medium">
+                        <AmountCell amount={tx.amount} />
+                      </TableCell>
+                      <TableCell className="max-w-64 truncate text-muted-foreground">
+                        {tx.note ?? "—"}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {tx.refRequestId ?? "—"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {isAdmin ? (
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle>Adjust user balance</CardTitle>
+            <CardDescription>Add or deduct funds for any user (admin only)</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+              {adjustBalance.error?.message ? (
+                <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {adjustBalance.error.message}
+                </p>
+              ) : null}
+              {adjustBalance.data ? (
+                <p
+                  role="status"
+                  className="rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm"
+                >
+                  Updated — new balance {formatUsd(adjustBalance.data.balance)} on{" "}
+                  {formatDateTime(adjustBalance.data.tx.createdAt)}
+                </p>
+              ) : null}
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="space-y-2">
+                  <Label htmlFor="billing-user">User</Label>
+                  <Select
+                    id="billing-user"
+                    value={userId}
+                    onChange={(e) => setUserId(e.target.value)}
+                    aria-invalid={errors.userId !== undefined}
+                  >
+                    <option value="">Select user…</option>
+                    {users.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name} ({u.email})
+                      </option>
+                    ))}
+                  </Select>
+                  {errors.userId ? <p className="text-xs text-destructive">{errors.userId}</p> : null}
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="billing-amount">Amount (USD)</Label>
+                  <Input
+                    id="billing-amount"
+                    type="number"
+                    step="any"
+                    placeholder="10 or -5"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    aria-invalid={errors.amount !== undefined}
+                  />
+                  {errors.amount ? <p className="text-xs text-destructive">{errors.amount}</p> : null}
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="billing-note">Note</Label>
+                  <Input
+                    id="billing-note"
+                    placeholder="Optional"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    aria-invalid={errors.note !== undefined}
+                  />
+                  {errors.note ? <p className="text-xs text-destructive">{errors.note}</p> : null}
+                </div>
+              </div>
+              {selectedUser ? (
+                <p className="text-xs text-muted-foreground">
+                  {selectedUser.name} — current balance {formatUsd(selectedUser.balance)}
+                </p>
+              ) : null}
+              <div className="flex justify-end">
+                <Button type="submit" disabled={adjustBalance.isPending}>
+                  {adjustBalance.isPending ? "Applying…" : "Apply adjustment"}
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      ) : null}
+    </PageContainer>
+  );
+}

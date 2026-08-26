@@ -1,0 +1,27 @@
+# 本地开发环境变量模板（提交入库；复制为 .dev.vars 后填写，.dev.vars 已被 .gitignore 忽略）
+# 生产环境：非敏感键用 `wrangler secret put <KEY>` 或 Cloudflare dashboard 设置同名 vars；
+# 真实 secrets（BETTER_AUTH_SECRET / GITHUB_CLIENT_SECRET / GATEWAY_SECRET_KEY）仅通过 secret put 注入。
+
+# ---- Better Auth ----
+# 会话签名密钥（生产必须为随机值，>=32 字符；不要与 GATEWAY_SECRET_KEY 相同）
+BETTER_AUTH_SECRET=local-dev-secret-change-me-0123456789abcdef
+# 前端 origin（本地 vite dev 端口；生产为部署域名）
+BETTER_AUTH_URL=http://localhost:5173
+
+# ---- GitHub OAuth ----
+# 本地开发可不配置，GitHub 登录仅在生产需要
+GITHUB_CLIENT_ID=replace-me-github-client-id
+GITHUB_CLIENT_SECRET=replace-me-github-client-secret
+# GitHub OAuth 白名单邮箱（逗号分隔；为空 = 拒绝所有 GitHub 登录，fail-closed）
+GITHUB_ALLOWED_EMAILS=alice@example.com
+
+# ---- 上游 Provider 密钥 AES-GCM 加密密钥 ----
+# 生产：wrangler secret put GATEWAY_SECRET_KEY；任意字符串，建议 >=32 字符随机值
+GATEWAY_SECRET_KEY=local-gateway-secret-key-change-me-0123456789abcdef
+
+# ---- 其他 ----
+# request_logs 明细保留天数（cron 清理用；缺省 30）
+REQUEST_LOG_RETENTION_DAYS=30
+# 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
+# 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
+# SEED_USERS=

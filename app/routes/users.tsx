@@ -1,0 +1,342 @@
+// /users — 用户管理（M6 6.3，admin）：列表搜索/过滤、角色与状态操作、邀请码管理。
+import { useState, type FormEvent } from "react";
+import { Copy, Search, ShieldPlus } from "lucide-react";
+import { z } from "zod";
+import { useSession } from "@/hooks/use-session";
+import { useUsers } from "@/modules/users/hooks/use-users";
+import { useUpdateUser } from "@/modules/users/hooks/use-update-user";
+import { useInvites } from "@/modules/users/hooks/use-invites";
+import { useCreateInvite } from "@/modules/users/hooks/use-create-invite";
+import { formatDateTime, formatUsd } from "@/lib/format";
+import { PageContainer } from "@/components/layout/page-container";
+import { PageHeader } from "@/components/layout/page-header";
+import { Button } from "@/components/ui/button";
+import { Dialog } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorState, EmptyState } from "@/components/ui/states";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+
+const inviteFormSchema = z.object({
+  expiresInDays: z.coerce.number().int().min(1, "At least 1 day").max(90, "At most 90 days"),
+});
+
+export default function UsersPage() {
+  const { user: sessionUser } = useSession();
+
+  // ===== 列表筛选 =====
+  const [searchDraft, setSearchDraft] = useState("");
+  const [roleDraft, setRoleDraft] = useState("");
+  const [statusDraft, setStatusDraft] = useState("");
+  const [filters, setFilters] = useState<{ search?: string; role?: "admin" | "member"; status?: "active" | "disabled" }>({});
+
+  const usersQuery = useUsers({ ...filters, limit: 50 });
+  const invitesQuery = useInvites();
+  const updateUser = useUpdateUser();
+  const createInvite = useCreateInvite();
+
+  // ===== 邀请码创建 =====
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [expiresInDays, setExpiresInDays] = useState("30");
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteFieldError, setInviteFieldError] = useState<string | null>(null);
+  const [createdCode, setCreatedCode] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const applyFilters = () => {
+    setFilters({
+      search: searchDraft || undefined,
+      role: roleDraft === "" ? undefined : (roleDraft as "admin" | "member"),
+      status: statusDraft === "" ? undefined : (statusDraft as "active" | "disabled"),
+    });
+  };
+
+  const items = usersQuery.data?.items ?? [];
+  const invites = invitesQuery.data?.items ?? [];
+
+  const handleCreateInvite = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setInviteError(null);
+    setInviteFieldError(null);
+    setCreatedCode(null);
+    const parsed = inviteFormSchema.safeParse({ expiresInDays });
+    if (!parsed.success) {
+      setInviteFieldError(parsed.error.issues[0]?.message ?? "Invalid input");
+      return;
+    }
+    try {
+      const result = await createInvite.mutateAsync(parsed.data);
+      setCreatedCode(result.invite.code);
+      setInviteOpen(false);
+    } catch (error) {
+      setInviteError(error instanceof Error ? error.message : "Failed to create invite");
+    }
+  };
+
+  const handleCopy = async (code: string) => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+    } catch {
+      // 剪贴板不可用时静默失败
+    }
+  };
+
+  return (
+    <PageContainer>
+      <PageHeader
+        title="Users"
+        description="Manage accounts, roles and invite codes (admin)"
+        actions={
+          <Button onClick={() => setInviteOpen(true)}>
+            <ShieldPlus aria-hidden="true" />
+            Create invite
+          </Button>
+        }
+      />
+
+      {/* 邀请码区 */}
+      <Card className="mb-6">
+        <CardHeader>
+          <CardTitle>Invite codes</CardTitle>
+          <CardDescription>One-time codes required for email sign-up</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {invitesQuery.isLoading ? (
+            <p className="text-sm text-muted-foreground">Loading invites…</p>
+          ) : invitesQuery.isError ? (
+            <ErrorState message={invitesQuery.error.message} onRetry={() => invitesQuery.refetch()} />
+          ) : invites.length === 0 ? (
+            <EmptyState title="No invite codes" description="Create one to let new members register." />
+          ) : (
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {invites.map((invite) => (
+                <div
+                  key={invite.id}
+                  className="flex items-center justify-between gap-2 rounded-md border p-3"
+                >
+                  <div className="min-w-0">
+                    <code className="block truncate font-mono text-sm">{invite.code}</code>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      <Badge variant={invite.status === "active" ? "success" : "muted"}>{invite.status}</Badge>{" "}
+                      expires {formatDateTime(invite.expiresAt)}
+                    </p>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={() => handleCopy(invite.code)} disabled={invite.status !== "active"}>
+                    <Copy aria-hidden="true" />
+                    {copied ? "Copied" : "Copy"}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 用户列表 */}
+      <Card className="mb-6">
+        <CardHeader>
+          <CardTitle>User list</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-4 grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="user-search">Search</Label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                <Input
+                  id="user-search"
+                  className="pl-9"
+                  placeholder="Name or email"
+                  value={searchDraft}
+                  onChange={(e) => setSearchDraft(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="user-role">Role</Label>
+              <Select id="user-role" value={roleDraft} onChange={(e) => setRoleDraft(e.target.value)}>
+                <option value="">All roles</option>
+                <option value="admin">Admin</option>
+                <option value="member">Member</option>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="user-status">Status</Label>
+              <Select id="user-status" value={statusDraft} onChange={(e) => setStatusDraft(e.target.value)}>
+                <option value="">All statuses</option>
+                <option value="active">Active</option>
+                <option value="disabled">Disabled</option>
+              </Select>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button onClick={applyFilters}>Apply</Button>
+          </div>
+
+          {usersQuery.isLoading ? (
+            <p className="mt-4 text-sm text-muted-foreground">Loading users…</p>
+          ) : usersQuery.isError ? (
+            <div className="mt-4">
+              <ErrorState message={usersQuery.error.message} onRetry={() => usersQuery.refetch()} />
+            </div>
+          ) : items.length === 0 ? (
+            <div className="mt-4">
+              <EmptyState title="No users match" description="Adjust the filters and try again." />
+            </div>
+          ) : (
+            <div className="mt-4 overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>User</TableHead>
+                    <TableHead>Role</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Balance</TableHead>
+                    <TableHead>Joined</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {items.map((item) => {
+                    const isSelf = sessionUser?.id === item.id;
+                    const isBusy = updateUser.isPending && updateUser.variables?.id === item.id;
+                    return (
+                      <TableRow key={item.id}>
+                        <TableCell>
+                          <p className="font-medium">{item.name}</p>
+                          <p className="text-xs text-muted-foreground">{item.email}</p>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={item.role === "admin" ? "default" : "outline"}>{item.role}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={item.status === "active" ? "success" : "destructive"}>
+                            {item.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>{formatUsd(item.balance)}</TableCell>
+                        <TableCell className="text-muted-foreground">{formatDateTime(item.createdAt)}</TableCell>
+                        <TableCell>
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={isBusy}
+                              onClick={() =>
+                                updateUser.mutate({
+                                  id: item.id,
+                                  role: item.role === "admin" ? "member" : "admin",
+                                })
+                              }
+                              title={isSelf ? "You cannot change your own role" : "Toggle role"}
+                            >
+                              {item.role === "admin" ? "Demote" : "Promote"}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={isBusy || isSelf}
+                              className="text-destructive hover:text-destructive"
+                              onClick={() =>
+                                updateUser.mutate({
+                                  id: item.id,
+                                  status: item.status === "active" ? "disabled" : "active",
+                                })
+                              }
+                              title={isSelf ? "You cannot disable your own account" : "Toggle status"}
+                            >
+                              {item.status === "active" ? "Disable" : "Enable"}
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 创建邀请码对话框 */}
+      <Dialog
+        open={inviteOpen}
+        onOpenChange={(open) => {
+          setInviteOpen(open);
+          setInviteError(null);
+          setInviteFieldError(null);
+        }}
+        title="Create invite code"
+        description="New members need this code to register with email."
+      >
+        <form onSubmit={handleCreateInvite} className="space-y-4" noValidate>
+          {inviteError ? (
+            <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {inviteError}
+            </p>
+          ) : null}
+          <div className="space-y-2">
+            <Label htmlFor="invite-days">Expires in (days)</Label>
+            <Input
+              id="invite-days"
+              type="number"
+              min={1}
+              max={90}
+              value={expiresInDays}
+              onChange={(e) => setExpiresInDays(e.target.value)}
+              aria-invalid={inviteFieldError !== null}
+            />
+            {inviteFieldError ? <p className="text-xs text-destructive">{inviteFieldError}</p> : null}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setInviteOpen(false)} disabled={createInvite.isPending}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={createInvite.isPending}>
+              {createInvite.isPending ? "Creating…" : "Create"}
+            </Button>
+          </div>
+        </form>
+      </Dialog>
+
+      {/* 创建成功展示 */}
+      <Dialog
+        open={createdCode !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setCreatedCode(null);
+          }
+        }}
+        title="Invite code created"
+        description="Share this code with the new member."
+      >
+        {createdCode ? (
+          <div className="space-y-4">
+            <div className="rounded-md border bg-muted/50 p-3">
+              <code className="block break-all font-mono text-sm">{createdCode}</code>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => handleCopy(createdCode)}>
+                <Copy aria-hidden="true" />
+                {copied ? "Copied" : "Copy"}
+              </Button>
+              <Button onClick={() => setCreatedCode(null)}>Done</Button>
+            </div>
+          </div>
+        ) : null}
+      </Dialog>
+    </PageContainer>
+  );
+}
