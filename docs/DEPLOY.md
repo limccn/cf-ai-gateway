@@ -10,7 +10,7 @@ This guide walks through deploying the AI API Gateway to Cloudflare Workers from
 6. Build and deploy the Worker
 7. Verify the production deployment against the project acceptance criteria (AC1–AC9)
 
-**Runtime model.** The Worker is a single Hono application serving the admin API (`/api/*`), the OpenAI-compatible proxy (`/v1/*`), and the React SPA (static assets). All runtime configuration is read from the request context (`c.env.*`) — never from build-time constants — so every value below is set either in `wrangler.toml` (`[vars]`) or as a Workers secret. See `wrangler.toml` and `src/env.d.ts` for the authoritative list.
+**Runtime model.** The Worker is a single Hono application serving the admin API (`/api/*`), the OpenAI-compatible proxy (`/v1/*`), and the React SPA (static assets). All runtime configuration is read from the request context (`c.env.*`) — never from build-time constants — so every value below is set either in `wrangler.toml` (`[vars]`) or as a Workers secret. **`wrangler.toml` is a generated artifact**: `npm run render:config` renders it from `wrangler.toml.template` + `.dev.vars` (bindings-level names/IDs/domains are managed in `.dev.vars`, never hand-edited in the generated file). See `wrangler.toml.template`, `.dev.vars.example`, and `src/env.d.ts` for the authoritative list.
 
 ---
 
@@ -41,12 +41,13 @@ The same configuration works locally with Miniflare — no Cloudflare account re
 ```bash
 npm install
 # create .dev.vars with local values (see Step 5) — the file is gitignored
+npm run render:config   # render wrangler.toml from wrangler.toml.template + .dev.vars
 npm run db:migrate      # wrangler d1 migrations apply cf-ai-gateway-db --local
 npm run db:seed         # wrangler d1 execute cf-ai-gateway-db --local --file=./seed.sql
 npm run dev             # Vite dev server: http://localhost:5173 (API at /api/*, /v1/*)
 ```
 
-During `wrangler dev`, values from `.dev.vars` take precedence over `[vars]` in `wrangler.toml`, so the placeholder values below do not affect local development.
+`npm run render:config` is idempotent and runs automatically before `dev`/`test`/`deploy`/`db:*` (pre-hooks); re-run it explicitly whenever you change infra values in `.dev.vars`. During `wrangler dev`, values from `.dev.vars` take precedence over `[vars]` in `wrangler.toml`, so the placeholder values below do not affect local development.
 
 ---
 
@@ -56,17 +57,13 @@ During `wrangler dev`, values from `.dev.vars` take precedence over `[vars]` in 
 npx wrangler d1 create cf-ai-gateway-db
 ```
 
-The output includes a `database_id`. Copy it into `wrangler.toml`, replacing the placeholder:
+The output includes a `database_id`. Add it to `.dev.vars` as `D1_DB_ID` (fill `D1_DB_NAME`/`WORKER_NAME`/`DOMAIN` and the `STAGING_*` variants too — see `.dev.vars.example`), then regenerate the config:
 
-```toml
-[[d1_databases]]
-binding = "DB"
-database_name = "cf-ai-gateway-db"
-database_id = "00000000-0000-0000-0000-000000000000"   # <- replace with the real id
-migrations_dir = "drizzle"
+```bash
+npm run render:config   # wrangler.toml.template + .dev.vars -> wrangler.toml (gitignored)
 ```
 
-> The `database_name` must stay `cf-ai-gateway-db` — both the npm scripts and the remote commands in Step 4 reference it. `migrations_dir = "drizzle"` tells wrangler where the migrations live.
+> The `D1_DB_NAME` value must stay in sync with the npm scripts (`db:migrate`/`db:seed` reference `cf-ai-gateway-db` literally) and the remote commands in Step 4. `migrations_dir = "drizzle"` tells wrangler where the migrations live. The full token list is in `docs/CONFIG-INVENTORY.md`.
 
 ---
 
@@ -78,13 +75,7 @@ The KV namespace backs response caching (keys `resp:<keyId>:<model>:<hash>`) and
 npx wrangler kv namespace create CACHE_KV
 ```
 
-Copy the returned `id` into `wrangler.toml`:
-
-```toml
-[[kv_namespaces]]
-binding = "CACHE_KV"
-id = "00000000-0000-0000-0000-000000000000"            # <- replace with the real id
-```
+Copy the returned `id` into `.dev.vars` as `KV_ID` (staging: `STAGING_KV_ID`), then re-run `npm run render:config` (or rely on the pre-hooks — the next `npm run dev` / `npm test` / `npm run deploy` re-renders automatically).
 
 ---
 
@@ -96,17 +87,10 @@ The Queue carries usage events from the request path to the aggregation consumer
 npx wrangler queues create usage-aggregation
 ```
 
-No id needs to be copied — `wrangler.toml` already declares both the producer (`USAGE_QUEUE`) and the consumer for the queue name `usage-aggregation`. Verify the name matches:
+No id needs to be copied — set the queue name in `.dev.vars` as `QUEUE_NAME` (staging: `STAGING_QUEUE_NAME`); the template declares both the producer (`USAGE_QUEUE`) and the consumer from that value. Verify the name matches:
 
-```toml
-[[queues.producers]]
-binding = "USAGE_QUEUE"
-queue = "usage-aggregation"
-
-[[queues.consumers]]
-queue = "usage-aggregation"
-max_batch_size = 32
-max_retries = 3
+```bash
+grep -A2 '\[\[queues.producers\]\]' wrangler.toml   # queue = "<QUEUE_NAME>"
 ```
 
 ---
@@ -137,7 +121,7 @@ npx wrangler d1 execute cf-ai-gateway-db --remote --command "SELECT COUNT(*) AS 
 
 ## Step 5 — Configure environment variables and secrets
 
-Cloudflare Workers read runtime values through the request context (`c.env.*`). The repo keeps **no individual-person data or credentials in `wrangler.toml`**: PII/environment-specific values are declared as `"{KEY}"` placeholders resolved from `.dev.vars` (local), Cloudflare side vars/secrets, or shell exports at deploy time. Sensitive values are set with `wrangler secret put` (encrypted, never stored in the repo). Resource IDs (D1/KV/Queue) stay inline in `wrangler.toml` — they are infrastructure identifiers, not secrets, and Wrangler requires them literally.
+Cloudflare Workers read runtime values through the request context (`c.env.*`). The repo keeps **no individual-person data or credentials in `wrangler.toml`**: PII/environment-specific values are declared as `"{KEY}"` placeholders resolved from `.dev.vars` (local), Cloudflare side vars/secrets, or shell exports at deploy time. Sensitive values are set with `wrangler secret put` (encrypted, never stored in the repo). Resource names/IDs (D1/KV/Queue), the Worker name, and custom domains are infrastructure identifiers (not secrets) but Wrangler requires them as TOML literals — since `wrangler.toml` is generated, manage them in `.dev.vars` (tokens `WORKER_NAME` / `DOMAIN` / `D1_DB_NAME` / `D1_DB_ID` / `KV_ID` / `QUEUE_NAME` + `STAGING_*` variants) and run `npm run render:config`.
 
 ### 5.1 Variables (`wrangler.toml [vars]`, `"{KEY}"` placeholders)
 
@@ -188,9 +172,10 @@ Copy the committed template (placeholder values) and edit:
 
 ```bash
 cp .dev.vars.example .dev.vars   # then fill in your own local values
+npm run render:config            # render wrangler.toml from the template + your .dev.vars
 ```
 
-`.dev.vars` must contain every key the Worker reads (local values; the template spells out each one with comments, including the optional `SEED_USERS` for seeding local test users — see §5.4 below):
+`.dev.vars` must contain every key the Worker reads (local values; the template spells out each one with comments): the infra tokens from Steps 1–3 (top-level + `STAGING_*`), the §5.1 variable placeholders, the §5.2 secrets, and the optional `SEED_USERS` for seeding local test users — see §5.4 below:
 
 ### 5.4 Seeding local test users (`SEED_USERS`, dev only)
 
@@ -266,16 +251,16 @@ Build the SPA and validate the config without uploading:
 
 ```bash
 npm run build                      # vite build -> dist/ (served as Worker assets)
-npx wrangler deploy --dry-run      # bundles and validates bindings/vars/crons
+npx wrangler deploy --dry-run --config wrangler.toml   # validates bindings/vars/crons
 ```
 
 Deploy:
 
 ```bash
-npx wrangler deploy
+npx wrangler deploy --config wrangler.toml
 ```
 
-Or use the combined script: `npm run deploy` (build + deploy).
+Or use the combined script: `npm run deploy` (build + deploy). Prefer the explicit `--config wrangler.toml` — see the multi-environment note below.
 
 > **Important (multi-environment).** The `@cloudflare/vite-plugin` generates
 > `dist/cf_ai_gateway/wrangler.json` during `vite build` and wrangler
@@ -293,7 +278,7 @@ routes = [
 ]
 ```
 
-`custom_domain = true` auto-creates the domain (with TLS certificate) on the next `wrangler deploy`. Note: `wrangler v4` **removed** the `wrangler domains add` subcommand — configuration-declared routes are the supported path. If the final origin differs from `BETTER_AUTH_URL` (and the GitHub callback URL), update `wrangler.toml [vars]` and redeploy before continuing.
+`custom_domain = true` auto-creates the domain (with TLS certificate) on the next `wrangler deploy`. Note: `wrangler v4` **removed** the `wrangler domains add` subcommand — configuration-declared routes are the supported path. If the final origin differs from `BETTER_AUTH_URL` (and the GitHub callback URL), update the variable on the deployment side (or `DOMAIN` in `.dev.vars` + `npm run render:config` for the route) and redeploy before continuing.
 
 ---
 
@@ -341,10 +326,11 @@ Two fully isolated environments are configured: **production** (top-level `wrang
 Environment-specific commands — repeat each step per environment with `--env`:
 
 ```bash
-# create resources (once per environment)
-npx wrangler d1 create cf-ai-gateway-db-staging          # copy database_id into [env.staging]
-npx wrangler kv namespace create CACHE_KV --env staging  # copy id into [env.staging]
-npx wrangler queues create usage-aggregation-staging
+# create resources (once per environment) — copy ids into .dev.vars as STAGING_* tokens,
+# then run `npm run render:config` (staging: `npm run render:config -- --env staging` reads .dev.vars.staging)
+npx wrangler d1 create cf-ai-gateway-db-staging          # copy database_id into STAGING_D1_DB_ID
+npx wrangler kv namespace create CACHE_KV --env staging  # copy id into STAGING_KV_ID
+npx wrangler queues create usage-aggregation-staging     # set STAGING_QUEUE_NAME
 
 # migrate + seed (per environment)
 npx wrangler d1 migrations apply cf-ai-gateway-db-staging --remote --env staging

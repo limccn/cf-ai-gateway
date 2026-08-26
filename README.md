@@ -73,11 +73,15 @@ npm install
 # 1. Create .dev.vars (gitignored) from the committed template —
 #    cp .dev.vars.example .dev.vars and fill in local values (see docs/DEPLOY.md §5.3–5.4)
 
-# 2. Prepare the local D1 database
+# 2. Render wrangler.toml from the template (gitignored generated file —
+#    never edit it by hand; infra values come from .dev.vars, see docs/CONFIG-INVENTORY.md)
+npm run render:config
+
+# 3. Prepare the local D1 database
 npm run db:migrate     # apply Drizzle migrations
 npm run db:seed        # seed the default model price table (idempotent)
 
-# 3. Start the dev server (Worker API + React SPA + Miniflare bindings)
+# 4. Start the dev server (Worker API + React SPA + Miniflare bindings)
 npm run dev            # http://localhost:5173
 ```
 
@@ -97,6 +101,7 @@ npx wrangler d1 execute cf-ai-gateway-db --local \
 
 | Command | Purpose |
 | --- | --- |
+| `npm run render:config` | Render `wrangler.toml` from `wrangler.toml.template` + `.dev.vars` (idempotent; auto-runs before dev/test/deploy/db:*) |
 | `npm run dev` | Vite dev server (Worker + SPA, Miniflare bindings) |
 | `npm run build` | Build the React SPA (Vite) into `dist/` |
 | `npm test` | Vitest suite (unit + integration, Miniflare: D1/KV/Queues) |
@@ -148,8 +153,11 @@ npx wrangler deploy --config wrangler.toml --env staging
 
 Deployment from scratch (create D1 / KV / Queue → migrate → secrets → GitHub
 OAuth App → first admin bootstrap → deploy → verify) is documented in
-**[`docs/DEPLOY.md`](./docs/DEPLOY.md)**. The repository ships with a complete
-`wrangler.toml`; validate without uploading via `npx wrangler deploy --dry-run`.
+**[`docs/DEPLOY.md`](./docs/DEPLOY.md)**. The repository ships with
+`wrangler.toml.template` + `.dev.vars.example` — `wrangler.toml` is a gitignored
+generated file, so run `npm run render:config` (or `npm install` + pre-hooks)
+before any deploy. Validate without uploading via
+`npx wrangler deploy --dry-run --config wrangler.toml`.
 
 ## API overview
 
