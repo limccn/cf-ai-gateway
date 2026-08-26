@@ -29,6 +29,7 @@ export function createProviderRoute(app: Hono<AppEnv>): void {
         apiKeyPrefix: extractSecretPrefix(body.apiKey),
         models: JSON.stringify(body.models),
         enabled: body.enabled,
+        weight: body.weight,
       })
       .returning();
     if (!provider) {

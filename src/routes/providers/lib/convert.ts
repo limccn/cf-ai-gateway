@@ -19,6 +19,7 @@ export function toProviderResponse(provider: Provider): ProviderResponse {
     // 仅用明文前缀脱敏展示（如 `sk-mock-ope****`）；AES-GCM 密文永不下发
     apiKeyMasked: maskSecret(provider.apiKeyPrefix),
     models,
+    weight: typeof provider.weight === "number" ? provider.weight : 1,
     enabled: provider.enabled,
     createdAt: provider.createdAt.toISOString(),
   };

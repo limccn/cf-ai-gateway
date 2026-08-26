@@ -77,6 +77,7 @@ const providerFormSchema = z.object({
   baseUrl: z.string().url("Enter a valid URL").max(500),
   apiKey: z.string().min(1, "API key is required").max(1000),
   models: modelsMapTextSchema,
+  weight: z.coerce.number().int("Must be a whole number").min(1, "Min 1").max(1000, "Max 1000"),
   enabled: z.boolean(),
 });
 
@@ -101,6 +102,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [modelsText, setModelsText] = useState("");
+  const [weight, setWeight] = useState(1);
   const [enabled, setEnabled] = useState(true);
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
 
@@ -113,6 +115,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       setBaseUrl(editing?.baseUrl ?? "");
       setApiKey("");
       setModelsText(editing ? modelsToText(editing.models) : "");
+      setWeight(editing?.weight ?? 1);
       setEnabled(editing?.enabled ?? true);
       setErrors({});
     }
@@ -130,6 +133,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       baseUrl,
       apiKey,
       models: modelsText,
+      weight,
       enabled,
     };
     if (editing) {
@@ -253,10 +257,30 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
           />
           {errors.models ? <p className="text-xs text-destructive">{errors.models}</p> : null}
         </div>
-        <label className="flex items-center gap-2 text-sm">
-          <Checkbox checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          Provider enabled (requests can be routed to it)
-        </label>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label htmlFor="provider-weight">Weight (load balance)</Label>
+            <Input
+              id="provider-weight"
+              type="number"
+              min={1}
+              max={1000}
+              value={weight}
+              onChange={(e) => setWeight(e.target.valueAsNumber || 0)}
+              aria-invalid={errors.weight !== undefined}
+            />
+            <p className="text-xs text-muted-foreground">
+              Requests are split across providers sharing a model proportionally to weight (1-1000).
+            </p>
+            {errors.weight ? <p className="text-xs text-destructive">{errors.weight}</p> : null}
+          </div>
+          <div className="flex items-end pb-1">
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+              Provider enabled (requests can be routed to it)
+            </label>
+          </div>
+        </div>
         {errors.root ? <p className="text-xs text-destructive">{errors.root}</p> : null}
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isBusy}>
@@ -317,6 +341,7 @@ export default function ProvidersPage() {
                 <TableHead>Base URL</TableHead>
                 <TableHead>Key</TableHead>
                 <TableHead>Models</TableHead>
+                <TableHead>Weight</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
@@ -344,9 +369,19 @@ export default function ProvidersPage() {
                     </span>
                   </TableCell>
                   <TableCell>
-                    <Badge variant={provider.enabled ? "success" : "muted"}>
-                      {provider.enabled ? "enabled" : "disabled"}
-                    </Badge>
+                    <span className="text-xs text-muted-foreground">{provider.weight ?? 1}</span>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge variant={provider.enabled ? "success" : "muted"}>
+                        {provider.enabled ? "enabled" : "disabled"}
+                      </Badge>
+                      {provider.circuitBroken ? (
+                        <Badge variant="destructive" title={`Circuit open since ${provider.circuitReason}`}>
+                          circuit open ({provider.circuitReason})
+                        </Badge>
+                      ) : null}
+                    </div>
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(provider.createdAt)}
