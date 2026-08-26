@@ -1,0 +1,155 @@
+// 应用主布局（M6 6.2）：受保护路由 + 侧边导航（member/admin 视角菜单隔离）。
+// 认证守卫：isMounted → isPending → 未登录重定向 /login；停用账号提示登出。
+import type { ReactNode } from "react";
+import {
+  BarChart3,
+  KeyRound,
+  LayoutDashboard,
+  Server,
+  Settings,
+  ShieldCheck,
+  Tag,
+  Users,
+  Wallet,
+} from "lucide-react";
+import { Navigate, NavLink, Outlet, useLocation } from "react-router";
+import { useSession } from "@/hooks/use-session";
+import { authClient } from "@/lib/auth-client";
+import { queryClient } from "@/lib/query-client";
+import { cn } from "@/lib/utils";
+import { PageLoading } from "@/components/ui/states";
+import { Button } from "@/components/ui/button";
+import { UserButton } from "./user-button";
+
+interface NavItem {
+  to: string;
+  label: string;
+  icon: ReactNode;
+  adminOnly?: boolean;
+  end?: boolean;
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { to: "/dashboard", label: "Dashboard", icon: <LayoutDashboard />, end: true },
+  { to: "/keys", label: "API Keys", icon: <KeyRound /> },
+  { to: "/billing", label: "Billing", icon: <Wallet /> },
+  { to: "/usage", label: "Usage", icon: <BarChart3 /> },
+  { to: "/providers", label: "Providers", icon: <Server />, adminOnly: true },
+  { to: "/models", label: "Models", icon: <Tag />, adminOnly: true },
+  { to: "/users", label: "Users", icon: <Users />, adminOnly: true },
+  { to: "/settings", label: "Settings", icon: <Settings />, adminOnly: true },
+];
+
+export function AppLayout() {
+  const { isMounted, isPending, user } = useSession();
+  const location = useLocation();
+
+  if (!isMounted || isPending) {
+    return (
+      <div className="min-h-screen">
+        <PageLoading />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+
+  if (user.status === "disabled") {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-8 text-center">
+        <h1 className="text-lg font-semibold">Account disabled</h1>
+        <p className="text-sm text-muted-foreground">
+          Your account has been disabled by an administrator. Please contact support.
+        </p>
+        <Button
+          variant="outline"
+          onClick={async () => {
+            await authClient.signOut();
+            queryClient.clear();
+          }}
+        >
+          Sign out
+        </Button>
+      </div>
+    );
+  }
+
+  const visibleItems = NAV_ITEMS.filter((item) => !item.adminOnly || user.role === "admin");
+
+  return (
+    <div className="min-h-screen">
+      {/* 移动端顶部导航 */}
+      <nav className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur md:hidden" aria-label="Mobile navigation">
+        <div className="flex items-center justify-between px-4 py-3">
+          <LinkBrand />
+          <UserButton />
+        </div>
+        <div className="flex gap-1 overflow-x-auto px-4 pb-2">
+          {visibleItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) =>
+                cn(
+                  "whitespace-nowrap rounded-md px-3 py-1.5 text-sm",
+                  isActive ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted",
+                )
+              }
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+      </nav>
+
+      <div className="flex">
+        {/* 桌面侧边栏 */}
+        <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r md:flex">
+          <div className="flex h-14 items-center border-b px-5">
+            <LinkBrand />
+          </div>
+          <nav className="flex-1 space-y-1 overflow-y-auto p-3" aria-label="Main navigation">
+            {visibleItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                    isActive
+                      ? "bg-primary/15 text-primary"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )
+                }
+              >
+                <span className="[&_svg]:size-4">{item.icon}</span>
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+          <div className="border-t p-3">
+            <UserButton />
+          </div>
+        </aside>
+
+        {/* 主内容 */}
+        <main className="min-w-0 flex-1">
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function LinkBrand() {
+  return (
+    <NavLink to="/dashboard" className="flex items-center gap-2">
+      <ShieldCheck className="size-5 text-primary" aria-hidden="true" />
+      <span className="text-sm font-semibold tracking-tight">AI API Gateway</span>
+    </NavLink>
+  );
+}

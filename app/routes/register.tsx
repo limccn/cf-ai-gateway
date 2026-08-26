@@ -1,0 +1,152 @@
+// /register — 注册页（M6 6.2）。
+// 邀请码注册：后端 validateUserInfo 要求 email/password signup 使用 invite code，
+// 客户端 types 不知道 additionalFields，用 spread 技巧传递。
+import { useState, type FormEvent } from "react";
+import { Link, Navigate, useNavigate } from "react-router";
+import { z } from "zod";
+import { authClient } from "@/lib/auth-client";
+import { useSession } from "@/hooks/use-session";
+import { useMounted } from "@/hooks/use-mounted";
+import { AuthCard } from "@/components/layout/auth-card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+
+const registerFormSchema = z.object({
+  name: z.string().min(1, "Name is required").max(64, "Name must be 64 characters or fewer"),
+  email: z.string().email("Enter a valid email address"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
+  inviteCode: z.string().min(1, "An invite code is required"),
+});
+
+type RegisterForm = z.infer<typeof registerFormSchema>;
+
+export default function RegisterPage() {
+  const isMounted = useMounted();
+  const { user } = useSession();
+  const navigate = useNavigate();
+
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [errors, setErrors] = useState<Partial<Record<keyof RegisterForm, string>>>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  if (!isMounted) {
+    return <div className="min-h-screen" aria-hidden="true" />;
+  }
+  if (user) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFormError(null);
+    const parsed = registerFormSchema.safeParse({ name, email, password, inviteCode });
+    if (!parsed.success) {
+      const next: Partial<Record<keyof RegisterForm, string>> = {};
+      for (const issue of parsed.error.issues) {
+        const key = issue.path[0] as keyof RegisterForm;
+        if (key !== undefined && next[key] === undefined) {
+          next[key] = issue.message;
+        }
+      }
+      setErrors(next);
+      return;
+    }
+    setErrors({});
+    setIsSubmitting(true);
+    try {
+      const { error } = await authClient.signUp.email({
+        email: parsed.data.email,
+        password: parsed.data.password,
+        name: parsed.data.name,
+        ...(parsed.data.inviteCode.length > 0 ? { inviteCode: parsed.data.inviteCode } : {}),
+      });
+      if (error) {
+        setFormError(error.message ?? "Registration failed");
+        return;
+      }
+      navigate("/dashboard", { replace: true });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <AuthCard
+      title="Create your account"
+      description="You need an invite code to join this gateway"
+      footer={
+        <>
+          Already have an account?{" "}
+          <Link to="/login" className="font-medium text-primary hover:underline">
+            Sign in
+          </Link>
+        </>
+      }
+    >
+      <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+        {formError ? (
+          <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {formError}
+          </p>
+        ) : null}
+        <div className="space-y-2">
+          <Label htmlFor="register-name">Name</Label>
+          <Input
+            id="register-name"
+            autoComplete="name"
+            placeholder="Ada Lovelace"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            aria-invalid={errors.name !== undefined}
+          />
+          {errors.name ? <p className="text-xs text-destructive">{errors.name}</p> : null}
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="register-email">Email</Label>
+          <Input
+            id="register-email"
+            type="email"
+            autoComplete="email"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            aria-invalid={errors.email !== undefined}
+          />
+          {errors.email ? <p className="text-xs text-destructive">{errors.email}</p> : null}
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="register-password">Password</Label>
+          <Input
+            id="register-password"
+            type="password"
+            autoComplete="new-password"
+            placeholder="At least 8 characters"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            aria-invalid={errors.password !== undefined}
+          />
+          {errors.password ? <p className="text-xs text-destructive">{errors.password}</p> : null}
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="register-invite">Invite code</Label>
+          <Input
+            id="register-invite"
+            placeholder="XXXX-XXXX-XXXX"
+            value={inviteCode}
+            onChange={(e) => setInviteCode(e.target.value)}
+            aria-invalid={errors.inviteCode !== undefined}
+          />
+          {errors.inviteCode ? <p className="text-xs text-destructive">{errors.inviteCode}</p> : null}
+        </div>
+        <Button type="submit" className="w-full" disabled={isSubmitting}>
+          {isSubmitting ? "Creating account…" : "Create account"}
+        </Button>
+      </form>
+    </AuthCard>
+  );
+}
