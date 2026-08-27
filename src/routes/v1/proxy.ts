@@ -66,6 +66,30 @@ const PATH_BY_KIND: Record<EndpointKind, string> = {
   embeddings: "/embeddings",
 };
 
+/**
+ * 协议端点注入点（P1）：新协议入口（/anthropic、/v1/messages、/v1/responses）
+ * 通过它复用共享代理管道。全部选项有默认语义，现有三端点（proxyRoute 薄包装）
+ * 不传任何协议选项，行为逐字节不变。
+ */
+export interface ProxyEndpointOptions<B = Record<string, unknown>> {
+  /** 入站请求体 zod 校验（宽松 passthrough 风格，见 routes/v1/types.ts）。 */
+  inputSchema: ZodType;
+  /** 内部 EndpointKind：新协议入口恒为 "chat"（anthropic 适配器 supports() 只放行 chat）；默认 "chat"。 */
+  kind?: EndpointKind;
+  /** 入站协议 → 内部 OpenAI Chat 形态；默认恒等（chat/completions/embeddings 端点）。 */
+  toInternal?: (body: B) => B;
+  /** 非流式出站协议转换（在 adapter.transformResponse 正向转换之后执行）；默认恒等。 */
+  transformResponse?: (data: unknown, c: Context<AppEnv>) => unknown;
+  /** 流式出站协议转换（在 wrapStreamWithSettlement 结算包装之后执行）；默认恒等。 */
+  transformStream?: (stream: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>;
+  /** 缓存键协议命名空间前缀（协议间隔离，如 "anthropic:"）；默认 ""（现有端点键不变）。 */
+  cachePrefix?: string;
+  /** 入站协议偏好的 provider 类型：模型路由优先匹配同类型 provider（如 Anthropic 协议
+   * → type=anthropic 的 provider 原生转发，OpenAI 协议 → type=openai），无同类型命中
+   * 时回退按 id 升序全量匹配（既有配置零回归）。默认不限定（行为不变）。 */
+  providerType?: ProviderType;
+}
+
 interface ResolvedProvider {
   providerId: number;
   type: string;
@@ -74,26 +98,46 @@ interface ResolvedProvider {
   models: Record<string, string>;
 }
 
-/** 模型路由：按 provider id 升序找第一个 enabled 且 models 映射包含该内部模型名的 Provider。 */
-async function resolveProvider(db: Db, model: string): Promise<ResolvedProvider | null> {
+/**
+ * 模型路由：优先匹配 preferredType 的同类型 Provider（协议原生转发，如 Anthropic 协议
+ * → 上游 /anthropic 端点）；无同类型命中时回退按 id 升序全量匹配（仅配 openai/anthropic
+ * 单面 provider 的既有配置行为不变）。两趟均按 id 升序保证确定性。
+ */
+async function resolveProvider(
+  db: Db,
+  model: string,
+  preferredType?: ProviderType,
+): Promise<ResolvedProvider | null> {
   const rows = await db
     .select()
     .from(providers)
     .where(eq(providers.enabled, true))
     .orderBy(asc(providers.id));
-  for (const row of rows) {
-    const models = parseProviderModels(row.models);
-    if (models[model] !== undefined) {
-      return {
-        providerId: row.id,
-        type: row.type,
-        baseUrl: row.baseUrl,
-        apiKeyEnc: row.apiKeyEnc,
-        models,
-      };
+  const tryMatch = (wantType: ProviderType | null): ResolvedProvider | null => {
+    for (const row of rows) {
+      if (wantType !== null && row.type !== wantType) {
+        continue;
+      }
+      const models = parseProviderModels(row.models);
+      if (models[model] !== undefined) {
+        return {
+          providerId: row.id,
+          type: row.type,
+          baseUrl: row.baseUrl,
+          apiKeyEnc: row.apiKeyEnc,
+          models,
+        };
+      }
+    }
+    return null;
+  };
+  if (preferredType !== undefined) {
+    const preferred = tryMatch(preferredType);
+    if (preferred !== null) {
+      return preferred;
     }
   }
-  return null;
+  return tryMatch(null);
 }
 
 const INPUT_SCHEMAS: Record<EndpointKind, ZodType> = {
@@ -115,13 +159,27 @@ function enqueueUsage(c: Context<AppEnv>, log: RequestLogRecord): void {
   c.executionCtx.waitUntil(enqueueUsageEvent(c.env.USAGE_QUEUE, log));
 }
 
-export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
+export function proxyRouteWithOptions(
+  app: Hono<AppEnv>,
+  path: string,
+  options: ProxyEndpointOptions,
+): void {
+  const {
+    inputSchema,
+    kind = "chat",
+    toInternal,
+    transformResponse,
+    transformStream,
+    cachePrefix = "",
+    providerType,
+  } = options;
+
   app.post(
-    PATH_BY_KIND[kind],
+    path,
     gatewayRateLimit(),
     gatewayBalanceCheck(),
     // 校验失败 400 由 src/index.ts 全局中间件统一为 {error:{message}}（M8）
-    zValidator("json", INPUT_SCHEMAS[kind]),
+    zValidator("json", inputSchema),
     async (c) => {
       const logger = c.get("logger");
       const auth = c.get("gatewayAuth");
@@ -129,7 +187,9 @@ export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
         // gatewayAuth 先挂载，正常不会走到；防御性兜底
         return c.json({ error: { message: "Unauthorized" } }, 401);
       }
-      const body = c.req.valid("json") as Record<string, unknown>;
+      const rawBody = c.req.valid("json") as Record<string, unknown>;
+      // 入站协议 → 内部 OpenAI Chat 形态（P1；缓存键仍以原始入站 body 为准，协议隔离由 cachePrefix 负责）
+      const body = toInternal ? toInternal(rawBody) : rawBody;
       const model = typeof body["model"] === "string" ? body["model"] : "";
       const stream = body["stream"] === true;
       const db = createDb(c.env);
@@ -139,8 +199,8 @@ export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
       const cacheable = !stream && auth.key.cacheEnabled;
       let cacheKey: string | null = null;
       if (cacheable) {
-        const bodyHash = await hashRequestBody(body);
-        cacheKey = buildCacheKey(auth.key.id, model, bodyHash);
+        const bodyHash = await hashRequestBody(rawBody);
+        cacheKey = buildCacheKey(auth.key.id, model, bodyHash, cachePrefix);
         const cached = await getCachedResponse(c.env.CACHE_KV, cacheKey);
         if (cached !== null) {
           logger.info("cache_hit", { keyId: auth.key.id, model });
@@ -158,8 +218,8 @@ export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
         }
       }
 
-      // 4. 模型路由
-      const resolved = await resolveProvider(db, model);
+      // 4. 模型路由（协议偏好：优先同类型 provider 原生转发，无命中回退全量）
+      const resolved = await resolveProvider(db, model, providerType);
       if (!resolved) {
         logger.warn("model_not_routed", { model, keyId: auth.key.id });
         const rejectedLog: RequestLogRecord = {
@@ -218,7 +278,7 @@ export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
         );
       }
 
-      // 适配器构造上游请求
+      // 适配器构造上游请求（内部形态恒为 OpenAI Chat Completions 兼容，P1）
       const internalReq: InternalRequest = { kind, body, model, stream };
       const cfg: ProviderConfig = {
         type: resolved.type as ProviderType,
@@ -357,7 +417,9 @@ export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
           model,
           keyId: auth.key.id,
         });
-        return new Response(settled, {
+        // P1：协议出站流式转换（默认恒等；结算包装在前，与输出格式正交）
+        const outboundStream = transformStream ? transformStream(settled) : settled;
+        return new Response(outboundStream, {
           headers: {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
@@ -390,8 +452,10 @@ export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
         enqueueUsage(c, nonJsonLog);
         return c.json({ error: { message: "Upstream returned a non-JSON response" } }, 502);
       }
+      // P1：适配器正向转换在前（OpenAI 透传 / Anthropic 格式转换），协议出站转换在最后
       const output =
         adapter.transformResponse !== undefined ? adapter.transformResponse(data) : data;
+      const outbound = transformResponse !== undefined ? transformResponse(output, c) : output;
 
       // 7. 计费（成功）：usage → 价格 → 费用 → 条件 UPDATE 原子扣费 + 流水 + 明细
       const usage = adapter.parseUsage(data) ?? extractLooseUsage(data);
@@ -426,10 +490,10 @@ export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
         });
       }
 
-      // 8. 缓存写（非阻塞，不拖慢响应）
+      // 8. 缓存写（非阻塞，不拖慢响应）；缓存内容 = 协议出站形态的响应（P3）
       if (cacheKey !== null) {
         c.executionCtx.waitUntil(
-          setCachedResponse(c.env.CACHE_KV, cacheKey, output, auth.key.cacheTtl),
+          setCachedResponse(c.env.CACHE_KV, cacheKey, outbound, auth.key.cacheTtl),
         );
       }
 
@@ -440,7 +504,18 @@ export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
         cost,
         charged: charge.charged,
       });
-      return c.json(output);
+      return c.json(outbound);
     },
   );
+}
+
+/** 现有三端点薄包装（P1）：默认参数（恒等 toInternal / 出站转换、空缓存前缀），行为逐字节不变。
+ * providerType: "openai" 为协议偏好：OpenAI 面请求优先 openai provider；仅配 anthropic
+ * provider 时回退命中（既有 claude 上游配置行为不变）。 */
+export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
+  proxyRouteWithOptions(app, PATH_BY_KIND[kind], {
+    inputSchema: INPUT_SCHEMAS[kind],
+    kind,
+    providerType: "openai",
+  });
 }

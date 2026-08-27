@@ -47,7 +47,7 @@ npm run db:seed         # wrangler d1 execute cf-ai-gateway-db --local --file=./
 npm run dev             # Vite dev server: http://localhost:5173 (API at /api/*, /v1/*)
 ```
 
-`npm run render:config` is idempotent and runs automatically before `dev`/`test`/`deploy`/`db:*` (pre-hooks); re-run it explicitly whenever you change infra values in `.dev.vars`. During `wrangler dev`, values from `.dev.vars` take precedence over `[vars]` in `wrangler.toml`, so the placeholder values below do not affect local development.
+`npm run render:config` is idempotent and runs automatically before `dev`/`test`/`deploy`/`db:*` (pre-hooks); re-run it explicitly whenever you change values in `.dev.vars`. During `wrangler dev`, values from `.dev.vars` take precedence over `[vars]` in `wrangler.toml`, so the local default values baked from `.dev.vars` do not affect local development.
 
 ---
 
@@ -121,11 +121,11 @@ npx wrangler d1 execute cf-ai-gateway-db --remote --command "SELECT COUNT(*) AS 
 
 ## Step 5 — Configure environment variables and secrets
 
-Cloudflare Workers read runtime values through the request context (`c.env.*`). The repo keeps **no individual-person data or credentials in `wrangler.toml`**: PII/environment-specific values are declared as `"{KEY}"` placeholders resolved from `.dev.vars` (local), Cloudflare side vars/secrets, or shell exports at deploy time. Sensitive values are set with `wrangler secret put` (encrypted, never stored in the repo). Resource names/IDs (D1/KV/Queue), the Worker name, and custom domains are infrastructure identifiers (not secrets) but Wrangler requires them as TOML literals — since `wrangler.toml` is generated, manage them in `.dev.vars` (tokens `WORKER_NAME` / `DOMAIN` / `D1_DB_NAME` / `D1_DB_ID` / `KV_ID` / `QUEUE_NAME` + `STAGING_*` variants) and run `npm run render:config`.
+Cloudflare Workers read runtime values through the request context (`c.env.*`). The repo keeps **no individual-person data or credentials in `wrangler.toml`**: PII/environment-specific values are baked into the generated file at **render time** from `.dev.vars` / shell exports (`process.env` wins), so the committed tree stays clean. Sensitive values are set with `wrangler secret put` (encrypted, never stored in the repo). Resource names/IDs (D1/KV/Queue), the Worker name, custom domains, **and `[vars]` runtime values** are all TOML literals — since `wrangler.toml` is generated, manage them in `.dev.vars` (tokens `WORKER_NAME` / `DOMAIN` / `D1_DB_NAME` / `D1_DB_ID` / `KV_ID` / `QUEUE_NAME` / `BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `GITHUB_ALLOWED_EMAILS` / `REQUEST_LOG_RETENTION_DAYS` / `API_KEY_PREFIX` + `STAGING_*` variants) and run `npm run render:config`.
 
-### 5.1 Variables (`wrangler.toml [vars]`, `"{KEY}"` placeholders)
+### 5.1 Variables (`wrangler.toml [vars]` — baked at render time)
 
-Declared as placeholders in `wrangler.toml` — **set each value on the Worker side before deploying** (dashboard → Settings → Variables, as a plain-text var or encrypted secret; a secret with the same name also resolves the placeholder).
+> **Note (verified 2026-08-26):** wrangler 4.125.0 does **not** interpolate `"{KEY}"` placeholders — `wrangler deploy --dry-run` shows `env.FOO ("{TEST_FOO}")` verbatim, and the literal placeholder reaches the running Worker. Values therefore **must** be baked into `wrangler.toml` by `npm run render:config` before deploying. The render script fails fast on missing values and warns when a value looks like a local placeholder (`localhost` / `placeholder-` / `@example.com`) — override for deployments by exporting the same-named env var in the deploy shell (e.g. `export BETTER_AUTH_URL=https://router.lmlh.net GITHUB_CLIENT_ID=... ... && npm run render:config && npm run deploy`).
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
@@ -134,7 +134,7 @@ Declared as placeholders in `wrangler.toml` — **set each value on the Worker s
 | `GITHUB_ALLOWED_EMAILS` | GitHub login | Comma-separated email whitelist. Empty means **all GitHub logins are rejected** (fail-closed). |
 | `REQUEST_LOG_RETENTION_DAYS` | No (default `30`) | Retention in days for `request_logs` detail rows, enforced by the daily cleanup cron. |
 
-> Missing placeholders fail the deploy (fail-fast) — a good safety net. For CI deploys you can also `export BETTER_AUTH_URL=...` etc. in the shell; `.dev.vars` is only read for local commands, **not** for `wrangler deploy`.
+> Staging uses the same mechanism with `STAGING_*` keys: `npm run render:config -- --env staging` renders `[env.staging.vars]` from `STAGING_BETTER_AUTH_URL` / `STAGING_GITHUB_CLIENT_ID` / `STAGING_GITHUB_ALLOWED_EMAILS` / `STAGING_REQUEST_LOG_RETENTION_DAYS` / `STAGING_API_KEY_PREFIX` (same sources, `STAGING_*` overrides the shared keys). A missing value fails the render (fail-fast) — the deploy never runs with a placeholder.
 
 ### 5.2 Sensitive secrets (`wrangler secret put`)
 
@@ -204,7 +204,7 @@ npm run seed:users
    https://<your-domain>/api/auth/callback/github
    ```
    The origin must match `BETTER_AUTH_URL` — this is the Better Auth social-provider callback path. A mismatch shows a `redirect_uri` error from GitHub.
-4. Set the **Client ID** on the deployment as a Worker variable: dashboard → Settings → Variables (plain text) in the same environment, or export `GITHUB_CLIENT_ID` in the deploy shell — `wrangler.toml` resolves `"{GITHUB_CLIENT_ID}"` from either.
+4. Set the **Client ID** by exporting `GITHUB_CLIENT_ID` (staging: `STAGING_GITHUB_CLIENT_ID`) in the deploy shell and re-rendering — `npm run render:config` bakes it into `[vars]` (wrangler does not resolve `{KEY}` at deploy time).
 5. Generate a **Client secret** and set it:
    ```bash
    npx wrangler secret put GITHUB_CLIENT_SECRET
@@ -327,7 +327,7 @@ Environment-specific commands — repeat each step per environment with `--env`:
 
 ```bash
 # create resources (once per environment) — copy ids into .dev.vars as STAGING_* tokens,
-# then run `npm run render:config` (staging: `npm run render:config -- --env staging` reads .dev.vars.staging)
+# then run `npm run render:config` (staging: `npm run render:config -- --env staging` resolves STAGING_* tokens from .dev.vars / env)
 npx wrangler d1 create cf-ai-gateway-db-staging          # copy database_id into STAGING_D1_DB_ID
 npx wrangler kv namespace create CACHE_KV --env staging  # copy id into STAGING_KV_ID
 npx wrangler queues create usage-aggregation-staging     # set STAGING_QUEUE_NAME

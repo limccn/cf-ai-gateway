@@ -24,8 +24,17 @@ export async function hashRequestBody(body: Record<string, unknown>): Promise<st
   return hashToken(JSON.stringify(normalizeJson(body)));
 }
 
-export function buildCacheKey(keyId: number, model: string, bodyHash: string): string {
-  return `${CACHE_PREFIX}${keyId}:${model}:${bodyHash}`;
+/**
+ * 缓存键 = 协议前缀（默认空，协议间隔离如 "anthropic:"）+ keyId + model + body hash。
+ * prefix 参数为末尾可选，向后兼容既有 3 参调用（现有端点键逐字节不变）。
+ */
+export function buildCacheKey(
+  keyId: number,
+  model: string,
+  bodyHash: string,
+  prefix = "",
+): string {
+  return `${CACHE_PREFIX}${prefix}${keyId}:${model}:${bodyHash}`;
 }
 
 export async function getCachedResponse(

@@ -1,0 +1,54 @@
+// stg 环境 E2E 自举（D1 直插，绕过认证流程）：
+// 创建 admin 测试用户 + member 测试用户 + 网关 API Key（明文仅本脚本内存，落库 sha256）。
+// 幂等：按 email 查重跳过。用法：node scripts/stg-e2e-bootstrap.mjs
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { createHash, randomBytes } from "node:crypto";
+
+const DB = "cf-ai-gateway-db-staging";
+const WRANGLER_JS = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
+const BASE = process.env.BASE_URL ?? "https://stg-router.lmlh.net";
+
+const ADMIN = { email: "e2e-admin@staging.test", name: "E2E Admin", role: "admin", balance: 50 };
+const MEMBER = { email: "e2e-user@staging.test", name: "E2E User", role: "member", balance: 20 };
+
+const q = (sql) => JSON.parse(execFileSync(process.execPath,
+  [WRANGLER_JS, "d1", "execute", DB, "--remote", "--env", "staging", "--config", "wrangler.toml",
+    "--command", sql, "--json"], { encoding: "utf8" }))[0]?.results ?? [];
+
+const now = Math.floor(Date.now() / 1000);
+
+function ensureUser(u) {
+  const existing = q(`SELECT id FROM users WHERE email='${u.email}' LIMIT 1;`);
+  if (existing[0]) { console.log(`[bootstrap] user exists: ${u.email} id=${existing[0].id}`); return existing[0].id; }
+  const sql = `INSERT INTO users (email, name, role, status, balance, email_verified, created_at, updated_at)
+    VALUES ('${u.email}', '${u.name}', '${u.role}', 'active', ${u.balance}, 1, ${now}, ${now});`;
+  execFileSync(process.execPath, [WRANGLER_JS, "d1", "execute", DB, "--remote", "--env", "staging", "--config", "wrangler.toml", "--command", sql], { stdio: "inherit" });
+  const row = q(`SELECT id FROM users WHERE email='${u.email}' LIMIT 1;`)[0];
+  console.log(`[bootstrap] user created: ${u.email} id=${row.id} role=${u.role} balance=${u.balance}`);
+  return row.id;
+}
+
+const adminId = ensureUser(ADMIN);
+const memberId = ensureUser(MEMBER);
+
+// 网关 API Key（member 所有）：明文 sk-e2e-... 仅本进程内存，落库 sha256 hex。
+let keyPlain = null;
+const keyRows = q(`SELECT id, hash FROM api_keys WHERE user_id=${memberId} AND name='e2e-test';`);
+if (keyRows[0]) {
+  console.log(`[bootstrap] api key exists id=${keyRows[0].id}（明文不可恢复，重新生成）`);
+  execFileSync(process.execPath, [WRANGLER_JS, "d1", "execute", DB, "--remote", "--env", "staging", "--config", "wrangler.toml",
+    "--command", `DELETE FROM api_keys WHERE id=${keyRows[0].id};`], { stdio: "inherit" });
+}
+keyPlain = `sk-e2e-${randomBytes(16).toString("hex")}`;
+const hash = createHash("sha256").update(keyPlain).digest("hex");
+const prefix = keyPlain.slice(0, 8);
+execFileSync(process.execPath, [WRANGLER_JS, "d1", "execute", DB, "--remote", "--env", "staging", "--config", "wrangler.toml",
+  "--command", `INSERT INTO api_keys (user_id, name, hash, prefix, status, qps_limit, cache_enabled, cache_ttl, created_at)
+    VALUES (${memberId}, 'e2e-test', '${hash}', '${prefix}', 'active', 60, 0, 3600, ${now});`], { stdio: "inherit" });
+
+console.log(`[bootstrap] api key created for member id=${memberId}`);
+console.log(`KEY=${keyPlain}`);
+console.log(`ADMIN_ID=${adminId}`);
+console.log(`MEMBER_ID=${memberId}`);
+console.log(`BASE=${BASE}`);

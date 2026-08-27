@@ -177,17 +177,42 @@ Management API (session auth, roles `admin`/`member`):
 | `/api/admin/settings` | admin | Runtime defaults (read-only) |
 | `/api/health` | public | Liveness probe |
 
-Proxy API (gateway-key auth, OpenAI-compatible):
+Proxy API (gateway-key auth, three protocol entry points):
 
-| Endpoint | Description |
-| --- | --- |
-| `POST /v1/chat/completions` | Chat completions (streaming + non-streaming) |
-| `POST /v1/completions` | Text completions |
-| `POST /v1/embeddings` | Embeddings |
-| `GET /v1/models` | Configured model list |
+| Endpoint | Protocol | Description |
+| --- | --- | --- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | Chat completions (streaming + non-streaming) |
+| `POST /v1/completions` | OpenAI | Text completions |
+| `POST /v1/embeddings` | OpenAI | Embeddings |
+| `GET /v1/models` | OpenAI | Configured model list |
+| `POST /v1/messages` | Anthropic Messages | Anthropic Messages API (same converter as `/anthropic`) |
+| `POST /v1/responses` | OpenAI Responses | Responses API (streaming SSE has no `[DONE]` terminator, per official protocol) |
+| `POST /anthropic/v1/messages` | Anthropic Messages | Anthropic Messages API — official Anthropic SDK baseURL target |
+| `POST /anthropic/messages` | Anthropic Messages | Alias of the above (pathless SDK baseURLs) |
 
-Errors follow the OpenAI style `{ "error": { "message": "..." } }` on both
-surfaces, including Zod validation failures.
+Errors follow the protocol of the entry point: OpenAI style
+`{ "error": { "message": "..." } }` on the `/v1/*` surfaces (including Zod
+validation failures), Anthropic style `{ "type": "error", "error": { "type": ..., "message": ... } }`
+on the `/anthropic/*` and `/v1/messages` surfaces.
+
+### SDK baseURL conventions
+
+Point official SDKs at the gateway with a gateway API key
+(`Authorization: Bearer sk-…` or Anthropic SDK's `x-api-key`):
+
+```ts
+// Anthropic TS SDK
+const anthropic = new Anthropic({ apiKey: "sk-…", baseURL: "https://<gateway>/anthropic" });
+await anthropic.messages.create({ model, max_tokens: 1024, messages: [{ role: "user", content: "hi" }] });
+
+// OpenAI TS SDK (Responses API)
+const openai = new OpenAI({ apiKey: "sk-…", baseURL: "https://<gateway>/v1" });
+await openai.responses.create({ model, input: "hi" });
+```
+
+Anthropic SDK requests carry `x-api-key` + `anthropic-version` headers natively;
+both are accepted at every proxy entry point (`x-api-key` falls back when
+`Authorization: Bearer` is absent).
 
 ## Known deviations
 

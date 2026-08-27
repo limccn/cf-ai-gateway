@@ -21,6 +21,7 @@ import keysRouter from "./routes/keys/router";
 import providersRouter from "./routes/providers/router";
 import modelsRouter from "./routes/models/router";
 import v1Router from "./routes/v1/router";
+import anthropicRouter from "./routes/anthropic/router";
 import usageRouter from "./routes/usage/router";
 import settingsRouter from "./routes/settings/router";
 import billingRouter from "./routes/billing/router";
@@ -76,6 +77,10 @@ app.route("/api/seed", seedRouter);
 // 代理面（M3）：/v1/* —— 网关 Key 鉴权（与 /api/* 会话鉴权并存），独立挂载
 app.route("/v1", v1Router);
 
+// Anthropic 入站（R1）：/anthropic/v1/messages（主）+ /anthropic/messages（别名）；
+// router 内部挂 x-api-key 兼容鉴权 + Anthropic 错误形态重写；/v1/messages 别名在 v1Router 内
+app.route("/anthropic", anthropicRouter);
+
 // 管理面 API：全部要求会话
 app.use("/api/*", requireSession());
 
@@ -93,7 +98,8 @@ app.route("/api", billingRouter); // /api/me/transactions（member）、/api/adm
 // html_handling=spa 会将无扩展名路径回退到 index.html（React Router 客户端路由）。
 app.notFound((c) => {
   const path = c.req.path;
-  if (path.startsWith("/api/") || path.startsWith("/v1/")) {
+  // /anthropic 由 child A 挂载（R1）；未知子路径（含裸 /anthropic 本身）同样返回 JSON 404（错误体后续由协议错误适配层改写）
+  if (path.startsWith("/api/") || path.startsWith("/v1/") || path.startsWith("/anthropic")) {
     return c.json({ error: { message: "Not Found" } }, 404);
   }
   return c.env.ASSETS.fetch(c.req.raw);
