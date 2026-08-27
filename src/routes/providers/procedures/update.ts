@@ -29,11 +29,12 @@ export function updateProviderRoute(app: Hono<AppEnv>): void {
         throw new HTTPException(404, { message: "Provider not found" });
       }
 
-      const patch: Record<string, string | boolean> = {};
+      const patch: Record<string, string | boolean | number> = {};
       if (body.name !== undefined) patch.name = body.name;
       if (body.type !== undefined) patch.type = body.type;
       if (body.baseUrl !== undefined) patch.baseUrl = body.baseUrl;
       if (body.enabled !== undefined) patch.enabled = body.enabled;
+      if (body.weight !== undefined) patch.weight = body.weight;
       if (body.models !== undefined) patch.models = JSON.stringify(body.models);
       if (body.apiKey !== undefined) {
         patch.apiKeyEnc = await encryptSecret(body.apiKey, c.env.GATEWAY_SECRET_KEY);

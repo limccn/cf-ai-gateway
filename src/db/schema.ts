@@ -198,6 +198,8 @@ export const providers = sqliteTable(
     // 明文前 10 字符（与 api_keys.prefix 同思路）：仅用于 UI 展示识别，不敏感
     apiKeyPrefix: text("api_key_prefix").notNull().default(""),
     models: text("models").notNull(),
+    // 负载均衡权重：多 provider 供同一模型时按 weight 比例分配（槽位法），默认 1 均分
+    weight: integer("weight").notNull().default(1),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()

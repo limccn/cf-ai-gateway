@@ -117,6 +117,45 @@ export async function setupProviderWithModel(model: string): Promise<number> {
   return row.id;
 }
 
+export interface SetupProviderOptions {
+  /** 负载均衡权重（多 provider 供同一模型时按比例分配；缺省 1）。 */
+  weight?: number;
+  /** 上游 baseUrl（缺省 127.0.0.1:1 不可达，仅供路由解析）。 */
+  baseUrl?: string;
+  type?: "openai" | "anthropic";
+}
+
+/** 注册一个具名 Provider（多 upstream 测试用）：models 映射 model -> model，weight 可配。幂等（同名先查后改）。 */
+export async function setupProvider(
+  name: string,
+  model: string,
+  opts: SetupProviderOptions = {},
+): Promise<number> {
+  const db = createDb(env);
+  const apiKeyEnc = await encryptSecret("sk-mock", env.GATEWAY_SECRET_KEY);
+  const existing = await db.query.providers.findFirst({
+    where: eq(providers.name, name),
+    columns: { id: true },
+  });
+  const values = {
+    type: opts.type ?? "openai",
+    baseUrl: opts.baseUrl ?? "http://127.0.0.1:1/v1",
+    apiKeyEnc,
+    models: JSON.stringify({ [model]: model }),
+    weight: opts.weight ?? 1,
+  };
+  if (existing) {
+    await db.update(providers).set(values).where(eq(providers.id, existing.id));
+    return existing.id;
+  }
+  const inserted = await db.insert(providers).values({ name, ...values }).returning({ id: providers.id });
+  const row = inserted[0];
+  if (!row) {
+    throw new Error("failed to insert test provider");
+  }
+  return row.id;
+}
+
 /** 价格表 upsert（同名模型幂等）。5 列对应 M9 分层：short/long 输入、cached 输入、short/long 输出。 */
 export async function setupPrice(
   model: string,

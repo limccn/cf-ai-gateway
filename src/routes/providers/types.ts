@@ -10,6 +10,9 @@ export const modelsMapSchema = z
     message: "At least one model mapping is required",
   });
 
+/** 负载均衡权重：多 provider 供同一模型时按比例分配（1-1000，默认 1 均分）。 */
+export const providerWeightSchema = z.number().int().min(1).max(1000);
+
 export const createProviderInputSchema = z.object({
   name: z.string().min(1).max(100),
   type: providerTypeSchema,
@@ -17,6 +20,7 @@ export const createProviderInputSchema = z.object({
   apiKey: z.string().min(1).max(1000),
   models: modelsMapSchema,
   enabled: z.boolean().default(true),
+  weight: providerWeightSchema.default(1),
 });
 
 export const updateProviderInputSchema = z
@@ -28,6 +32,7 @@ export const updateProviderInputSchema = z
     apiKey: z.string().min(1).max(1000).optional(),
     models: modelsMapSchema.optional(),
     enabled: z.boolean().optional(),
+    weight: providerWeightSchema.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, {
     message: "At least one field is required",
@@ -46,7 +51,11 @@ export const providerResponseSchema = z.object({
   baseUrl: z.string(),
   apiKeyMasked: z.string(), // 如 `sk-****abcd`；明文永不下发
   models: z.record(z.string(), z.string()),
+  weight: z.number().int().min(1).max(1000),
   enabled: z.boolean(),
+  // 断路器状态（仅 list 返回）：provider 当前是否处于断路窗口（TTL 内跳过分配）
+  circuitBroken: z.boolean().optional(),
+  circuitReason: z.string().optional(),
   createdAt: z.string(),
 });
 

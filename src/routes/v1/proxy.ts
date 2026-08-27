@@ -24,12 +24,20 @@ import { AdapterError } from "../../providers/types";
 import type {
   EndpointKind,
   InternalRequest,
+  ProviderAdapter,
   ProviderConfig,
   ProviderType,
   UpstreamRequest,
 } from "../../providers/types";
 import { decryptSecret } from "../../lib/security";
 import { parseProviderModels } from "../../lib/provider-models";
+import {
+  atOrThrow,
+  isCircuitOpen,
+  openCircuit,
+  pickHealthyProvider,
+  type RouteCandidate,
+} from "../../lib/provider-router";
 import {
   extractUpstreamError,
   fetchUpstream,
@@ -96,48 +104,53 @@ interface ResolvedProvider {
   baseUrl: string;
   apiKeyEnc: string;
   models: Record<string, string>;
+  /** 负载均衡权重（DB 列；缺失按 1 兜底）。 */
+  weight: number;
 }
 
 /**
- * 模型路由：优先匹配 preferredType 的同类型 Provider（协议原生转发，如 Anthropic 协议
- * → 上游 /anthropic 端点）；无同类型命中时回退按 id 升序全量匹配（仅配 openai/anthropic
+ * 模型路由 → 候选池：优先收集 preferredType 的同类型 Provider（协议原生转发，如 Anthropic
+ * 协议 → 上游 /anthropic 端点）；无同类型命中时回退按 id 升序全量收集（仅配 openai/anthropic
  * 单面 provider 的既有配置行为不变）。两趟均按 id 升序保证确定性。
+ * 多候选构成负载均衡池（哈希分配 + 故障转移）；单候选 = 现状单赢家行为（零回归）。
  */
-async function resolveProvider(
+async function resolveCandidates(
   db: Db,
   model: string,
   preferredType?: ProviderType,
-): Promise<ResolvedProvider | null> {
+): Promise<ResolvedProvider[]> {
   const rows = await db
     .select()
     .from(providers)
     .where(eq(providers.enabled, true))
     .orderBy(asc(providers.id));
-  const tryMatch = (wantType: ProviderType | null): ResolvedProvider | null => {
+  const collect = (wantType: ProviderType | null): ResolvedProvider[] => {
+    const out: ResolvedProvider[] = [];
     for (const row of rows) {
       if (wantType !== null && row.type !== wantType) {
         continue;
       }
       const models = parseProviderModels(row.models);
       if (models[model] !== undefined) {
-        return {
+        out.push({
           providerId: row.id,
           type: row.type,
           baseUrl: row.baseUrl,
           apiKeyEnc: row.apiKeyEnc,
           models,
-        };
+          weight: typeof row.weight === "number" && row.weight >= 1 ? row.weight : 1,
+        });
       }
     }
-    return null;
+    return out;
   };
   if (preferredType !== undefined) {
-    const preferred = tryMatch(preferredType);
-    if (preferred !== null) {
+    const preferred = collect(preferredType);
+    if (preferred.length > 0) {
       return preferred;
     }
   }
-  return tryMatch(null);
+  return collect(null);
 }
 
 const INPUT_SCHEMAS: Record<EndpointKind, ZodType> = {
@@ -218,9 +231,9 @@ export function proxyRouteWithOptions(
         }
       }
 
-      // 4. 模型路由（协议偏好：优先同类型 provider 原生转发，无命中回退全量）
-      const resolved = await resolveProvider(db, model, providerType);
-      if (!resolved) {
+      // 4. 模型路由：候选池（协议偏好优先同类型，无命中回退全量）
+      const candidates = await resolveCandidates(db, model, providerType);
+      if (candidates.length === 0) {
         logger.warn("model_not_routed", { model, keyId: auth.key.id });
         const rejectedLog: RequestLogRecord = {
           userId: auth.user.id,
@@ -242,112 +255,244 @@ export function proxyRouteWithOptions(
         );
       }
 
-      const adapter = getAdapter(resolved.type);
-      if (!adapter) {
-        logger.error("unknown_provider_type", {
-          providerId: resolved.providerId,
-          type: resolved.type,
-        });
-        return c.json({ error: { message: "Provider type not supported" } }, 500);
-      }
-      if (!adapter.supports(kind)) {
-        return c.json(
-          {
-            error: {
-              message: `Provider type '${resolved.type}' does not support this endpoint`,
-            },
-          },
-          400,
-        );
-      }
-
-      // 解密上游密钥（仅请求内存中使用）
-      let upstreamKey: string;
-      try {
-        upstreamKey = await decryptSecret(resolved.apiKeyEnc, c.env.GATEWAY_SECRET_KEY);
-      } catch (error) {
-        if (error instanceof Error) {
-          logger.error("provider_key_decrypt_failed", {
-            providerId: resolved.providerId,
-            error: error.message,
-          });
-        }
-        return c.json(
-          { error: { message: "Upstream provider key decryption failed" } },
-          500,
-        );
-      }
-
-      // 适配器构造上游请求（内部形态恒为 OpenAI Chat Completions 兼容，P1）
+      // 内部请求形态恒为 OpenAI Chat Completions 兼容（P1）；每轮尝试重建上游请求，天然可重试
       const internalReq: InternalRequest = { kind, body, model, stream };
-      const cfg: ProviderConfig = {
-        type: resolved.type as ProviderType,
-        baseUrl: resolved.baseUrl,
-        apiKey: upstreamKey,
-        models: resolved.models,
-      };
-      let upstreamReq: UpstreamRequest;
-      try {
-        upstreamReq = adapter.buildRequest(internalReq, cfg);
-      } catch (error) {
-        if (error instanceof AdapterError) {
-          logger.warn("adapter_error", {
-            providerId: resolved.providerId,
-            model,
-            message: error.message,
+      const multiCandidate = candidates.length > 1;
+
+      // 尝试列表（转移上限 1 次 → 总尝试 ≤ 2）：
+      //   单候选 → 恒为现状路径（零回归：无 hash、无 KV、无重试）；
+      //   多候选 → 首选 = keyId 哈希落点（粘性，断路跳过），其后按 id 升序补一个未断路候选。
+      const attempts: ResolvedProvider[] = [];
+      let allCircuitsOpen = false;
+      if (!multiCandidate) {
+        // candidates.length >= 1（上面已处理 0 候选，越界为不可达防御）
+        attempts.push(atOrThrow(candidates, 0, "resolveCandidates"));
+      } else {
+        const routeCandidates: RouteCandidate[] = candidates.map((c) => ({
+          providerId: c.providerId,
+          weight: c.weight,
+        }));
+        const picked = await pickHealthyProvider(
+          routeCandidates,
+          auth.key.id,
+          (id) => isCircuitOpen(c.env.CACHE_KV, id),
+        );
+        if (picked === null) {
+          allCircuitsOpen = true;
+        } else {
+          attempts.push(
+            candidates.find((c) => c.providerId === picked.providerId) ??
+              atOrThrow(candidates, 0, "resolveCandidates"),
+          );
+          for (const cand of candidates) {
+            if (attempts.some((a) => a.providerId === cand.providerId)) {
+              continue;
+            }
+            if (!(await isCircuitOpen(c.env.CACHE_KV, cand.providerId))) {
+              attempts.push(cand);
+            }
+            if (attempts.length >= 2) {
+              break;
+            }
+          }
+        }
+      }
+
+      // 全部候选断路（open 态拒绝语义）：不逐个撞墙，502 明确错误（TTL 到期自动恢复）
+      if (allCircuitsOpen) {
+        logger.warn("all_providers_circuit_open", { model, keyId: auth.key.id });
+        const allOpenLog: RequestLogRecord = {
+          userId: auth.user.id,
+          keyId: auth.key.id,
+          providerId: atOrThrow(candidates, 0, "resolveCandidates").providerId,
+          model,
+          status: "error",
+          latencyMs: Date.now() - startTime,
+        };
+        await recordRequestLog(db, allOpenLog);
+        enqueueUsage(c, allOpenLog);
+        return c.json(
+          { error: { message: "All upstream providers are temporarily unavailable" } },
+          502,
+        );
+      }
+
+      // 5/6. 尝试循环：解密 → 适配器构造 → 转发；失败分类（连接/超时/5xx/429）转移并写断路器
+      let upstreamResp: Response | null = null;
+      let adapter: ProviderAdapter | null = null;
+      let resolvedProviderId: number = attempts[0]?.providerId ?? 0;
+      let lastError: { status: number; message: string } | null = null;
+      for (let i = 0; i < attempts.length; i++) {
+        // i < attempts.length，索引必在界内（越界为不可达防御）
+        const cand = atOrThrow(attempts, i, "attempts");
+        const nextId = attempts[i + 1]?.providerId;
+
+        adapter = getAdapter(cand.type);
+        if (!adapter) {
+          logger.error("unknown_provider_type", {
+            providerId: cand.providerId,
+            type: cand.type,
           });
-          return c.json({ error: { message: error.message } }, 400);
+          return c.json({ error: { message: "Provider type not supported" } }, 500);
         }
-        throw error;
+        if (!adapter.supports(kind)) {
+          if (!multiCandidate) {
+            return c.json(
+              {
+                error: {
+                  message: `Provider type '${cand.type}' does not support this endpoint`,
+                },
+              },
+              400,
+            );
+          }
+          // 多候选：类型不支持是配置问题而非健康问题 → 跳过该候选，不写断路器
+          logger.warn("provider_skip_unsupported", {
+            providerId: cand.providerId,
+            type: cand.type,
+            kind,
+            model,
+          });
+          continue;
+        }
+
+        // 解密上游密钥（仅请求内存中使用）
+        let upstreamKey: string;
+        try {
+          upstreamKey = await decryptSecret(cand.apiKeyEnc, c.env.GATEWAY_SECRET_KEY);
+        } catch (error) {
+          if (error instanceof Error) {
+            logger.error("provider_key_decrypt_failed", {
+              providerId: cand.providerId,
+              error: error.message,
+            });
+          }
+          return c.json(
+            { error: { message: "Upstream provider key decryption failed" } },
+            500,
+          );
+        }
+
+        // 适配器构造上游请求（内部形态恒为 OpenAI Chat Completions 兼容，P1）
+        const cfg: ProviderConfig = {
+          type: cand.type as ProviderType,
+          baseUrl: cand.baseUrl,
+          apiKey: upstreamKey,
+          models: cand.models,
+        };
+        let upstreamReq: UpstreamRequest;
+        try {
+          upstreamReq = adapter.buildRequest(internalReq, cfg);
+        } catch (error) {
+          if (error instanceof AdapterError) {
+            logger.warn("adapter_error", {
+              providerId: cand.providerId,
+              model,
+              message: error.message,
+            });
+            return c.json({ error: { message: error.message } }, 400);
+          }
+          throw error;
+        }
+
+        // 6. 转发（含超时）
+        try {
+          upstreamResp = await fetchUpstream(upstreamReq.url, upstreamReq.init);
+        } catch (error) {
+          // 4.3 失败语义：上游网络错误/超时 → 不扣费，明细记 error
+          const upstreamLatencyMs = Date.now() - startTime;
+          logUpstreamError(logger, cand.providerId, model, error);
+          const reason = error instanceof UpstreamTimeoutError ? "timeout" : "network";
+          const errorLog: RequestLogRecord = {
+            userId: auth.user.id,
+            keyId: auth.key.id,
+            providerId: cand.providerId,
+            model,
+            status: "error",
+            latencyMs: Date.now() - startTime,
+            upstreamLatencyMs,
+          };
+          await recordRequestLog(db, errorLog);
+          enqueueUsage(c, errorLog);
+          if (multiCandidate) {
+            await openCircuit(c.env.CACHE_KV, cand.providerId, reason);
+            logger.warn("provider_failover", {
+              fromProviderId: cand.providerId,
+              toProviderId: nextId,
+              model,
+              reason,
+              keyId: auth.key.id,
+            });
+          }
+          lastError =
+            error instanceof UpstreamTimeoutError
+              ? { status: 504, message: error.message }
+              : { status: 502, message: "Failed to reach upstream provider" };
+          continue;
+        }
+
+        // 上游非 2xx：归一化 OpenAI 风格错误体（4.3：不扣费，明细记 error）
+        if (!upstreamResp.ok) {
+          const message = await extractUpstreamError(upstreamResp);
+          const upstreamLatencyMs = Date.now() - startTime;
+          logger.warn("upstream_error", {
+            providerId: cand.providerId,
+            model,
+            status: upstreamResp.status,
+            message,
+          });
+          const errorLog: RequestLogRecord = {
+            userId: auth.user.id,
+            keyId: auth.key.id,
+            providerId: cand.providerId,
+            model,
+            status: "error",
+            latencyMs: Date.now() - startTime,
+            upstreamLatencyMs,
+          };
+          await recordRequestLog(db, errorLog);
+          enqueueUsage(c, errorLog);
+          // 4xx（非 429）为客户端错误，转候选也不会成功：透传，不转移
+          const retryable = upstreamResp.status === 429 || upstreamResp.status >= 500;
+          if (!retryable) {
+            return c.json({ error: { message } }, toContentStatus(upstreamResp.status));
+          }
+          // 429 / 5xx：可转移 → 写断路器 + 转移下一候选
+          const reason = upstreamResp.status === 429 ? "429" : "5xx";
+          if (multiCandidate) {
+            await openCircuit(c.env.CACHE_KV, cand.providerId, reason);
+            logger.warn("provider_failover", {
+              fromProviderId: cand.providerId,
+              toProviderId: nextId,
+              model,
+              reason,
+              status: upstreamResp.status,
+              keyId: auth.key.id,
+            });
+          }
+          lastError = { status: upstreamResp.status, message };
+          continue;
+        }
+
+        // 成功：锁定本次执行的 provider，退出尝试循环
+        resolvedProviderId = cand.providerId;
+        // 清除转移前记录的最后失败（转移后第二候选成功时不得回退到失败语义）
+        lastError = null;
+        break;
       }
 
-      // 6. 转发（含超时）
-      let upstreamResp: Response;
-      try {
-        upstreamResp = await fetchUpstream(upstreamReq.url, upstreamReq.init);
-      } catch (error) {
-        // 4.3 失败语义：上游网络错误/超时 → 不扣费，明细记 error
-        const upstreamLatencyMs = Date.now() - startTime;
-        logUpstreamError(logger, resolved.providerId, model, error);
-        const errorLog: RequestLogRecord = {
-          userId: auth.user.id,
-          keyId: auth.key.id,
-          providerId: resolved.providerId,
-          model,
-          status: "error",
-          latencyMs: Date.now() - startTime,
-          upstreamLatencyMs,
-        };
-        await recordRequestLog(db, errorLog);
-        enqueueUsage(c, errorLog);
-        if (error instanceof UpstreamTimeoutError) {
-          return c.json({ error: { message: error.message } }, 504);
-        }
-        return c.json({ error: { message: "Failed to reach upstream provider" } }, 502);
+      // 全部尝试失败（网络/超时/5xx/429 转移后仍失败）：返回最后一次尝试的真实错误
+      if (lastError !== null) {
+        return c.json(
+          { error: { message: lastError.message } },
+          toContentStatus(lastError.status),
+        );
       }
 
-      // 上游非 2xx：透传状态码 + 归一化 OpenAI 风格错误体（4.3：不扣费，明细记 error）
-      if (!upstreamResp.ok) {
-        const message = await extractUpstreamError(upstreamResp);
-        const upstreamLatencyMs = Date.now() - startTime;
-        logger.warn("upstream_error", {
-          providerId: resolved.providerId,
-          model,
-          status: upstreamResp.status,
-          message,
-        });
-        const errorLog: RequestLogRecord = {
-          userId: auth.user.id,
-          keyId: auth.key.id,
-          providerId: resolved.providerId,
-          model,
-          status: "error",
-          latencyMs: Date.now() - startTime,
-          upstreamLatencyMs,
-        };
-        await recordRequestLog(db, errorLog);
-        enqueueUsage(c, errorLog);
-        return c.json({ error: { message } }, toContentStatus(upstreamResp.status));
+      // 成功路径不变量：循环仅在成功时 break（upstreamResp.ok 且 adapter 已锁定）
+      if (upstreamResp === null || adapter === null) {
+        logger.error("proxy_success_invariant_broken", { model, keyId: auth.key.id });
+        return c.json({ error: { message: "Upstream provider error" } }, 502);
       }
 
       const upstreamLatencyMs = Date.now() - startTime;
@@ -357,13 +502,13 @@ export function proxyRouteWithOptions(
       if (stream) {
         if (!upstreamResp.body) {
           logger.error("upstream_stream_empty", {
-            providerId: resolved.providerId,
+            providerId: resolvedProviderId,
             model,
           });
           const emptyStreamLog: RequestLogRecord = {
             userId: auth.user.id,
             keyId: auth.key.id,
-            providerId: resolved.providerId,
+            providerId: resolvedProviderId,
             model,
             status: "error",
             latencyMs: Date.now() - startTime,
@@ -382,7 +527,7 @@ export function proxyRouteWithOptions(
             if (usage === null || price === null) {
               // 无 usage 尾包 → 免计策略（PRD R5.4 / M4 4.2）
               logger.info("stream_settle_free", {
-                providerId: resolved.providerId,
+                providerId: resolvedProviderId,
                 model,
                 reason: usage === null ? "no_usage" : "no_price",
               });
@@ -390,7 +535,7 @@ export function proxyRouteWithOptions(
             const settleLog: ChargeUsageInput = {
               userId: auth.user.id,
               keyId: auth.key.id,
-              providerId: resolved.providerId,
+              providerId: resolvedProviderId,
               model,
               promptTokens: usage?.promptTokens ?? 0,
               completionTokens: usage?.completionTokens ?? 0,
@@ -413,7 +558,7 @@ export function proxyRouteWithOptions(
           logger,
         );
         logger.info("proxy_stream_started", {
-          providerId: resolved.providerId,
+          providerId: resolvedProviderId,
           model,
           keyId: auth.key.id,
         });
@@ -435,14 +580,14 @@ export function proxyRouteWithOptions(
         data = await upstreamResp.json();
       } catch {
         logger.error("upstream_non_json_response", {
-          providerId: resolved.providerId,
+          providerId: resolvedProviderId,
           model,
           status: upstreamResp.status,
         });
         const nonJsonLog: RequestLogRecord = {
           userId: auth.user.id,
           keyId: auth.key.id,
-          providerId: resolved.providerId,
+          providerId: resolvedProviderId,
           model,
           status: "error",
           latencyMs: Date.now() - startTime,
@@ -463,7 +608,7 @@ export function proxyRouteWithOptions(
       const cost = usage !== null && price !== null ? calcCost(usage, price) : 0;
       if (usage === null || price === null) {
         logger.info("charge_skipped", {
-          providerId: resolved.providerId,
+          providerId: resolvedProviderId,
           model,
           reason: usage === null ? "no_usage" : "no_price",
         });
@@ -471,7 +616,7 @@ export function proxyRouteWithOptions(
       const successLog: ChargeUsageInput = {
         userId: auth.user.id,
         keyId: auth.key.id,
-        providerId: resolved.providerId,
+        providerId: resolvedProviderId,
         model,
         promptTokens: usage?.promptTokens ?? 0,
         completionTokens: usage?.completionTokens ?? 0,
@@ -498,7 +643,7 @@ export function proxyRouteWithOptions(
       }
 
       logger.info("proxy_success", {
-        providerId: resolved.providerId,
+        providerId: resolvedProviderId,
         model,
         keyId: auth.key.id,
         cost,
