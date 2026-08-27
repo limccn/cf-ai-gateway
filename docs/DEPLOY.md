@@ -133,6 +133,7 @@ Declared as placeholders in `wrangler.toml` — **set each value on the Worker s
 | `GITHUB_CLIENT_ID` | GitHub login | Client ID of the GitHub OAuth App (public identifier — not secret). |
 | `GITHUB_ALLOWED_EMAILS` | GitHub login | Comma-separated email whitelist. Empty means **all GitHub logins are rejected** (fail-closed). |
 | `REQUEST_LOG_RETENTION_DAYS` | No (default `30`) | Retention in days for `request_logs` detail rows, enforced by the daily cleanup cron. |
+| `API_KEY_PREFIX` | No (default `sk-`) | Prefix of newly created gateway API keys (`prefix` + 32-char Base62). Blank counts as unset; only affects keys created after the value is set. |
 
 > Missing placeholders fail the deploy (fail-fast) — a good safety net. For CI deploys you can also `export BETTER_AUTH_URL=...` etc. in the shell; `.dev.vars` is only read for local commands, **not** for `wrangler deploy`.
 

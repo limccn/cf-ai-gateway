@@ -32,7 +32,7 @@
 | `[[queues.producers]] queue = "usage-aggregation"` | L43 | 队列名（创建时指定），环境差异 | RENDER-ENV → `QUEUE_NAME` | producers/consumers 两处同名引用 |
 | `[[queues.consumers]] max_batch_size / max_retries` | L47-48 | 消费策略 | KEEP-LITERAL | 非环境数据，调优钉住 |
 | `[triggers] crons = ["0 2 * * *"]` | L52 | 调度策略 | KEEP-LITERAL | UTC 固定时间策略，非环境数据 |
-| `[vars]` 四项（`BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `GITHUB_ALLOWED_EMAILS` / `REQUEST_LOG_RETENTION_DAYS`） | L61-64 | .dev.vars / 部署端 vars | NATIVE-KEY | 原生 `{KEY}`，部署端可运行时覆盖（repo-governance C3 定案） |
+| `[vars]` 五项（`BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `GITHUB_ALLOWED_EMAILS` / `REQUEST_LOG_RETENTION_DAYS` / `API_KEY_PREFIX`） | L61-65 | .dev.vars / 部署端 vars | NATIVE-KEY | 原生 `{KEY}`，部署端可运行时覆盖（repo-governance C3 定案） |
 
 ## 2. [env.staging] 段
 
@@ -45,7 +45,7 @@
 | `kv id` | L84 | dashboard 生成的资源 ID | RENDER-ENV → `STAGING_KV_ID` | 同顶层 |
 | `queue = "usage-aggregation-staging"` | L89/91 | 队列名 | RENDER-ENV → `STAGING_QUEUE_NAME` | producers/consumers 两处 |
 | `migrations_dir` / `binding` / `crons` / `max_batch_size` / `max_retries` / `custom_domain` | 多处 | 同上 | KEEP-LITERAL | 契约/策略，同顶层 |
-| `[env.staging.vars]` 四项 | L99-102 | .dev.vars / 部署端 vars | NATIVE-KEY | 不继承顶层，与顶层同键名同语义 |
+| `[env.staging.vars]` 五项 | L103-107 | .dev.vars / 部署端 vars | NATIVE-KEY | 不继承顶层，与顶层同键名同语义 |
 
 ## 3. drizzle.config.ts
 

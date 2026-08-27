@@ -201,7 +201,7 @@ async function main() {
   console.log("\n[3] gateway API key create");
   const createKey = await api("/api/keys", { method: "POST", ...authApi, body: { name: "m3-test-key" } });
   const plaintext = createKey.json?.plaintext ?? "";
-  report("create key returns plaintext once", createKey.status === 200 && plaintext.startsWith("gw_") && plaintext.length > 10, `status=${createKey.status}`);
+  report("create key returns plaintext once", createKey.status === 200 && plaintext.startsWith("sk-") && plaintext.length > 10, `status=${createKey.status}`);
   const keyId = createKey.json?.key?.id;
 
   const listKeys = await api("/api/keys", authApi);
@@ -308,7 +308,7 @@ async function main() {
 
   // ---------- 6. 错误映射 ----------
   console.log("\n[6] error mapping");
-  const invalidKey = await api("/v1/models", { headers: { Authorization: "Bearer gw_invalidkey000000000000000000000000" } });
+  const invalidKey = await api("/v1/models", { headers: { Authorization: "Bearer sk-invalidkey000000000000000000000000" } });
   report("invalid key → 401 {error.message}", invalidKey.status === 401 && invalidKey.json?.error?.message === "Invalid API key", `status=${invalidKey.status}`);
   const noAuth = await api("/v1/models", {});
   report("missing key → 401", noAuth.status === 401, `status=${noAuth.status}`);

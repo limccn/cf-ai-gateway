@@ -44,6 +44,8 @@ GATEWAY_SECRET_KEY=local-gateway-secret-key-change-me-0123456789abcdef
 # ---- 其他 ----
 # request_logs 明细保留天数（cron 清理用；缺省 30）
 REQUEST_LOG_RETENTION_DAYS=30
+# 网关 API Key 明文前缀（可选；缺省 sk-。空白视为未设置。仅影响新生成的 Key；部署端需定义同名 vars）
+API_KEY_PREFIX=sk-
 # 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
 # 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
 # SEED_USERS=
