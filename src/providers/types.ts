@@ -14,6 +14,20 @@ export interface InternalRequest {
   stream: boolean;
 }
 
+/**
+ * 高级 HTTP 选项（provider 级，PRD R2）：覆盖上游请求的 User-Agent、
+ * 强制覆盖/新增 Header 与 body 字段（厂商适配与附加认证）。
+ * headers 值可能含上游认证信息 → DB 中与 apiKey 同规范 AES-GCM 加密存储。
+ */
+export interface HttpOptions {
+  /** 覆盖上游请求 User-Agent（未配置使用默认）。 */
+  userAgent?: string;
+  /** 新增/强制覆盖上游请求 Header（同名覆盖适配器默认值，含认证头）。 */
+  headers?: Record<string, string>;
+  /** 新增/强制覆盖上游请求 body 字段（任意 JSON 值，如 temperature）。 */
+  body?: Record<string, unknown>;
+}
+
 export interface ProviderConfig {
   type: ProviderType;
   baseUrl: string;
@@ -21,6 +35,8 @@ export interface ProviderConfig {
   apiKey: string;
   /** 内部模型名 -> 上游模型名 */
   models: Record<string, string>;
+  /** 高级 HTTP 选项（未配置为空对象，行为与现状一致）。 */
+  httpOptions?: HttpOptions;
 }
 
 export interface UpstreamRequest {

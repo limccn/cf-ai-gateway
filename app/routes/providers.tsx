@@ -1,5 +1,6 @@
 // /providers — 上游 Provider 管理（M6 6.3，admin）：
 // CRUD 表格；models 映射以 textarea 行格式 `内部名=上游名` 编辑，Zod 校验后转为 JSON。
+// httpOptions 以 JSON textarea 编辑（前端校验与后端 httpOptionsSchema 一致，见 src/routes/providers/types.ts）。
 import { useState, type FormEvent } from "react";
 import { Plus } from "lucide-react";
 import { z } from "zod";
@@ -8,6 +9,7 @@ import { useCreateProvider } from "@/modules/providers/hooks/use-create-provider
 import { useUpdateProvider } from "@/modules/providers/hooks/use-update-provider";
 import { useDeleteProvider } from "@/modules/providers/hooks/use-delete-provider";
 import type { ProviderResponse } from "@/modules/providers/types";
+import { httpOptionsSchema } from "../../src/routes/providers/types";
 import { formatDateTime } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
@@ -71,6 +73,71 @@ function modelsToText(models: Record<string, string>): string {
     .join("\n");
 }
 
+// ============= httpOptions（JSON textarea）=============
+
+/**
+ * 解析 httpOptions JSON 文本 → 提交值。
+ * 空文本 → undefined（创建：不配置；编辑：保持原配置）；解析/结构校验失败 → 错误消息。
+ * 校验规则与后端 httpOptionsSchema 一致（header 名 token 字符集、值禁 CR/LF、长度上限）。
+ */
+function parseHttpOptionsText(
+  text: string,
+): { ok: true; value?: z.infer<typeof httpOptionsSchema> } | { ok: false; message: string } {
+  const trimmed = text.trim();
+  if (trimmed === "") {
+    return { ok: true, value: undefined };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { ok: false, message: "Must be valid JSON" };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      message: 'Must be a JSON object, e.g. {"userAgent":"MyAgent/1.0","headers":{"X-Provider":"acme"},"body":{"temperature":0}}',
+    };
+  }
+  const result = httpOptionsSchema.safeParse(parsed);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const path = issue && issue.path.length > 0 ? issue.path.join(".") : "";
+    return { ok: false, message: `${path ? `${path}: ` : ""}${issue?.message ?? "Invalid http options"}` };
+  }
+  return { ok: true, value: result.data };
+}
+
+/** 是否已配置 httpOptions（响应中未配置 = 空对象）。 */
+function hasHttpOptions(httpOptions: ProviderResponse["httpOptions"]): boolean {
+  if (!httpOptions) {
+    return false;
+  }
+  return (
+    httpOptions.userAgent !== undefined ||
+    Object.keys(httpOptions.headers ?? {}).length > 0 ||
+    Object.keys(httpOptions.body ?? {}).length > 0
+  );
+}
+
+/** 响应对象 → 编辑回填文本：跳过空对象字段；全部为空 → 空文本（编辑留空 = 保持原配置）。 */
+function httpOptionsToText(httpOptions: ProviderResponse["httpOptions"]): string {
+  if (!httpOptions) {
+    return "";
+  }
+  const compact: Record<string, unknown> = {};
+  if (httpOptions.userAgent !== undefined) {
+    compact.userAgent = httpOptions.userAgent;
+  }
+  if (Object.keys(httpOptions.headers ?? {}).length > 0) {
+    compact.headers = httpOptions.headers;
+  }
+  if (Object.keys(httpOptions.body ?? {}).length > 0) {
+    compact.body = httpOptions.body;
+  }
+  return Object.keys(compact).length === 0 ? "" : JSON.stringify(compact, null, 2);
+}
+
 const providerFormSchema = z.object({
   name: z.string().min(1, "Name is required").max(100, "Max 100 characters"),
   type: z.enum(["openai", "anthropic"]),
@@ -102,6 +169,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [modelsText, setModelsText] = useState("");
+  const [httpOptionsText, setHttpOptionsText] = useState("");
   const [weight, setWeight] = useState(1);
   const [enabled, setEnabled] = useState(true);
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
@@ -115,6 +183,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       setBaseUrl(editing?.baseUrl ?? "");
       setApiKey("");
       setModelsText(editing ? modelsToText(editing.models) : "");
+      setHttpOptionsText(editing ? httpOptionsToText(editing.httpOptions) : "");
       setWeight(editing?.weight ?? 1);
       setEnabled(editing?.enabled ?? true);
       setErrors({});
@@ -127,6 +196,12 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setErrors({});
+    // httpOptions 单独解析（JSON 文本 → 结构校验；空文本：创建不配置 / 编辑保持原配置）
+    const httpOptions = parseHttpOptionsText(httpOptionsText);
+    if (!httpOptions.ok) {
+      setErrors({ httpOptions: httpOptions.message });
+      return;
+    }
     const values = {
       name,
       type,
@@ -137,7 +212,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       enabled,
     };
     if (editing) {
-      // 编辑模式：空 apiKey 表示不更换密钥（omit）
+      // 编辑模式：空 apiKey 表示不更换密钥（omit）；空 httpOptions 表示保持原配置
       const payload: Record<string, unknown> = {};
       for (const [field, value] of Object.entries(values)) {
         if (field === "apiKey" && (value === "" || value === undefined)) {
@@ -147,6 +222,9 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
           continue; // 在下面按 schema 单独解析
         }
         payload[field] = value;
+      }
+      if (httpOptions.value !== undefined) {
+        payload.httpOptions = httpOptions.value;
       }
       const schema = updateProviderFormSchema.extend({
         models: modelsMapTextSchema.optional(),
@@ -172,7 +250,10 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
         return;
       }
       try {
-        await createProvider.mutateAsync(parsed.data);
+        await createProvider.mutateAsync({
+          ...parsed.data,
+          ...(httpOptions.value !== undefined ? { httpOptions: httpOptions.value } : {}),
+        });
         onOpenChange(false);
       } catch {
         // 错误显示在对话框底部
@@ -256,6 +337,28 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
             aria-invalid={errors.models !== undefined}
           />
           {errors.models ? <p className="text-xs text-destructive">{errors.models}</p> : null}
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="provider-http-options">HTTP options (JSON, optional)</Label>
+          <Textarea
+            id="provider-http-options"
+            rows={4}
+            className="font-mono text-xs"
+            placeholder={JSON.stringify(
+              { userAgent: "MyAgent/1.0", headers: { "X-Provider": "acme" }, body: { temperature: 0 } },
+              null,
+              2,
+            )}
+            value={httpOptionsText}
+            onChange={(e) => setHttpOptionsText(e.target.value)}
+            aria-invalid={errors.httpOptions !== undefined}
+          />
+          <p className="text-xs text-muted-foreground">
+            {editing
+              ? "Leave empty to keep the current options; stored header values are shown masked (retype a full value to replace it)."
+              : "Overrides User-Agent, adds/overrides headers and body fields on upstream requests. Header values are encrypted at rest and never shown again."}
+          </p>
+          {errors.httpOptions ? <p className="text-xs text-destructive">{errors.httpOptions}</p> : null}
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
@@ -341,6 +444,7 @@ export default function ProvidersPage() {
                 <TableHead>Base URL</TableHead>
                 <TableHead>Key</TableHead>
                 <TableHead>Models</TableHead>
+                <TableHead>HTTP options</TableHead>
                 <TableHead>Weight</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Created</TableHead>
@@ -367,6 +471,13 @@ export default function ProvidersPage() {
                       {Object.keys(provider.models).length} mapping
                       {Object.keys(provider.models).length === 1 ? "" : "s"}
                     </span>
+                  </TableCell>
+                  <TableCell>
+                    {hasHttpOptions(provider.httpOptions) ? (
+                      <Badge variant="outline">configured</Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <span className="text-xs text-muted-foreground">{provider.weight ?? 1}</span>

@@ -31,6 +31,7 @@ import type {
 } from "../../providers/types";
 import { decryptSecret } from "../../lib/security";
 import { parseProviderModels } from "../../lib/provider-models";
+import { resolveModelId, strip1mSuffix } from "../../lib/model-id";
 import {
   atOrThrow,
   isCircuitOpen,
@@ -103,6 +104,8 @@ interface ResolvedProvider {
   type: string;
   baseUrl: string;
   apiKeyEnc: string;
+  /** 高级 HTTP 选项密文（NULL ≡ 未配置）。 */
+  httpOptionsEnc: string | null;
   models: Record<string, string>;
   /** 负载均衡权重（DB 列；缺失按 1 兜底）。 */
   weight: number;
@@ -131,12 +134,14 @@ async function resolveCandidates(
         continue;
       }
       const models = parseProviderModels(row.models);
-      if (models[model] !== undefined) {
+      // 后缀感知匹配（PRD R1.1）：精确命中优先，请求带 `[1m]` 时剥离后缀回退匹配
+      if (resolveModelId(models, model).matched) {
         out.push({
           providerId: row.id,
           type: row.type,
           baseUrl: row.baseUrl,
           apiKeyEnc: row.apiKeyEnc,
+          httpOptionsEnc: row.httpOptionsEnc,
           models,
           weight: typeof row.weight === "number" && row.weight >= 1 ? row.weight : 1,
         });
@@ -204,6 +209,8 @@ export function proxyRouteWithOptions(
       // 入站协议 → 内部 OpenAI Chat 形态（P1；缓存键仍以原始入站 body 为准，协议隔离由 cachePrefix 负责）
       const body = toInternal ? toInternal(rawBody) : rawBody;
       const model = typeof body["model"] === "string" ? body["model"] : "";
+      // 计费/记录/缓存统一使用剥离 `[1m]` 后缀的模型名（PRD R1.3）；上游名保留后缀由适配器负责
+      const billingModel = strip1mSuffix(model);
       const stream = body["stream"] === true;
       const db = createDb(c.env);
       const startTime = Date.now();
@@ -212,16 +219,19 @@ export function proxyRouteWithOptions(
       const cacheable = !stream && auth.key.cacheEnabled;
       let cacheKey: string | null = null;
       if (cacheable) {
-        const bodyHash = await hashRequestBody(rawBody);
-        cacheKey = buildCacheKey(auth.key.id, model, bodyHash, cachePrefix);
+        // model 归一化为计费名（[1m] 声明不影响语义/响应）：`xxx` 与 `xxx[1m]` 共享缓存（R1.3）
+        const bodyHash = await hashRequestBody(
+          model !== "" ? { ...rawBody, model: billingModel } : rawBody,
+        );
+        cacheKey = buildCacheKey(auth.key.id, billingModel, bodyHash, cachePrefix);
         const cached = await getCachedResponse(c.env.CACHE_KV, cacheKey);
         if (cached !== null) {
-          logger.info("cache_hit", { keyId: auth.key.id, model });
+          logger.info("cache_hit", { keyId: auth.key.id, model: billingModel });
           const cachedLog: RequestLogRecord = {
             userId: auth.user.id,
             keyId: auth.key.id,
             providerId: null,
-            model,
+            model: billingModel,
             status: "cached",
             latencyMs: Date.now() - startTime,
           };
@@ -234,12 +244,12 @@ export function proxyRouteWithOptions(
       // 4. 模型路由：候选池（协议偏好优先同类型，无命中回退全量）
       const candidates = await resolveCandidates(db, model, providerType);
       if (candidates.length === 0) {
-        logger.warn("model_not_routed", { model, keyId: auth.key.id });
+        logger.warn("model_not_routed", { model: billingModel, keyId: auth.key.id });
         const rejectedLog: RequestLogRecord = {
           userId: auth.user.id,
           keyId: auth.key.id,
           providerId: null,
-          model,
+          model: billingModel,
           status: "rejected",
           latencyMs: Date.now() - startTime,
         };
@@ -300,12 +310,12 @@ export function proxyRouteWithOptions(
 
       // 全部候选断路（open 态拒绝语义）：不逐个撞墙，502 明确错误（TTL 到期自动恢复）
       if (allCircuitsOpen) {
-        logger.warn("all_providers_circuit_open", { model, keyId: auth.key.id });
+        logger.warn("all_providers_circuit_open", { model: billingModel, keyId: auth.key.id });
         const allOpenLog: RequestLogRecord = {
           userId: auth.user.id,
           keyId: auth.key.id,
           providerId: atOrThrow(candidates, 0, "resolveCandidates").providerId,
-          model,
+          model: billingModel,
           status: "error",
           latencyMs: Date.now() - startTime,
         };
@@ -351,7 +361,7 @@ export function proxyRouteWithOptions(
             providerId: cand.providerId,
             type: cand.type,
             kind,
-            model,
+            model: billingModel,
           });
           continue;
         }
@@ -373,12 +383,38 @@ export function proxyRouteWithOptions(
           );
         }
 
+        // 高级 HTTP 选项解密（headers 可能含上游认证值，与 apiKey 同规范 AES-GCM）；
+        // 解密/解析失败 → 空对象（增强项失败不阻断转发，防御性兜底）
+        let httpOptions: ProviderConfig["httpOptions"];
+        if (cand.httpOptionsEnc === null) {
+          httpOptions = undefined;
+        } else {
+          try {
+            const parsed: unknown = JSON.parse(
+              await decryptSecret(cand.httpOptionsEnc, c.env.GATEWAY_SECRET_KEY),
+            );
+            httpOptions =
+              parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                ? (parsed as ProviderConfig["httpOptions"])
+                : undefined;
+          } catch (error) {
+            if (error instanceof Error) {
+              logger.warn("http_options_decrypt_failed", {
+                providerId: cand.providerId,
+                error: error.message,
+              });
+            }
+            httpOptions = undefined;
+          }
+        }
+
         // 适配器构造上游请求（内部形态恒为 OpenAI Chat Completions 兼容，P1）
         const cfg: ProviderConfig = {
           type: cand.type as ProviderType,
           baseUrl: cand.baseUrl,
           apiKey: upstreamKey,
           models: cand.models,
+          ...(httpOptions !== undefined ? { httpOptions } : {}),
         };
         let upstreamReq: UpstreamRequest;
         try {
@@ -387,7 +423,7 @@ export function proxyRouteWithOptions(
           if (error instanceof AdapterError) {
             logger.warn("adapter_error", {
               providerId: cand.providerId,
-              model,
+              model: billingModel,
               message: error.message,
             });
             return c.json({ error: { message: error.message } }, 400);
@@ -401,13 +437,13 @@ export function proxyRouteWithOptions(
         } catch (error) {
           // 4.3 失败语义：上游网络错误/超时 → 不扣费，明细记 error
           const upstreamLatencyMs = Date.now() - startTime;
-          logUpstreamError(logger, cand.providerId, model, error);
+          logUpstreamError(logger, cand.providerId, billingModel, error);
           const reason = error instanceof UpstreamTimeoutError ? "timeout" : "network";
           const errorLog: RequestLogRecord = {
             userId: auth.user.id,
             keyId: auth.key.id,
             providerId: cand.providerId,
-            model,
+            model: billingModel,
             status: "error",
             latencyMs: Date.now() - startTime,
             upstreamLatencyMs,
@@ -419,7 +455,7 @@ export function proxyRouteWithOptions(
             logger.warn("provider_failover", {
               fromProviderId: cand.providerId,
               toProviderId: nextId,
-              model,
+              model: billingModel,
               reason,
               keyId: auth.key.id,
             });
@@ -437,7 +473,7 @@ export function proxyRouteWithOptions(
           const upstreamLatencyMs = Date.now() - startTime;
           logger.warn("upstream_error", {
             providerId: cand.providerId,
-            model,
+            model: billingModel,
             status: upstreamResp.status,
             message,
           });
@@ -445,7 +481,7 @@ export function proxyRouteWithOptions(
             userId: auth.user.id,
             keyId: auth.key.id,
             providerId: cand.providerId,
-            model,
+            model: billingModel,
             status: "error",
             latencyMs: Date.now() - startTime,
             upstreamLatencyMs,
@@ -464,7 +500,7 @@ export function proxyRouteWithOptions(
             logger.warn("provider_failover", {
               fromProviderId: cand.providerId,
               toProviderId: nextId,
-              model,
+              model: billingModel,
               reason,
               status: upstreamResp.status,
               keyId: auth.key.id,
@@ -491,7 +527,7 @@ export function proxyRouteWithOptions(
 
       // 成功路径不变量：循环仅在成功时 break（upstreamResp.ok 且 adapter 已锁定）
       if (upstreamResp === null || adapter === null) {
-        logger.error("proxy_success_invariant_broken", { model, keyId: auth.key.id });
+        logger.error("proxy_success_invariant_broken", { model: billingModel, keyId: auth.key.id });
         return c.json({ error: { message: "Upstream provider error" } }, 502);
       }
 
@@ -503,13 +539,13 @@ export function proxyRouteWithOptions(
         if (!upstreamResp.body) {
           logger.error("upstream_stream_empty", {
             providerId: resolvedProviderId,
-            model,
+            model: billingModel,
           });
           const emptyStreamLog: RequestLogRecord = {
             userId: auth.user.id,
             keyId: auth.key.id,
             providerId: resolvedProviderId,
-            model,
+            model: billingModel,
             status: "error",
             latencyMs: Date.now() - startTime,
             upstreamLatencyMs,
@@ -522,13 +558,13 @@ export function proxyRouteWithOptions(
         const settled = wrapStreamWithSettlement(
           transformed,
           async (usage) => {
-            const price = await findModelPrice(db, model);
+            const price = await findModelPrice(db, billingModel);
             const cost = usage !== null && price !== null ? calcCost(usage, price) : 0;
             if (usage === null || price === null) {
               // 无 usage 尾包 → 免计策略（PRD R5.4 / M4 4.2）
               logger.info("stream_settle_free", {
                 providerId: resolvedProviderId,
-                model,
+                model: billingModel,
                 reason: usage === null ? "no_usage" : "no_price",
               });
             }
@@ -536,7 +572,7 @@ export function proxyRouteWithOptions(
               userId: auth.user.id,
               keyId: auth.key.id,
               providerId: resolvedProviderId,
-              model,
+              model: billingModel,
               promptTokens: usage?.promptTokens ?? 0,
               completionTokens: usage?.completionTokens ?? 0,
               cost,
@@ -551,7 +587,7 @@ export function proxyRouteWithOptions(
               logger.warn("overdraft_rejected", {
                 userId: auth.user.id,
                 cost,
-                model,
+                model: billingModel,
               });
             }
           },
@@ -559,7 +595,7 @@ export function proxyRouteWithOptions(
         );
         logger.info("proxy_stream_started", {
           providerId: resolvedProviderId,
-          model,
+          model: billingModel,
           keyId: auth.key.id,
         });
         // P1：协议出站流式转换（默认恒等；结算包装在前，与输出格式正交）
@@ -581,14 +617,14 @@ export function proxyRouteWithOptions(
       } catch {
         logger.error("upstream_non_json_response", {
           providerId: resolvedProviderId,
-          model,
+          model: billingModel,
           status: upstreamResp.status,
         });
         const nonJsonLog: RequestLogRecord = {
           userId: auth.user.id,
           keyId: auth.key.id,
           providerId: resolvedProviderId,
-          model,
+          model: billingModel,
           status: "error",
           latencyMs: Date.now() - startTime,
           upstreamLatencyMs,
@@ -604,12 +640,12 @@ export function proxyRouteWithOptions(
 
       // 7. 计费（成功）：usage → 价格 → 费用 → 条件 UPDATE 原子扣费 + 流水 + 明细
       const usage = adapter.parseUsage(data) ?? extractLooseUsage(data);
-      const price = await findModelPrice(db, model);
+      const price = await findModelPrice(db, billingModel);
       const cost = usage !== null && price !== null ? calcCost(usage, price) : 0;
       if (usage === null || price === null) {
         logger.info("charge_skipped", {
           providerId: resolvedProviderId,
-          model,
+          model: billingModel,
           reason: usage === null ? "no_usage" : "no_price",
         });
       }
@@ -617,7 +653,7 @@ export function proxyRouteWithOptions(
         userId: auth.user.id,
         keyId: auth.key.id,
         providerId: resolvedProviderId,
-        model,
+        model: billingModel,
         promptTokens: usage?.promptTokens ?? 0,
         completionTokens: usage?.completionTokens ?? 0,
         cost,
@@ -631,7 +667,7 @@ export function proxyRouteWithOptions(
         logger.warn("overdraft_rejected", {
           userId: auth.user.id,
           cost,
-          model,
+          model: billingModel,
         });
       }
 
@@ -644,7 +680,7 @@ export function proxyRouteWithOptions(
 
       logger.info("proxy_success", {
         providerId: resolvedProviderId,
-        model,
+        model: billingModel,
         keyId: auth.key.id,
         cost,
         charged: charge.charged,

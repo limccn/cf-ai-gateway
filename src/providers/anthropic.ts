@@ -14,6 +14,8 @@ import type {
 import { AdapterError } from "./types";
 import { parseSseStream, type SseEvent } from "./sse";
 import { parseOpenAiUsage } from "./openai";
+import { applyHttpBody, buildUpstreamHeaders } from "./http-options";
+import { resolveModelId } from "../lib/model-id";
 
 const ANTHROPIC_MESSAGES_PATH = "/v1/messages";
 /** Anthropic 要求 max_tokens 必填；未提供时取此默认值（M4 起按模型默认配置）。 */
@@ -32,7 +34,8 @@ function buildRequest(
       `Anthropic adapter does not support endpoint kind '${req.kind}'`,
     );
   }
-  const upstreamModel = cfg.models[req.model] ?? req.model;
+  // 上游模型名保留 `[1m]` 后缀（路由映射后缀感知，PRD R1.2）
+  const upstreamModel = resolveModelId(cfg.models, req.model).upstream;
   const body = req.body;
   const messagesRaw = body["messages"];
   if (!Array.isArray(messagesRaw)) {
@@ -80,12 +83,15 @@ function buildRequest(
     url: `${baseUrl}${messagesPath}`,
     init: {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": cfg.apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify(anthropicBody),
+      headers: buildUpstreamHeaders(
+        {
+          "Content-Type": "application/json",
+          "x-api-key": cfg.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        cfg,
+      ),
+      body: JSON.stringify(applyHttpBody(anthropicBody, cfg)),
     },
   };
 }

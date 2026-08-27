@@ -198,6 +198,9 @@ export const providers = sqliteTable(
     // 明文前 10 字符（与 api_keys.prefix 同思路）：仅用于 UI 展示识别，不敏感
     apiKeyPrefix: text("api_key_prefix").notNull().default(""),
     models: text("models").notNull(),
+    // 高级 HTTP 选项（JSON 字符串）：AES-GCM 加密存储（headers 可能含上游认证值）；
+    // NULL ≡ 未配置（{}，行为与现状一致）
+    httpOptionsEnc: text("http_options_enc"),
     // 负载均衡权重：多 provider 供同一模型时按 weight 比例分配（槽位法），默认 1 均分
     weight: integer("weight").notNull().default(1),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),

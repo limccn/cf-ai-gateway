@@ -8,6 +8,8 @@ import type {
   TokenUsage,
   UpstreamRequest,
 } from "./types";
+import { resolveModelId } from "../lib/model-id";
+import { applyHttpBody, buildUpstreamHeaders } from "./http-options";
 
 const PATH_BY_KIND: Record<EndpointKind, string> = {
   chat: "/chat/completions",
@@ -19,17 +21,25 @@ function buildRequest(
   req: InternalRequest,
   cfg: ProviderConfig,
 ): UpstreamRequest {
-  const upstreamModel = cfg.models[req.model] ?? req.model;
+  // 上游模型名保留 `[1m]` 后缀（路由映射后缀感知，PRD R1.2）
+  const upstreamModel = resolveModelId(cfg.models, req.model).upstream;
   const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
+  const body = applyHttpBody<Record<string, unknown>>(
+    { ...req.body, model: upstreamModel },
+    cfg,
+  );
   return {
     url: `${baseUrl}${PATH_BY_KIND[req.kind]}`,
     init: {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${cfg.apiKey}`,
-      },
-      body: JSON.stringify({ ...req.body, model: upstreamModel }),
+      headers: buildUpstreamHeaders(
+        {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${cfg.apiKey}`,
+        },
+        cfg,
+      ),
+      body: JSON.stringify(body),
     },
   };
 }
