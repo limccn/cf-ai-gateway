@@ -482,6 +482,7 @@ function transformStreamToOpenAI(
   let id = "chatcmpl";
   let model = "";
   let promptTokens: number | null = null;
+  let cachedTokens: number | null = null;
   let completionTokens: number | null = null;
   let doneSent = false;
 
@@ -524,9 +525,15 @@ function transformStreamToOpenAI(
         }
         const usage = m["usage"];
         if (usage && typeof usage === "object") {
-          const input = (usage as JsonObject)["input_tokens"];
+          const u = usage as JsonObject;
+          const input = u["input_tokens"];
           if (typeof input === "number") {
             promptTokens = input;
+          }
+          // 缓存命中输入（流式在 message_start 上报 cache_read；写入量 cache_creation 留在输入内按普通计）
+          const cached = u["cache_read_input_tokens"];
+          if (typeof cached === "number") {
+            cachedTokens = cached;
           }
         }
       }
@@ -611,6 +618,9 @@ function transformStreamToOpenAI(
           prompt_tokens: promptTokens,
           completion_tokens: completionTokens,
           total_tokens: promptTokens + completionTokens,
+          ...(cachedTokens !== null && cachedTokens > 0
+            ? { prompt_tokens_details: { cached_tokens: cachedTokens } }
+            : {}),
         };
       }
       enqueue(controller, usageChunk);
@@ -683,7 +693,16 @@ export const anthropicAdapter: ProviderAdapter = {
     if (typeof prompt !== "number" || typeof completion !== "number") {
       return null;
     }
-    return { promptTokens: prompt, completionTokens: completion };
+    // 缓存命中输入（cache_read）；cache_creation（缓存写入）留在 input_tokens 内按普通输入计费。
+    const cachedRead = u["cache_read_input_tokens"];
+    return {
+      promptTokens: prompt,
+      completionTokens: completion,
+      cachedTokens:
+        typeof cachedRead === "number" && Number.isFinite(cachedRead) && cachedRead > 0
+          ? cachedRead
+          : undefined,
+    };
   },
 
   parseStreamUsage: parseOpenAiUsage, // 变换后的尾包已是 OpenAI 形态

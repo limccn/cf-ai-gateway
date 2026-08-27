@@ -6,8 +6,11 @@ export function toModelResponse(model: Model): ModelResponse {
   return {
     id: model.id,
     model: model.model,
-    inputPrice: model.inputPrice,
-    outputPrice: model.outputPrice,
+    inputPriceShort: model.inputPriceShort,
+    inputPriceLong: model.inputPriceLong,
+    inputPriceCached: model.inputPriceCached,
+    outputPriceShort: model.outputPriceShort,
+    outputPriceLong: model.outputPriceLong,
     createdAt: model.createdAt.toISOString(),
     updatedAt: model.updatedAt.toISOString(),
   };

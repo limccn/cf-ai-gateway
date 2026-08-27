@@ -117,19 +117,35 @@ export async function setupProviderWithModel(model: string): Promise<number> {
   return row.id;
 }
 
-/** 价格表 upsert（同名模型幂等，多用例共用 gpt-4o-mini 不冲突）。 */
+/** 价格表 upsert（同名模型幂等）。5 列对应 M9 分层：short/long 输入、cached 输入、short/long 输出。 */
 export async function setupPrice(
   model: string,
-  inputPrice: number,
-  outputPrice: number,
+  inputPriceShort: number,
+  inputPriceLong: number,
+  inputPriceCached: number,
+  outputPriceShort: number,
+  outputPriceLong: number,
 ): Promise<void> {
   const db = createDb(env);
   await db
     .insert(models)
-    .values({ model, inputPrice, outputPrice })
+    .values({
+      model,
+      inputPriceShort,
+      inputPriceLong,
+      inputPriceCached,
+      outputPriceShort,
+      outputPriceLong,
+    })
     .onConflictDoUpdate({
       target: models.model,
-      set: { inputPrice, outputPrice },
+      set: {
+        inputPriceShort,
+        inputPriceLong,
+        inputPriceCached,
+        outputPriceShort,
+        outputPriceLong,
+      },
     });
 }
 

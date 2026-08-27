@@ -285,13 +285,18 @@ export const usageDaily = sqliteTable(
 
 // --- 模型价格表 ---
 // 单价单位：USD / 每百万 tokens；seed 提供默认价格（seed.sql），admin 可覆盖。
+// 分层规则（M9）：请求未缓存输入 tokens > 128,000 时输入/输出均取 long 档，否则 short 档；
+// 缓存命中输入按 inputPriceCached 计（各厂商官方公布的缓存价，通常为 short 输入价的 10%~20%）。
 export const models = sqliteTable(
   "models",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     model: text("model").notNull().unique(),
-    inputPrice: real("input_price").notNull(),
-    outputPrice: real("output_price").notNull(),
+    inputPriceShort: real("input_price_short").notNull(),
+    inputPriceLong: real("input_price_long").notNull(),
+    inputPriceCached: real("input_price_cached").notNull(),
+    outputPriceShort: real("output_price_short").notNull(),
+    outputPriceLong: real("output_price_long").notNull(),
     ...timestamps,
   },
   (table) => [index("models_model_idx").on(table.model)],
