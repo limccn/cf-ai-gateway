@@ -11,6 +11,8 @@ declare namespace Cloudflare {
     GITHUB_ALLOWED_EMAILS: string;
     /** request_logs 保留天数（M5 5.4；缺省 30，未注入时按默认处理）。 */
     REQUEST_LOG_RETENTION_DAYS?: string;
+    /** 网关 API Key 明文前缀（缺省 "sk-"；空白视为未设置，回退默认）。 */
+    API_KEY_PREFIX?: string;
     /** vitest.config.ts 注入的 drizzle 迁移 SQL（applyD1Migrations 用）。 */
     TEST_MIGRATIONS: D1Migration[];
   }

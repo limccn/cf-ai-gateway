@@ -59,7 +59,7 @@ export async function setupKey(
   opts: SetupKeyOptions = {},
 ): Promise<{ keyId: number; plaintext: string }> {
   const db = createDb(env);
-  const plaintext = `gw_test_${crypto.randomUUID().replaceAll("-", "")}`;
+  const plaintext = `sk-test-${crypto.randomUUID().replaceAll("-", "")}`;
   const hash = await hashToken(plaintext);
   const inserted = await db
     .insert(apiKeys)

@@ -270,7 +270,7 @@ async function main() {
 
   const createKey = await api("/api/keys", { method: "POST", ...authApi, body: { name: "m4-key" } });
   const plaintext = createKey.json?.plaintext ?? "";
-  report("create gateway key", createKey.status === 200 && plaintext.startsWith("gw_"), `status=${createKey.status}`);
+  report("create gateway key", createKey.status === 200 && plaintext.startsWith("sk-"), `status=${createKey.status}`);
   const proxyAuth = { Authorization: `Bearer ${plaintext}` };
 
   const chat = await api("/v1/chat/completions", {

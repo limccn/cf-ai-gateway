@@ -1,12 +1,12 @@
 // POST /api/keys — 创建网关 API Key（member/admin）。
-// 明文（gw_xxx）仅在本次响应中返回一次；DB 只存 sha256 哈希 + 前缀（spec 强制）。
+// 明文（prefix_xxx）仅在本次响应中返回一次；DB 只存 sha256 哈希 + 前缀（spec 强制）。
 import { zValidator } from "@hono/zod-validator";
 import { HTTPException } from "hono/http-exception";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../../types";
 import { apiKeys } from "../../../db/schema";
 import { createDb } from "../../../db";
-import { generateGatewayKey, extractKeyPrefix } from "../../../lib/api-keys";
+import { generateGatewayKey, extractKeyPrefix, resolveKeyPrefix } from "../../../lib/api-keys";
 import { hashToken } from "../../../lib/security";
 import { createKeyInputSchema } from "../types";
 import { toKeyResponse } from "../lib/convert";
@@ -19,7 +19,7 @@ export function createKeyRoute(app: Hono<AppEnv>): void {
     const db = createDb(c.env);
 
     // 明文仅在内存中流转：生成 → 取前缀 → 哈希落库
-    const plaintext = generateGatewayKey();
+    const plaintext = generateGatewayKey(resolveKeyPrefix(c.env.API_KEY_PREFIX));
     const hash = await hashToken(plaintext);
 
     const [key] = await db

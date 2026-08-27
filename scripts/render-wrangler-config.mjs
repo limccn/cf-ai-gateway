@@ -47,6 +47,7 @@ const KEEP_INTERP = new Set([
   "GITHUB_CLIENT_ID",
   "GITHUB_ALLOWED_EMAILS",
   "REQUEST_LOG_RETENTION_DAYS",
+  "API_KEY_PREFIX",
 ]);
 
 // 解析 .dev.vars：KEY=VALUE 行 + # 注释 + 双/单引号剥离（手写解析，零依赖）。

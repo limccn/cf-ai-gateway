@@ -22,6 +22,8 @@ interface Env {
   GITHUB_ALLOWED_EMAILS: string;
   // request_logs 明细保留天数（M5 5.4；scheduled cron 清理用，缺省 30）
   REQUEST_LOG_RETENTION_DAYS?: string;
+  // 网关 API Key 明文前缀（缺省 "sk-"；空白视为未设置，回退默认。仅影响新生成 Key）
+  API_KEY_PREFIX?: string;
   // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users
   // 并在注册校验中放行种子邮箱（绕过邀请码）。生产禁止设置。格式见 src/lib/seed-users.ts
   SEED_USERS?: string;
