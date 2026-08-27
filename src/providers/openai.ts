@@ -49,7 +49,21 @@ export function parseOpenAiUsage(body: unknown): TokenUsage | null {
   if (typeof prompt !== "number" || typeof completion !== "number") {
     return null;
   }
-  return { promptTokens: prompt, completionTokens: completion };
+  return {
+    promptTokens: prompt,
+    completionTokens: completion,
+    cachedTokens: extractCachedTokens(u),
+  };
+}
+
+/** 提取 OpenAI 形态 `usage.prompt_tokens_details.cached_tokens`；缺失/非数字返回 undefined。 */
+function extractCachedTokens(usage: Record<string, unknown>): number | undefined {
+  const details = usage["prompt_tokens_details"];
+  if (!details || typeof details !== "object") {
+    return undefined;
+  }
+  const cached = (details as Record<string, unknown>)["cached_tokens"];
+  return typeof cached === "number" && Number.isFinite(cached) && cached > 0 ? cached : undefined;
 }
 
 export const openaiAdapter: ProviderAdapter = {

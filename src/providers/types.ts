@@ -31,6 +31,8 @@ export interface UpstreamRequest {
 export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
+  /** 缓存命中输入 tokens（OpenAI cached_tokens / Anthropic cache_read_input_tokens）；缺失按 0 计。 */
+  cachedTokens?: number;
 }
 
 /** 适配器抛出的格式转换错误 → 网关映射为 400（OpenAI 风格错误体）。 */

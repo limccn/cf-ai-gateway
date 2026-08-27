@@ -26,21 +26,37 @@ import {
 } from "@/components/ui/table";
 
 // ============= Zod 表单 Schema =============
+// 分层规则（M9）：未缓存输入 > 128K tokens 时输入与输出均取 long 档，否则 short 档；
+// 缓存命中输入按 cached 价计。单价单位：USD / 每百万 tokens。
+
+const priceField = z.coerce.number("Enter a number").min(0, "Must be 0 or greater");
 
 const createModelSchema = z.object({
   model: z.string().min(1, "Model name is required").max(200, "Max 200 characters"),
-  inputPrice: z.coerce.number("Enter a number").min(0, "Must be 0 or greater"),
-  outputPrice: z.coerce.number("Enter a number").min(0, "Must be 0 or greater"),
+  inputPriceShort: priceField,
+  inputPriceLong: priceField,
+  inputPriceCached: priceField,
+  outputPriceShort: priceField,
+  outputPriceLong: priceField,
 });
 
 const updateModelSchema = z
   .object({
-    inputPrice: z.coerce.number("Enter a number").min(0, "Must be 0 or greater").optional(),
-    outputPrice: z.coerce.number("Enter a number").min(0, "Must be 0 or greater").optional(),
+    inputPriceShort: priceField.optional(),
+    inputPriceLong: priceField.optional(),
+    inputPriceCached: priceField.optional(),
+    outputPriceShort: priceField.optional(),
+    outputPriceLong: priceField.optional(),
   })
-  .refine((v) => v.inputPrice !== undefined || v.outputPrice !== undefined, {
-    message: "Change at least one price",
-  });
+  .refine(
+    (v) =>
+      v.inputPriceShort !== undefined ||
+      v.inputPriceLong !== undefined ||
+      v.inputPriceCached !== undefined ||
+      v.outputPriceShort !== undefined ||
+      v.outputPriceLong !== undefined,
+    { message: "Change at least one price" },
+  );
 
 // ============= 子组件：价格表单对话框 =============
 
@@ -55,8 +71,11 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
   const updateModel = useUpdateModel();
 
   const [model, setModel] = useState("");
-  const [inputPrice, setInputPrice] = useState("");
-  const [outputPrice, setOutputPrice] = useState("");
+  const [inputPriceShort, setInputPriceShort] = useState("");
+  const [inputPriceLong, setInputPriceLong] = useState("");
+  const [inputPriceCached, setInputPriceCached] = useState("");
+  const [outputPriceShort, setOutputPriceShort] = useState("");
+  const [outputPriceLong, setOutputPriceLong] = useState("");
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
 
   const [lastOpen, setLastOpen] = useState(false);
@@ -64,8 +83,11 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
     setLastOpen(open);
     if (open) {
       setModel(editing?.model ?? "");
-      setInputPrice(editing ? String(editing.inputPrice) : "");
-      setOutputPrice(editing ? String(editing.outputPrice) : "");
+      setInputPriceShort(editing ? String(editing.inputPriceShort) : "");
+      setInputPriceLong(editing ? String(editing.inputPriceLong) : "");
+      setInputPriceCached(editing ? String(editing.inputPriceCached) : "");
+      setOutputPriceShort(editing ? String(editing.outputPriceShort) : "");
+      setOutputPriceLong(editing ? String(editing.outputPriceLong) : "");
       setErrors({});
     }
   }
@@ -76,11 +98,16 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setErrors({});
+    // 空字符串 → undefined：update 视为“该项不改”，create 触发必填错误
+    const prices = {
+      inputPriceShort: inputPriceShort.length > 0 ? inputPriceShort : undefined,
+      inputPriceLong: inputPriceLong.length > 0 ? inputPriceLong : undefined,
+      inputPriceCached: inputPriceCached.length > 0 ? inputPriceCached : undefined,
+      outputPriceShort: outputPriceShort.length > 0 ? outputPriceShort : undefined,
+      outputPriceLong: outputPriceLong.length > 0 ? outputPriceLong : undefined,
+    };
     if (editing) {
-      const parsed = updateModelSchema.safeParse({
-        inputPrice: inputPrice.length > 0 ? inputPrice : undefined,
-        outputPrice: outputPrice.length > 0 ? outputPrice : undefined,
-      });
+      const parsed = updateModelSchema.safeParse(prices);
       if (!parsed.success) {
         setErrors(Object.fromEntries(parsed.error.issues.map((i) => [String(i.path[0] ?? "root"), i.message])));
         return;
@@ -92,7 +119,7 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
         // 错误显示在对话框底部
       }
     } else {
-      const parsed = createModelSchema.safeParse({ model, inputPrice, outputPrice });
+      const parsed = createModelSchema.safeParse({ model, ...prices });
       if (!parsed.success) {
         setErrors(Object.fromEntries(parsed.error.issues.map((i) => [String(i.path[0] ?? "root"), i.message])));
         return;
@@ -111,7 +138,7 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
       open={open}
       onOpenChange={onOpenChange}
       title={editing ? `Edit prices — ${editing.model}` : "Add model price"}
-      description="Prices are in USD per 1,000,000 tokens; 0 means free."
+      description="Prices are in USD per 1,000,000 tokens; 0 means free. Uncached input over 128K tokens bills the long tier (input + output); cached input bills at the cached rate."
     >
       <form onSubmit={handleSubmit} className="space-y-4" noValidate>
         {mutationError ? (
@@ -124,7 +151,7 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
             <Label htmlFor="model-name">Model name</Label>
             <Input
               id="model-name"
-              placeholder="gpt-4o"
+              placeholder="gpt-5.6-sol"
               value={model}
               onChange={(e) => setModel(e.target.value)}
               aria-invalid={errors.model !== undefined}
@@ -132,38 +159,94 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
             {errors.model ? <p className="text-xs text-destructive">{errors.model}</p> : null}
           </div>
         )}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label htmlFor="model-input">Input price / 1M tokens</Label>
-            <Input
-              id="model-input"
-              type="number"
-              step="any"
-              min={0}
-              placeholder="2.50"
-              value={inputPrice}
-              onChange={(e) => setInputPrice(e.target.value)}
-              aria-invalid={errors.inputPrice !== undefined}
-            />
-            {errors.inputPrice ? (
-              <p className="text-xs text-destructive">{errors.inputPrice}</p>
-            ) : null}
+        <div className="space-y-2">
+          <span className="text-xs font-medium text-muted-foreground">Input — USD per 1M tokens</span>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="model-input-short">Short ≤ 128K</Label>
+              <Input
+                id="model-input-short"
+                type="number"
+                step="any"
+                min={0}
+                placeholder="2.50"
+                value={inputPriceShort}
+                onChange={(e) => setInputPriceShort(e.target.value)}
+                aria-invalid={errors.inputPriceShort !== undefined}
+              />
+              {errors.inputPriceShort ? (
+                <p className="text-xs text-destructive">{errors.inputPriceShort}</p>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="model-input-long">Long &gt; 128K</Label>
+              <Input
+                id="model-input-long"
+                type="number"
+                step="any"
+                min={0}
+                placeholder="4.00"
+                value={inputPriceLong}
+                onChange={(e) => setInputPriceLong(e.target.value)}
+                aria-invalid={errors.inputPriceLong !== undefined}
+              />
+              {errors.inputPriceLong ? (
+                <p className="text-xs text-destructive">{errors.inputPriceLong}</p>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="model-input-cached">Cached hit</Label>
+              <Input
+                id="model-input-cached"
+                type="number"
+                step="any"
+                min={0}
+                placeholder="0.25"
+                value={inputPriceCached}
+                onChange={(e) => setInputPriceCached(e.target.value)}
+                aria-invalid={errors.inputPriceCached !== undefined}
+              />
+              {errors.inputPriceCached ? (
+                <p className="text-xs text-destructive">{errors.inputPriceCached}</p>
+              ) : null}
+            </div>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="model-output">Output price / 1M tokens</Label>
-            <Input
-              id="model-output"
-              type="number"
-              step="any"
-              min={0}
-              placeholder="10.00"
-              value={outputPrice}
-              onChange={(e) => setOutputPrice(e.target.value)}
-              aria-invalid={errors.outputPrice !== undefined}
-            />
-            {errors.outputPrice ? (
-              <p className="text-xs text-destructive">{errors.outputPrice}</p>
-            ) : null}
+        </div>
+        <div className="space-y-2">
+          <span className="text-xs font-medium text-muted-foreground">Output — USD per 1M tokens</span>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="model-output-short">Short ≤ 128K</Label>
+              <Input
+                id="model-output-short"
+                type="number"
+                step="any"
+                min={0}
+                placeholder="10.00"
+                value={outputPriceShort}
+                onChange={(e) => setOutputPriceShort(e.target.value)}
+                aria-invalid={errors.outputPriceShort !== undefined}
+              />
+              {errors.outputPriceShort ? (
+                <p className="text-xs text-destructive">{errors.outputPriceShort}</p>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="model-output-long">Long &gt; 128K</Label>
+              <Input
+                id="model-output-long"
+                type="number"
+                step="any"
+                min={0}
+                placeholder="15.00"
+                value={outputPriceLong}
+                onChange={(e) => setOutputPriceLong(e.target.value)}
+                aria-invalid={errors.outputPriceLong !== undefined}
+              />
+              {errors.outputPriceLong ? (
+                <p className="text-xs text-destructive">{errors.outputPriceLong}</p>
+              ) : null}
+            </div>
           </div>
         </div>
         {errors.root ? <p className="text-xs text-destructive">{errors.root}</p> : null}
@@ -222,8 +305,9 @@ export default function ModelsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>Model</TableHead>
-                <TableHead className="text-right">Input / 1M tokens</TableHead>
-                <TableHead className="text-right">Output / 1M tokens</TableHead>
+                <TableHead className="text-right">Input (short → long) / 1M</TableHead>
+                <TableHead className="text-right">Input cached / 1M</TableHead>
+                <TableHead className="text-right">Output (short → long) / 1M</TableHead>
                 <TableHead>Updated</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -232,8 +316,13 @@ export default function ModelsPage() {
               {items.map((item) => (
                 <TableRow key={item.id}>
                   <TableCell className="font-medium">{item.model}</TableCell>
-                  <TableCell className="text-right">{formatUsd(item.inputPrice)}</TableCell>
-                  <TableCell className="text-right">{formatUsd(item.outputPrice)}</TableCell>
+                  <TableCell className="text-right whitespace-nowrap">
+                    {formatUsd(item.inputPriceShort)} → {formatUsd(item.inputPriceLong)}
+                  </TableCell>
+                  <TableCell className="text-right">{formatUsd(item.inputPriceCached)}</TableCell>
+                  <TableCell className="text-right whitespace-nowrap">
+                    {formatUsd(item.outputPriceShort)} → {formatUsd(item.outputPriceLong)}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(item.updatedAt)}
                   </TableCell>
@@ -281,8 +370,8 @@ export default function ModelsPage() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            Delete the price entry for <strong>{deleting?.model}</strong>? Requests to this model
-            will be rejected.
+            Delete the price entry for <strong>{deleting?.model}</strong>? Requests to a model
+            without a price entry are not billed — usage is recorded with a warning.
           </p>
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setDeleting(null)} disabled={deleteModel.isPending}>

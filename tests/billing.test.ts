@@ -1,5 +1,7 @@
 // M4 计费核心单测（vitest + miniflare）：
-// 1) 费用计算与宽松 usage 提取；2) 扣费正确性（余额/流水/明细）；3) 并发扣费不超扣（条件 UPDATE 原子性）；4) admin 余额调整。
+// 1) calcCost 分层/缓存矩阵（short/long/cached、128K 边界）；2) 价格表查询 5 列映射；
+// 3) usage 缓存 token 提取（openai / anthropic 非流式 / anthropic 流式尾包 / loose 兜底）；
+// 4) 扣费正确性（余额/流水/明细）；5) 并发扣费不超扣（条件 UPDATE 原子性）；6) admin 余额调整。
 import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../src/db";
@@ -9,13 +11,18 @@ import {
   chargeUsage,
   extractLooseUsage,
   findModelPrice,
+  SHORT_CONTEXT_THRESHOLD,
+  type ModelPrice,
 } from "../src/lib/billing";
+import { parseOpenAiUsage } from "../src/providers/openai";
+import { anthropicAdapter } from "../src/providers/anthropic";
 import {
   applyMigrations,
   countTxByType,
   getBalance,
   latestLogStatus,
   setupKey,
+  setupPrice,
   setupProviderWithModel,
   setupUser,
 } from "./helpers";
@@ -24,28 +31,203 @@ beforeAll(async () => {
   await applyMigrations();
 });
 
-describe("calcCost / 价格表", () => {
-  it("按 每百万 tokens 单价计算费用（USD/1e6）", () => {
-    const cost = calcCost(
-      { promptTokens: 1000, completionTokens: 500 },
-      { inputPrice: 2.5, outputPrice: 10 },
-    );
-    // 1000*2.5/1e6 + 500*10/1e6 = 0.0025 + 0.005
-    expect(cost).toBeCloseTo(0.0075, 12);
+/** 测试价格档（long=short×2、cached=short×10%，与 seed 中 gpt-5.x 量级一致）。 */
+const PRICE: ModelPrice = {
+  inputPriceShort: 2,
+  inputPriceLong: 4,
+  inputPriceCached: 0.2,
+  outputPriceShort: 10,
+  outputPriceLong: 15,
+};
+
+// ============ SSE 测试辅助（Anthropic 流式） ============
+
+/** 组装 SSE 字节流（事件块间空行分隔，与上游 text/event-stream 一致）。 */
+function sseBody(blocks: string[]): ReadableStream<Uint8Array> {
+  const response = new Response(new TextEncoder().encode(blocks.join("\n\n") + "\n\n"));
+  const body = response.body;
+  if (!body) {
+    throw new Error("test: Response body is null");
+  }
+  return body;
+}
+
+/** 解析转换后 OpenAI SSE 文本的 data: 块（跳过 [DONE] 终止符）。 */
+function parseSseLines(text: string): unknown[] {
+  const chunks: unknown[] = [];
+  for (const line of text.split("\n")) {
+    if (line.startsWith("data: ")) {
+      const payload = line.slice(6);
+      if (payload !== "[DONE]") {
+        chunks.push(JSON.parse(payload) as unknown);
+      }
+    }
+  }
+  return chunks;
+}
+
+describe("calcCost 分层 + 缓存矩阵", () => {
+  it("short 档：未缓存输入 ≤ 128K → short 输入价 + short 输出价", () => {
+    const cost = calcCost({ promptTokens: 1000, completionTokens: 500 }, PRICE);
+    // 1000*2 + 500*10 = 7000 → /1e6 = 0.007
+    expect(cost).toBeCloseTo(0.007, 12);
   });
 
-  it("extractLooseUsage 兜底只含 prompt_tokens 的 usage（embeddings 场景）", () => {
-    const usage = extractLooseUsage({ usage: { prompt_tokens: 3, total_tokens: 3 } });
-    expect(usage).toEqual({ promptTokens: 3, completionTokens: 0 });
+  it("long 档：未缓存输入 > 128K → long 输入价 + long 输出价（输出联动）", () => {
+    const cost = calcCost({ promptTokens: 200_000, completionTokens: 500 }, PRICE);
+    // 200000*4 + 500*15 = 807500 → 0.8075
+    expect(cost).toBeCloseTo(0.8075, 12);
+  });
+
+  it("边界：未缓存输入恰好 128000 → short；128001 → long", () => {
+    expect(SHORT_CONTEXT_THRESHOLD).toBe(128_000);
+    expect(calcCost({ promptTokens: 128_000, completionTokens: 0 }, PRICE)).toBeCloseTo(0.256, 12);
+    expect(calcCost({ promptTokens: 128_001, completionTokens: 0 }, PRICE)).toBeCloseTo(0.512004, 12);
+  });
+
+  it("缓存命中输入按 cached 价，未缓存部分按档计价", () => {
+    const cost = calcCost(
+      { promptTokens: 2000, completionTokens: 500, cachedTokens: 1000 },
+      PRICE,
+    );
+    // 1000*0.2 + 1000*2 + 500*10 = 7200 → 0.0072
+    expect(cost).toBeCloseTo(0.0072, 12);
+  });
+
+  it("档位只看未缓存输入：大量缓存命中输入不触发 long 档", () => {
+    const cost = calcCost(
+      { promptTokens: 200_000, completionTokens: 1000, cachedTokens: 100_000 },
+      PRICE,
+    );
+    // 未缓存 100000 ≤ 128K → short 档；100000*0.2 + 100000*2 + 1000*10 = 230000 → 0.23
+    expect(cost).toBeCloseTo(0.23, 12);
+  });
+
+  it("cachedTokens 缺失或为 0 按 0 计（无缓存细分）", () => {
+    expect(calcCost({ promptTokens: 1000, completionTokens: 500 }, PRICE)).toBeCloseTo(0.007, 12);
+    expect(calcCost({ promptTokens: 1000, completionTokens: 500, cachedTokens: 0 }, PRICE)).toBeCloseTo(
+      0.007,
+      12,
+    );
+  });
+
+  it("负数缓存 token 防御性截为 0", () => {
+    const cost = calcCost({ promptTokens: 1000, completionTokens: 500, cachedTokens: -100 }, PRICE);
+    expect(cost).toBeCloseTo(0.007, 12);
+  });
+});
+
+describe("findModelPrice 价格表查询", () => {
+  it("返回全部 5 个价格档（short/long/cached 输入 + short/long 输出）", async () => {
+    const db = createDb(env);
+    await setupPrice("pricing-tier-test", 2, 4, 0.2, 10, 15);
+    expect(await findModelPrice(db, "pricing-tier-test")).toEqual(PRICE);
+  });
+
+  it("查不到价格返回 null（免计路径）", async () => {
+    const db = createDb(env);
+    expect(await findModelPrice(db, "no-such-model")).toBeNull();
+  });
+});
+
+describe("usage 缓存 token 提取", () => {
+  it("OpenAI 形态：prompt_tokens_details.cached_tokens → cachedTokens", () => {
+    const usage = parseOpenAiUsage({
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        prompt_tokens_details: { cached_tokens: 4 },
+      },
+    });
+    expect(usage).toEqual({ promptTokens: 10, completionTokens: 5, cachedTokens: 4 });
+  });
+
+  it("OpenAI 形态：无缓存细分 → cachedTokens undefined", () => {
+    expect(parseOpenAiUsage({ usage: { prompt_tokens: 10, completion_tokens: 5 } })).toEqual({
+      promptTokens: 10,
+      completionTokens: 5,
+      cachedTokens: undefined,
+    });
+  });
+
+  it("OpenAI 形态：非对象 / 无 usage 返回 null", () => {
+    expect(parseOpenAiUsage("oops")).toBeNull();
+    expect(parseOpenAiUsage({ id: "x", choices: [] })).toBeNull();
+  });
+
+  it("Anthropic 非流式：cache_read_input_tokens → cachedTokens（写入量留在输入内按普通计）", () => {
+    const usage = anthropicAdapter.parseUsage({
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_input_tokens: 4,
+        cache_creation_input_tokens: 6,
+      },
+    });
+    expect(usage).toEqual({ promptTokens: 10, completionTokens: 5, cachedTokens: 4 });
+  });
+
+  it("Anthropic 非流式：仅 cache_creation（缓存写入）→ cachedTokens undefined", () => {
+    const usage = anthropicAdapter.parseUsage({
+      usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 6 },
+    });
+    expect(usage).toEqual({ promptTokens: 10, completionTokens: 5, cachedTokens: undefined });
+  });
+
+  it("Anthropic 流式尾包：message_start 的 cache_read 进入 usage.prompt_tokens_details", async () => {
+    const transformed = anthropicAdapter.transformStreamToOpenAI(
+      sseBody([
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","model":"claude-x","usage":{"input_tokens":10,"cache_read_input_tokens":4,"cache_creation_input_tokens":6}}}',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}',
+        'event: message_stop\ndata: {"type":"message_stop"}',
+      ]),
+    );
+    const chunks = parseSseLines(await new Response(transformed).text());
+    // 最后一个 data 块为 usage 尾包（[DONE] 终止符已被跳过）
+    const tail = chunks[chunks.length - 1];
+    expect(tail).toBeDefined();
+    expect(parseOpenAiUsage(tail)).toEqual({ promptTokens: 10, completionTokens: 5, cachedTokens: 4 });
+  });
+
+  it("Anthropic 流式尾包：无缓存读取时不带 prompt_tokens_details", async () => {
+    const transformed = anthropicAdapter.transformStreamToOpenAI(
+      sseBody([
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_2","model":"claude-x","usage":{"input_tokens":10}}}',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}',
+        'event: message_stop\ndata: {"type":"message_stop"}',
+      ]),
+    );
+    const chunks = parseSseLines(await new Response(transformed).text());
+    const tail = chunks[chunks.length - 1];
+    expect(tail).toBeDefined();
+    expect(parseOpenAiUsage(tail)).toEqual({
+      promptTokens: 10,
+      completionTokens: 5,
+      cachedTokens: undefined,
+    });
+  });
+
+  it("extractLooseUsage 兜底：OpenAI 形态缓存细分 + 仅 prompt_tokens 场景（embeddings）", () => {
+    expect(
+      extractLooseUsage({
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          prompt_tokens_details: { cached_tokens: 4 },
+        },
+      }),
+    ).toEqual({ promptTokens: 10, completionTokens: 5, cachedTokens: 4 });
+    expect(extractLooseUsage({ usage: { prompt_tokens: 3, total_tokens: 3 } })).toEqual({
+      promptTokens: 3,
+      completionTokens: 0,
+      cachedTokens: undefined,
+    });
   });
 
   it("extractLooseUsage 对无 usage 返回 null（免计路径）", () => {
     expect(extractLooseUsage({ id: "x", choices: [] })).toBeNull();
-  });
-
-  it("查不到价格返回 null", async () => {
-    const db = createDb(env);
-    expect(await findModelPrice(db, "no-such-model")).toBeNull();
   });
 });
 
@@ -57,22 +239,19 @@ describe("chargeUsage 原子扣费", () => {
   ): Promise<{ userId: number; keyId: number; providerId: number }> {
     const userId = await setupUser(email, balance);
     const { keyId } = await setupKey(userId);
-    const providerId = await setupProviderWithModel("gpt-4o");
+    const providerId = await setupProviderWithModel("gpt-5.6-sol");
     return { userId, keyId, providerId };
   }
 
   it("成功请求扣除正确金额，写 usage 流水与 success 明细", async () => {
     const db = createDb(env);
     const { userId, keyId, providerId } = await setupBillingUser("charge@test.dev", 10);
-    const cost = calcCost(
-      { promptTokens: 1000, completionTokens: 500 },
-      { inputPrice: 2.5, outputPrice: 10 },
-    );
+    const cost = calcCost({ promptTokens: 1000, completionTokens: 500 }, PRICE);
     const result = await chargeUsage(db, {
       userId,
       keyId,
       providerId,
-      model: "gpt-4o",
+      model: "gpt-5.6-sol",
       promptTokens: 1000,
       completionTokens: 500,
       cost,
@@ -93,7 +272,7 @@ describe("chargeUsage 原子扣费", () => {
       userId,
       keyId,
       providerId,
-      model: "gpt-4o",
+      model: "gpt-5.6-sol",
       promptTokens: 0,
       completionTokens: 0,
       cost: 0,
@@ -115,7 +294,7 @@ describe("chargeUsage 原子扣费", () => {
       userId,
       keyId,
       providerId,
-      model: "gpt-4o",
+      model: "gpt-5.6-sol",
       promptTokens: 1000,
       completionTokens: 500,
       cost: 10,
@@ -136,7 +315,7 @@ describe("chargeUsage 原子扣费", () => {
         userId,
         keyId,
         providerId,
-        model: "gpt-4o",
+        model: "gpt-5.6-sol",
         promptTokens: 0,
         completionTokens: 0,
         cost: 1,

@@ -10,30 +10,58 @@ import type { TokenUsage } from "../providers/types";
 export type RequestLogStatus = "success" | "error" | "cached" | "rejected";
 
 export interface ModelPrice {
-  inputPrice: number;
-  outputPrice: number;
+  inputPriceShort: number;
+  inputPriceLong: number;
+  inputPriceCached: number;
+  outputPriceShort: number;
+  outputPriceLong: number;
 }
 
 /** 单价单位：USD / 每百万 tokens（seed.sql 与 models 表一致）。 */
 const PRICE_PER_MILLION = 1_000_000;
 
-/** 费用 = prompt_tokens × 输入单价 + completion_tokens × 输出单价（PRD R5.2）。 */
+/** 分层阈值（M9）：未命中缓存的输入 tokens 超过该值时按 long 档（输入+输出），否则 short 档。 */
+export const SHORT_CONTEXT_THRESHOLD = 128_000;
+
+/**
+ * 费用 = 缓存命中输入 × 缓存价 + 未缓存输入 × (short|long) 输入价 + 输出 × (short|long) 输出价
+ * 档位判定只看未缓存输入长度（边界：恰好 = 阈值走 short 档）；缓存命中的部分已按缓存价计，不参与分层。
+ */
 export function calcCost(usage: TokenUsage, price: ModelPrice): number {
-  const inputCost = (usage.promptTokens * price.inputPrice) / PRICE_PER_MILLION;
-  const outputCost = (usage.completionTokens * price.outputPrice) / PRICE_PER_MILLION;
-  return inputCost + outputCost;
+  const cached = Math.max(0, usage.cachedTokens ?? 0);
+  const uncachedInput = Math.max(0, usage.promptTokens - cached);
+  const longTier = uncachedInput > SHORT_CONTEXT_THRESHOLD;
+  const inputPrice = longTier ? price.inputPriceLong : price.inputPriceShort;
+  const outputPrice = longTier ? price.outputPriceLong : price.outputPriceShort;
+  return (
+    cached * price.inputPriceCached +
+    uncachedInput * inputPrice +
+    usage.completionTokens * outputPrice
+  ) / PRICE_PER_MILLION;
 }
 
 /** 价格表查询（models 表 = seed 默认 + admin 覆盖的唯一来源；查不到返回 null → 免计）。 */
 export async function findModelPrice(db: Db, model: string): Promise<ModelPrice | null> {
   const row = await db.query.models.findFirst({
     where: eq(models.model, model),
-    columns: { inputPrice: true, outputPrice: true },
+    columns: {
+      inputPriceShort: true,
+      inputPriceLong: true,
+      inputPriceCached: true,
+      outputPriceShort: true,
+      outputPriceLong: true,
+    },
   });
   if (!row) {
     return null;
   }
-  return { inputPrice: row.inputPrice, outputPrice: row.outputPrice };
+  return {
+    inputPriceShort: row.inputPriceShort,
+    inputPriceLong: row.inputPriceLong,
+    inputPriceCached: row.inputPriceCached,
+    outputPriceShort: row.outputPriceShort,
+    outputPriceLong: row.outputPriceLong,
+  };
 }
 
 /**
@@ -57,7 +85,17 @@ export function extractLooseUsage(body: unknown): TokenUsage | null {
   const promptTokens = typeof prompt === "number" && Number.isFinite(prompt) ? Math.max(0, prompt) : 0;
   const completionTokens =
     typeof completion === "number" && Number.isFinite(completion) ? Math.max(0, completion) : 0;
-  return { promptTokens, completionTokens };
+  // OpenAI 形态缓存细分（prompt_tokens_details.cached_tokens）；缺失按 undefined（≈0 计）
+  const details = u["prompt_tokens_details"];
+  const cachedRaw =
+    details && typeof details === "object"
+      ? (details as Record<string, unknown>)["cached_tokens"]
+      : undefined;
+  const cachedTokens =
+    typeof cachedRaw === "number" && Number.isFinite(cachedRaw) && cachedRaw > 0
+      ? cachedRaw
+      : undefined;
+  return { promptTokens, completionTokens, cachedTokens };
 }
 
 // ============ request_logs 明细 ============

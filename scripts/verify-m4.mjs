@@ -31,11 +31,15 @@ const OPENAI_PROVIDER = {
   },
 };
 
-// gpt-4o-mini 价格（POST /api/models 写入）：0.15 输入 / 0.6 输出 USD/1e6
-// 非流式/流式 mock usage = 10 prompt + 5 completion → cost = 10*0.15/1e6 + 5*0.6/1e6 = 4.5e-6
-const INPUT_PRICE = 0.15;
-const OUTPUT_PRICE = 0.6;
-const CHAT_COST = (10 * INPUT_PRICE + 5 * OUTPUT_PRICE) / 1_000_000;
+// gpt-4o-mini 价格（POST /api/models 写入）：short/long/cached 输入 + short/long 输出 USD/1e6
+// 非流式/流式 mock usage = 10 prompt + 5 completion（无缓存命中）→ short 档：
+//   cost = 10*0.15/1e6 + 5*0.6/1e6 = 4.5e-6
+const INPUT_PRICE_SHORT = 0.15;
+const INPUT_PRICE_LONG = 0.15;
+const INPUT_PRICE_CACHED = 0.0375;
+const OUTPUT_PRICE_SHORT = 0.6;
+const OUTPUT_PRICE_LONG = 0.6;
+const CHAT_COST = (10 * INPUT_PRICE_SHORT + 5 * OUTPUT_PRICE_SHORT) / 1_000_000;
 
 let passed = 0;
 let failed = 0;
@@ -212,24 +216,25 @@ async function main() {
 
   // ---------- 2. 价格表 admin CRUD（4.1） ----------
   console.log("\n[2] price table CRUD (/api/models, admin)");
-  const createPrice = await api("/api/models", { method: "POST", ...authApi, body: { model: "gpt-4o-mini", inputPrice: INPUT_PRICE, outputPrice: OUTPUT_PRICE } });
+  const createPrice = await api("/api/models", { method: "POST", ...authApi, body: { model: "gpt-4o-mini", inputPriceShort: INPUT_PRICE_SHORT, inputPriceLong: INPUT_PRICE_LONG, inputPriceCached: INPUT_PRICE_CACHED, outputPriceShort: OUTPUT_PRICE_SHORT, outputPriceLong: OUTPUT_PRICE_LONG } });
   const priceModelId = createPrice.json?.model?.id;
-  report("create model price", createPrice.status === 200 && createPrice.json?.model?.model === "gpt-4o-mini" && createPrice.json?.model?.inputPrice === INPUT_PRICE, `status=${createPrice.status}`);
+  report("create model price", createPrice.status === 200 && createPrice.json?.model?.model === "gpt-4o-mini" && createPrice.json?.model?.inputPriceShort === INPUT_PRICE_SHORT, `status=${createPrice.status}`);
 
-  const dupPrice = await api("/api/models", { method: "POST", ...authApi, body: { model: "gpt-4o-mini", inputPrice: 1, outputPrice: 1 } });
+  const dupPrice = await api("/api/models", { method: "POST", ...authApi, body: { model: "gpt-4o-mini", inputPriceShort: 1, inputPriceLong: 1, inputPriceCached: 0.1, outputPriceShort: 1, outputPriceLong: 1 } });
   report("duplicate model price → 409", dupPrice.status === 409, `status=${dupPrice.status}`);
 
-  const createTmp = await api("/api/models", { method: "POST", ...authApi, body: { model: "tmp-custom", inputPrice: 1.5, outputPrice: 3 } });
+  const createTmp = await api("/api/models", { method: "POST", ...authApi, body: { model: "tmp-custom", inputPriceShort: 1.5, inputPriceLong: 1.5, inputPriceCached: 0.15, outputPriceShort: 3, outputPriceLong: 3 } });
   const tmpModelId = createTmp.json?.model?.id;
   report("create tmp price", createTmp.status === 200, `status=${createTmp.status}`);
 
-  const updatePrice = await api(`/api/models/${tmpModelId}`, { method: "PATCH", ...authApi, body: { inputPrice: 2.5 } });
-  report("update price (PATCH)", updatePrice.status === 200 && updatePrice.json?.model?.inputPrice === 2.5, `status=${updatePrice.status}`);
+  // PATCH 单字段（long 档）→ 验证 partial 更新 + “至少一个价格字段” refine 通过
+  const updatePrice = await api(`/api/models/${tmpModelId}`, { method: "PATCH", ...authApi, body: { inputPriceLong: 2.5 } });
+  report("update price (PATCH)", updatePrice.status === 200 && updatePrice.json?.model?.inputPriceLong === 2.5, `status=${updatePrice.status}`);
 
   const listPrices = await api("/api/models", authApi);
   report("list prices (2 items)", listPrices.status === 200 && (listPrices.json?.items ?? []).length === 2, `status=${listPrices.status}`);
 
-  const memberCreatePrice = await api("/api/models", { method: "POST", cookie: memberCookie, body: { model: "hack", inputPrice: 1, outputPrice: 1 } });
+  const memberCreatePrice = await api("/api/models", { method: "POST", cookie: memberCookie, body: { model: "hack", inputPriceShort: 1, inputPriceLong: 1, inputPriceCached: 0.1, outputPriceShort: 1, outputPriceLong: 1 } });
   report("member create price → 403", memberCreatePrice.status === 403, `status=${memberCreatePrice.status}`);
 
   const deletePrice = await api(`/api/models/${tmpModelId}`, { method: "DELETE", ...authApi });

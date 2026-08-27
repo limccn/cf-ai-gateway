@@ -38,7 +38,7 @@ describe("响应缓存", () => {
     const userId = await setupUser("cache@test.dev", 10);
     const { keyId, plaintext } = await setupKey(userId, { cacheEnabled: true, cacheTtl: 3600 });
     await setupProviderWithModel("gpt-4o-mini");
-    await setupPrice("gpt-4o-mini", 0.15, 0.6);
+    await setupPrice("gpt-4o-mini", 0.15, 0.15, 0.0375, 0.6, 0.6);
 
     const bodyHash = await hashRequestBody(BODY);
     const cacheKey = buildCacheKey(keyId, "gpt-4o-mini", bodyHash);
@@ -71,7 +71,7 @@ describe("响应缓存", () => {
     const userId = await setupUser("cache-miss@test.dev", 10);
     const { plaintext } = await setupKey(userId, { cacheEnabled: true, cacheTtl: 3600 });
     await setupProviderWithModel("gpt-4o-mini");
-    await setupPrice("gpt-4o-mini", 0.15, 0.6);
+    await setupPrice("gpt-4o-mini", 0.15, 0.15, 0.0375, 0.6, 0.6);
 
     const res = await postChat(plaintext);
     expect(res.status).toBe(502);
