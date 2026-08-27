@@ -9,7 +9,9 @@
 //   wrangler dev（vite，默认 5173；DEV_PORT 可覆盖）
 //   provider A → http://127.0.0.1:8788/openai  weight 3
 //   provider B → http://127.0.0.1:8789/openai  weight 1
-// 落点区分：mock 回显上游模型名，响应体 model 字段 = 落点（gpt-4o-mini → A，gpt-4o-mini-2 → B）。
+// 落点区分：响应体 system_fingerprint="mock:<上游模型名>"（disguise 层只重写 model/error.message，
+//   不触碰该字段）—— 多上游与 disguise 共存后，model 字段恒为请求内部名 gpt-4o-e2e，
+//   fingerprint 成为落点信号（mock-upstream.mjs 约定）。
 //
 // 用法：node scripts/verify-multi-upstream.mjs [--keep]
 //   --keep：跑完不杀子进程（留现场排查）。
@@ -29,6 +31,8 @@ const KEEP = process.argv.includes("--keep");
 const MODEL = "gpt-4o-e2e";       // 网关内部模型名
 const MODEL_A = "gpt-4o-mini";    // A 上游回显（mock 恒回显 body.model）
 const MODEL_B = "gpt-4o-mini-2";  // B 上游回显
+const FP_A = `mock:${MODEL_A}`;   // A 落点指纹（响应 system_fingerprint）
+const FP_B = `mock:${MODEL_B}`;   // B 落点指纹
 const MOCK_A = 8788;
 const MOCK_B = 8789;
 const FAIL_MODEL = "error-500";   // mock 约定：该模型恒返回 500
@@ -223,13 +227,18 @@ async function main() {
   const weights = (listRes.json?.items ?? []).filter((p) => [providerA, providerB].includes(p.id)).map((p) => p.weight).sort();
   check("管理 API 回显 weight [1,3]", JSON.stringify(weights) === "[1,3]", JSON.stringify(weights));
 
-  // 6. 粘性：同一 key 连续 5 次 → 响应 model 恒同（无状态哈希，无共享存储）
+  // 6. 粘性：同一 key 连续 5 次 → 落点指纹恒同（无状态哈希，无共享存储）；
+  //    disguise 生效：响应 model 恒为请求内部名
+  const stickyFps = [];
   const stickyModels = [];
   for (let i = 0; i < 5; i++) {
     const r = await chat(keyPlain);
+    stickyFps.push(r.json?.system_fingerprint);
     stickyModels.push(r.json?.model);
   }
-  check("粘性：同一 key 恒落同一 provider", stickyModels.every((m) => m === stickyModels[0]),
+  check("粘性：同一 key 恒落同一 provider", stickyFps.every((fp) => fp === stickyFps[0]),
+    stickyFps.join(","));
+  check("disguise：响应 model 恒为请求内部名", stickyModels.every((m) => m === MODEL),
     stickyModels.join(","));
 
   // 7. 权重 3:1：50 个 key → 落 A（gpt-4o-mini）比例 ≈ 75%
@@ -255,13 +264,14 @@ async function main() {
       }
       throw error;
     }
-    if (r.json?.model === MODEL_A) hitCount.A++;
-    else if (r.json?.model === MODEL_B) hitCount.B++;
-    else console.log(`[warn] unexpected model=${r.json?.model} status=${r.status}`);
+    const fp = r.json?.system_fingerprint;
+    if (fp === FP_A) hitCount.A++;
+    else if (fp === FP_B) hitCount.B++;
+    else console.log(`[warn] unexpected fp=${fp} model=${r.json?.model} status=${r.status}`);
     // 预测校验：每个 key 的落点应与纯函数一致（顺带验证粘性预测）
-    if (Number.isInteger(id) && r.json?.model) {
-      const predicted = primaryIndex(id) === 0 ? MODEL_A : MODEL_B;
-      if (predicted !== r.json.model) check(`key ${id} 落点与 FNV-1a 预测一致`, false, `${predicted} != ${r.json.model}`);
+    if (Number.isInteger(id) && fp) {
+      const predicted = primaryIndex(id) === 0 ? FP_A : FP_B;
+      if (predicted !== fp) check(`key ${id} 落点与 FNV-1a 预测一致`, false, `${predicted} != ${fp}`);
     }
   }
   const total = hitCount.A + hitCount.B;
@@ -287,11 +297,13 @@ async function main() {
   check("取到首选落 B 的 key", failKey !== null, `keyId=${failKeyId}`);
   if (failKey !== null) {
     const r1 = await chat(failKey);
-    check("failover：B 5xx → 转移 A 成功（200 + gpt-4o-mini）", r1.status === 200 && r1.json?.model === MODEL_A,
-      `status=${r1.status} model=${r1.json?.model}`);
+    check("failover：B 5xx → 转移 A 成功（200 + 指纹 A + model 伪装）",
+      r1.status === 200 && r1.json?.system_fingerprint === FP_A && r1.json?.model === MODEL,
+      `status=${r1.status} fp=${r1.json?.system_fingerprint} model=${r1.json?.model}`);
     const r2 = await chat(failKey);
-    check("断路器跳过：B 断路后不再被选（仍落 A）", r2.status === 200 && r2.json?.model === MODEL_A,
-      `status=${r2.status} model=${r2.json?.model}`);
+    check("断路器跳过：B 断路后不再被选（仍落 A）",
+      r2.status === 200 && r2.json?.system_fingerprint === FP_A,
+      `status=${r2.status} fp=${r2.json?.system_fingerprint}`);
   }
 
   // 9. 管理 API 断路状态展示
@@ -307,8 +319,9 @@ async function main() {
   await api(`/api/providers/${providerB}`, { method: "PATCH", cookie: adminCookie, body: { models: { [MODEL]: MODEL_B } } });
   if (failKey !== null) {
     const r = await chat(failKey);
-    check("恢复窗口内：上游已恢复但 B 仍断路 → 继续转移 A", r.status === 200 && r.json?.model === MODEL_A,
-      `status=${r.status} model=${r.json?.model}`);
+    check("恢复窗口内：上游已恢复但 B 仍断路 → 继续转移 A",
+      r.status === 200 && r.json?.system_fingerprint === FP_A,
+      `status=${r.status} fp=${r.json?.system_fingerprint}`);
   }
 
   // 11. 全断：A 也切 error-500 → 首选落 A 的 key
@@ -343,9 +356,9 @@ async function main() {
   await sleep(62_000);
   if (failKey !== null) {
     const r = await chat(failKey);
-    check("TTL 到期自动恢复：请求回到首选 B（gpt-4o-mini-2）",
-      r.status === 200 && r.json?.model === MODEL_B,
-      `status=${r.status} model=${r.json?.model}`);
+    check("TTL 到期自动恢复：请求回到首选 B（指纹 B + model 伪装）",
+      r.status === 200 && r.json?.system_fingerprint === FP_B && r.json?.model === MODEL,
+      `status=${r.status} fp=${r.json?.system_fingerprint} model=${r.json?.model}`);
   }
 
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);

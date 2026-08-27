@@ -30,6 +30,11 @@ import type {
   UpstreamRequest,
 } from "../../providers/types";
 import { decryptSecret } from "../../lib/security";
+import {
+  maskModelInData,
+  maskModelInErrorMessage,
+  maskModelInStream,
+} from "../../lib/model-mask";
 import { parseProviderModels } from "../../lib/provider-models";
 import {
   atOrThrow,
@@ -321,6 +326,9 @@ export function proxyRouteWithOptions(
       let upstreamResp: Response | null = null;
       let adapter: ProviderAdapter | null = null;
       let resolvedProviderId: number = attempts[0]?.providerId ?? 0;
+      // 实际执行 provider 的模型映射（伪装层 upstreamModel 来源；失败路径记录最后一次尝试者）
+      let resolvedModels: Record<string, string> = {};
+      let lastErrorUpstreamModel = model;
       let lastError: { status: number; message: string } | null = null;
       for (let i = 0; i < attempts.length; i++) {
         // i < attempts.length，索引必在界内（越界为不可达防御）
@@ -428,6 +436,7 @@ export function proxyRouteWithOptions(
             error instanceof UpstreamTimeoutError
               ? { status: 504, message: error.message }
               : { status: 502, message: "Failed to reach upstream provider" };
+          lastErrorUpstreamModel = cand.models[model] ?? model;
           continue;
         }
 
@@ -452,10 +461,17 @@ export function proxyRouteWithOptions(
           };
           await recordRequestLog(db, errorLog);
           enqueueUsage(c, errorLog);
-          // 4xx（非 429）为客户端错误，转候选也不会成功：透传，不转移
+          // 4xx（非 429）为客户端错误，转候选也不会成功：透传，不转移（错误消息伪装）
           const retryable = upstreamResp.status === 429 || upstreamResp.status >= 500;
           if (!retryable) {
-            return c.json({ error: { message } }, toContentStatus(upstreamResp.status));
+            return c.json(
+              {
+                error: {
+                  message: maskModelInErrorMessage(message, model, cand.models[model] ?? model),
+                },
+              },
+              toContentStatus(upstreamResp.status),
+            );
           }
           // 429 / 5xx：可转移 → 写断路器 + 转移下一候选
           const reason = upstreamResp.status === 429 ? "429" : "5xx";
@@ -471,20 +487,30 @@ export function proxyRouteWithOptions(
             });
           }
           lastError = { status: upstreamResp.status, message };
+          lastErrorUpstreamModel = cand.models[model] ?? model;
           continue;
         }
 
         // 成功：锁定本次执行的 provider，退出尝试循环
         resolvedProviderId = cand.providerId;
+        resolvedModels = cand.models;
         // 清除转移前记录的最后失败（转移后第二候选成功时不得回退到失败语义）
         lastError = null;
         break;
       }
 
-      // 全部尝试失败（网络/超时/5xx/429 转移后仍失败）：返回最后一次尝试的真实错误
+      // 全部尝试失败（网络/超时/5xx/429 转移后仍失败）：返回最后一次尝试的真实错误（错误消息伪装）
       if (lastError !== null) {
         return c.json(
-          { error: { message: lastError.message } },
+          {
+            error: {
+              message: maskModelInErrorMessage(
+                lastError.message,
+                model,
+                lastErrorUpstreamModel,
+              ),
+            },
+          },
           toContentStatus(lastError.status),
         );
       }
@@ -562,9 +588,15 @@ export function proxyRouteWithOptions(
           model,
           keyId: auth.key.id,
         });
-        // P1：协议出站流式转换（默认恒等；结算包装在前，与输出格式正交）
+        // P1：协议出站流式转换（默认恒等；结算包装在前，与输出格式正交）；
+        // 伪装在最终出站形态上（恒等映射时零开销恒等变换）
         const outboundStream = transformStream ? transformStream(settled) : settled;
-        return new Response(outboundStream, {
+        const maskedStream = maskModelInStream(
+          outboundStream,
+          model,
+          resolvedModels[model] ?? model,
+        );
+        return new Response(maskedStream, {
           headers: {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
@@ -597,10 +629,16 @@ export function proxyRouteWithOptions(
         enqueueUsage(c, nonJsonLog);
         return c.json({ error: { message: "Upstream returned a non-JSON response" } }, 502);
       }
-      // P1：适配器正向转换在前（OpenAI 透传 / Anthropic 格式转换），协议出站转换在最后
+      // P1：适配器正向转换在前（OpenAI 透传 / Anthropic 格式转换），协议出站转换在最后；
+      // 伪装在最终出站形态上（恒等映射时零开销恒等变换）；缓存内容即伪装形态
       const output =
         adapter.transformResponse !== undefined ? adapter.transformResponse(data) : data;
       const outbound = transformResponse !== undefined ? transformResponse(output, c) : output;
+      const maskedOutbound = maskModelInData(
+        outbound,
+        model,
+        resolvedModels[model] ?? model,
+      );
 
       // 7. 计费（成功）：usage → 价格 → 费用 → 条件 UPDATE 原子扣费 + 流水 + 明细
       const usage = adapter.parseUsage(data) ?? extractLooseUsage(data);
@@ -635,10 +673,10 @@ export function proxyRouteWithOptions(
         });
       }
 
-      // 8. 缓存写（非阻塞，不拖慢响应）；缓存内容 = 协议出站形态的响应（P3）
+      // 8. 缓存写（非阻塞，不拖慢响应）；缓存内容 = 伪装后的协议出站形态（P3）
       if (cacheKey !== null) {
         c.executionCtx.waitUntil(
-          setCachedResponse(c.env.CACHE_KV, cacheKey, outbound, auth.key.cacheTtl),
+          setCachedResponse(c.env.CACHE_KV, cacheKey, maskedOutbound, auth.key.cacheTtl),
         );
       }
 
@@ -649,7 +687,7 @@ export function proxyRouteWithOptions(
         cost,
         charged: charge.charged,
       });
-      return c.json(outbound);
+      return c.json(maskedOutbound);
     },
   );
 }

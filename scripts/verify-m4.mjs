@@ -171,18 +171,19 @@ async function main() {
 
   // ---------- 0. 准备本地 D1（幂等可重跑） ----------
   console.log("\n[setup] prepare local D1");
+  // 按 FK 依赖顺序全清（D1 local 开启外键约束）：多 E2E 脚本共享同一本地 D1，
+  // 其它脚本留下的用户/日志会引用 providers → 局部清理必撞 FK；全表删除最幂等。
   runSql(
-    `DELETE FROM invite_codes WHERE created_by IN (SELECT id FROM users WHERE email IN ('${ADMIN_EMAIL}','${MEMBER_EMAIL}'));` +
-      `DELETE FROM accounts WHERE user_id IN (SELECT id FROM users WHERE email IN ('${ADMIN_EMAIL}','${MEMBER_EMAIL}'));` +
-      `DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email IN ('${ADMIN_EMAIL}','${MEMBER_EMAIL}'));` +
-      `DELETE FROM balance_tx WHERE user_id IN (SELECT id FROM users WHERE email IN ('${ADMIN_EMAIL}','${MEMBER_EMAIL}'));` +
-      `DELETE FROM request_logs WHERE user_id IN (SELECT id FROM users WHERE email IN ('${ADMIN_EMAIL}','${MEMBER_EMAIL}'));` +
-      `DELETE FROM usage_daily WHERE user_id IN (SELECT id FROM users WHERE email IN ('${ADMIN_EMAIL}','${MEMBER_EMAIL}'));` +
-      `DELETE FROM api_keys WHERE user_id IN (SELECT id FROM users WHERE email IN ('${ADMIN_EMAIL}','${MEMBER_EMAIL}'));` +
-      `DELETE FROM users WHERE email IN ('${ADMIN_EMAIL}','${MEMBER_EMAIL}');` +
-      `DELETE FROM invite_codes WHERE code IN ('${INVITE_ADMIN}','${INVITE_MEMBER}');` +
+    `DELETE FROM invite_codes;` +
+      `DELETE FROM accounts;` +
+      `DELETE FROM sessions;` +
+      `DELETE FROM balance_tx;` +
+      `DELETE FROM usage_daily;` +
+      `DELETE FROM request_logs;` +
+      `DELETE FROM api_keys;` +
       `DELETE FROM providers;` +
-      `DELETE FROM models;`,
+      `DELETE FROM models;` +
+      `DELETE FROM users WHERE email <> 'bootstrap@example.com';`,
   );
   runSql(
     `INSERT OR IGNORE INTO users (id, email, name, role, status, balance, email_verified, created_at, updated_at) ` +

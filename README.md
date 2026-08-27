@@ -20,6 +20,12 @@ when needed, and settles billing per token from the price table.
 - **Pluggable upstream adapters**: `openai` (OpenAI / DeepSeek / Qwen / Moonshot
   / Gemini-compatible base URLs) and `anthropic` (full request/response/SSE
   format conversion). Adding a provider type only requires a new adapter.
+- **Model disguise mapping**: a provider's `models` map (`internal name → upstream
+  name`) works in both directions — the request is sent upstream under the mapped
+  name, while every model name in the response is rewritten back to the internal
+  name the client requested (non-streaming `model` field, every SSE chunk,
+  `message_start.message.model`, error-message text, and `owned_by` in
+  `/v1/models`). Identity mappings (`internal === upstream`) are zero-overhead.
 - **Team & keys**: GitHub OAuth login (email whitelist, fail-closed) +
   email/password registration with admin invite codes; roles `admin` / `member`;
   per-user API keys (SHA-256 hashed at rest, plaintext shown once) with per-key
