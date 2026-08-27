@@ -43,6 +43,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
     "@cloudflare/vite-plugin": "^1.53.1",
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260825.1",
@@ -52,6 +53,7 @@
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.9.1",
     "jsdom": "^29.1.1",
+    "openai": "^7.5.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.68.0",
     "vite": "^8.2.2",

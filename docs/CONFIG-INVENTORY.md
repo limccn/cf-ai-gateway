@@ -11,7 +11,7 @@
 | KEEP-CODE | 业务默认值/安全策略常量 | 留在代码（已 spec 化） |
 | KEEP-LITERAL | 工具链路径/平台契约/版本钉住/绑定名等 | 保留 toml/配置字面量 |
 
-分类依据：wrangler v4 `{KEY}` 插值仅 `[vars]` 段生效；`database_id` / KV `id` / `routes` / `queue` 名 / `name` 等绑定级字段加载时必须为 TOML 字面量 → 这些值要脱离字面量管理只能走构建时模板渲染（见 C2 design.md）。
+分类依据：wrangler 4.x 对 `{KEY}` 占位符**不插值**（2026-08-26 实测：`wrangler deploy --dry-run` 输出 `env.FOO ("{TEST_FOO}")`，字面量原样进运行时）；`database_id` / KV `id` / `routes` / `queue` 名 / `name` / `[vars]` 全部必须以 TOML 字面量烘焙 → 这些值要脱离字面量管理只能走构建时模板渲染（见 C2 design.md 与 render 脚本注释）。
 
 ---
 
@@ -32,7 +32,7 @@
 | `[[queues.producers]] queue = "usage-aggregation"` | L43 | 队列名（创建时指定），环境差异 | RENDER-ENV → `QUEUE_NAME` | producers/consumers 两处同名引用 |
 | `[[queues.consumers]] max_batch_size / max_retries` | L47-48 | 消费策略 | KEEP-LITERAL | 非环境数据，调优钉住 |
 | `[triggers] crons = ["0 2 * * *"]` | L52 | 调度策略 | KEEP-LITERAL | UTC 固定时间策略，非环境数据 |
-| `[vars]` 五项（`BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `GITHUB_ALLOWED_EMAILS` / `REQUEST_LOG_RETENTION_DAYS` / `API_KEY_PREFIX`） | L61-65 | .dev.vars / 部署端 vars | NATIVE-KEY | 原生 `{KEY}`，部署端可运行时覆盖（repo-governance C3 定案） |
+| `[vars]` 五项（`BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `GITHUB_ALLOWED_EMAILS` / `REQUEST_LOG_RETENTION_DAYS` / `API_KEY_PREFIX`） | L63-68 | .dev.vars / process.env | RENDER-ENV | wrangler 4.x 不解析 `{KEY}`，必须烘焙；本地 .dev.vars 为占位值，部署 export 覆盖（见 §1 注） |
 
 ## 2. [env.staging] 段
 
@@ -45,7 +45,7 @@
 | `kv id` | L84 | dashboard 生成的资源 ID | RENDER-ENV → `STAGING_KV_ID` | 同顶层 |
 | `queue = "usage-aggregation-staging"` | L89/91 | 队列名 | RENDER-ENV → `STAGING_QUEUE_NAME` | producers/consumers 两处 |
 | `migrations_dir` / `binding` / `crons` / `max_batch_size` / `max_retries` / `custom_domain` | 多处 | 同上 | KEEP-LITERAL | 契约/策略，同顶层 |
-| `[env.staging.vars]` 五项 | L103-107 | .dev.vars / 部署端 vars | NATIVE-KEY | 不继承顶层，与顶层同键名同语义 |
+| `[env.staging.vars]` 五项 | L103-108 | .dev.vars / process.env（`STAGING_*` 键） | RENDER-ENV | 不继承顶层，独立 `STAGING_BETTER_AUTH_URL` 等键，与 infra 键同源管理 |
 
 ## 3. drizzle.config.ts
 
@@ -120,7 +120,7 @@
 | 键 | 分类 | 理由 |
 | --- | --- | --- |
 | `BETTER_AUTH_SECRET` / `GITHUB_CLIENT_SECRET` / `GATEWAY_SECRET_KEY` | NATIVE-KEY | 真实 secrets：仅 secret put / .dev.vars，禁入 toml，不渲染 |
-| `BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `GITHUB_ALLOWED_EMAILS` / `REQUEST_LOG_RETENTION_DAYS` | NATIVE-KEY | [vars] 原生 `{KEY}`（见 §1） |
+| `BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `GITHUB_ALLOWED_EMAILS` / `REQUEST_LOG_RETENTION_DAYS` | RENDER-ENV | [vars] 渲染烘焙（见 §1 注）；.dev.vars 本地占位值，部署 export 覆盖 |
 | `SEED_USERS` | NATIVE-KEY | dev-only 初始化数据（生产禁止设置），仅 .dev.vars 注入，不进 toml 不渲染 |
 
 ## 11. docs 部署参数引用
@@ -148,15 +148,25 @@
 | `STAGING_D1_DB_ID` | staging D1 database_id | L79 |
 | `STAGING_KV_ID` | staging KV namespace id | L84 |
 | `STAGING_QUEUE_NAME` | staging 队列名 | L89 + L91 |
+| `API_KEY_PREFIX` | 网关 key 前缀 | L68 |
+| `BETTER_AUTH_URL` | Better Auth 站点 URL（本地占位 / 部署 export） | L64 |
+| `GITHUB_CLIENT_ID` | GitHub OAuth Client ID（非秘密） | L65 |
+| `GITHUB_ALLOWED_EMAILS` | GitHub 登录白名单邮箱（PII，仅 .dev.vars / env） | L66 |
+| `REQUEST_LOG_RETENTION_DAYS` | request_logs 保留天数 | L67 |
+| `STAGING_API_KEY_PREFIX` | staging key 前缀 | L108 |
+| `STAGING_BETTER_AUTH_URL` | staging Better Auth URL | L104 |
+| `STAGING_GITHUB_CLIENT_ID` | staging OAuth Client ID | L105 |
+| `STAGING_GITHUB_ALLOWED_EMAILS` | staging 白名单邮箱 | L106 |
+| `STAGING_REQUEST_LOG_RETENTION_DAYS` | staging 保留天数 | L107 |
 
-共 12 token；本清单 RENDER-ENV 项与 C2 模板 token 集合一一对应（AC2）。渲染范围之外的键（secrets、NATIVE-KEY、SEED_USERS）不进渲染产物（红线）。
+共 20 token；本清单 RENDER-ENV 项与模板 token 集合一一对应（AC2）。渲染范围之外的键（secrets、SEED_USERS）不进渲染产物（红线）。
 
 ## 关联引用与一致性约束
 
 1. **D1_DB_NAME ↔ package.json `db:migrate`/`db:seed` 内联名**：npm 脚本用数据库名定位 binding，D1_DB_NAME 变更须同步 package.json（C3 文档标注；不改渲染机制）。
 2. **D1_DB_NAME ↔ verify-m3/m4 `DB_NAME`**：一次性历史验证脚本，不再演进，仅记录约束。
 3. **生成物 wrangler.toml 路径不变**：vitest `configPath`、vite 插件默认、docs 命令全兼容（C2 design 决策）。
-4. **双环境隔离**：STAGING_* token 独立，防止串环境；`.dev.vars.staging` 缺键回退 `.dev.vars` 共享键（仅限白名单内）。
+4. **双环境隔离**：STAGING_* token 独立，防止串环境；取值链 `process.env` → `.dev.vars` →（`--env staging`）`.dev.vars.staging` 覆盖 → `DEFAULT_VALUES`（staging 文件当前不存在，STAGING_* 值统一在 `.dev.vars`；脚本保留 `.dev.vars.staging` 支持，需覆盖 staging 值时创建即可）。
 
 ## 零 PII / 凭据声明
 

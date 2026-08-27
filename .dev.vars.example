@@ -1,16 +1,17 @@
 # 本地开发环境变量模板（提交入库；复制为 .dev.vars 后填写，.dev.vars 已被 .gitignore 忽略）
-# 生产环境：非敏感键用 `wrangler secret put <KEY>` 或 Cloudflare dashboard 设置同名 vars；
+# 生产环境：非敏感 vars 在部署 shell export 同名环境变量后重新渲染（npm run render:config 烘焙进 wrangler.toml）；
 # 真实 secrets（BETTER_AUTH_SECRET / GITHUB_CLIENT_SECRET / GATEWAY_SECRET_KEY）仅通过 secret put 注入。
 # wrangler.toml 由 wrangler.toml.template 渲染生成（npm run render:config），勿直接修改生成物。
 
 # ---- Infra 结构配置（模板渲染 token；见 docs/CONFIG-INVENTORY.md） ----
-# wrangler 绑定级字段（name / routes / D1 / KV / Queue）必须是 toml 字面量，无法用 {KEY} 插值，
-# 统一经模板渲染自本文件。值从 Cloudflare dashboard 获取（docs/DEPLOY.md §1-3）：
+# wrangler 绑定级字段（name / routes / D1 / KV / Queue）与 [vars] 运行时配置都必须是 toml 字面量
+# （wrangler 4.x 实测不解析 {KEY} 占位符），统一经模板渲染烘焙自本文件。值从 Cloudflare dashboard 获取（docs/DEPLOY.md §1-3）：
 #   WORKER_NAME / DOMAIN      -> Workers & Pages 部署名 / 自定义域名
 #   D1_DB_NAME / D1_DB_ID     -> `wrangler d1 create <name>` 输出（dashboard 复制 database_id）
 #   KV_ID                     -> `wrangler kv namespace create CACHE_KV` 输出
 #   QUEUE_NAME                -> `wrangler queues create <name>` 创建的队列名
-# staging 环境用同名前缀 STAGING_*；`npm run render:config -- --env staging` 优先读 .dev.vars.staging（回退本文件）。
+# staging 环境用同名前缀 STAGING_*；`npm run render:config -- --env staging` 用 STAGING_* 键覆盖同名键。
+# 注意：部署真实环境时在部署 shell export 同名环境变量覆盖本地占位值（process.env 优先于本文件）。
 WORKER_NAME=cf-ai-gateway
 DOMAIN=router.lmlh.net
 D1_DB_NAME=cf-ai-gateway-db
@@ -44,8 +45,14 @@ GATEWAY_SECRET_KEY=local-gateway-secret-key-change-me-0123456789abcdef
 # ---- 其他 ----
 # request_logs 明细保留天数（cron 清理用；缺省 30）
 REQUEST_LOG_RETENTION_DAYS=30
-# 网关 API Key 明文前缀（可选；缺省 sk-。空白视为未设置。仅影响新生成的 Key；部署端需定义同名 vars）
+# 网关 API Key 明文前缀（可选；缺省 sk-。空白视为未设置。仅影响新生成的 Key）
 API_KEY_PREFIX=sk-
+# ---- staging 环境 [vars] 独立值（--env staging 渲染时覆盖顶层同名键；与 STAGING_* infra 键同源管理） ----
+STAGING_BETTER_AUTH_URL=https://stg-router.lmlh.net
+STAGING_GITHUB_CLIENT_ID=replace-me-github-client-id
+STAGING_GITHUB_ALLOWED_EMAILS=alice@example.com
+STAGING_REQUEST_LOG_RETENTION_DAYS=30
+STAGING_API_KEY_PREFIX=sk-
 # 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
 # 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
 # SEED_USERS=

@@ -1,6 +1,6 @@
 # Cloudflare Workers configuration for AI API Gateway.
 # 本文件由 scripts/render-wrangler-config.mjs 从本模板生成 wrangler.toml —— 勿直接修改生成物。
-# 改配置数据：编辑 .dev.vars / .dev.vars.staging（或 CI 注入同名环境变量）后运行 `npm run render:config`。
+# 改配置数据：编辑 .dev.vars（staging 用 STAGING_* 键；或 CI 注入同名环境变量）后运行 `npm run render:config`。
 # 本地开发（Miniflare）：`npm run dev`（vite dev）。
 # 生产部署从零步骤见 docs/DEPLOY.md（创建 D1/KV/Queue → 迁移 → secrets/vars → OAuth App → 首个 admin → deploy）。
 # 双环境：顶层 = production（wrangler deploy），[env.staging] = staging（wrangler deploy --env staging）。
@@ -57,8 +57,9 @@ crons = ["0 2 * * *"]
 # --- 非敏感运行时配置（分类依据 spec backend/environment.md §本项目约定） ---
 # 治理规则：
 # - 真实 secret（GATEWAY_SECRET_KEY / BETTER_AUTH_SECRET / GITHUB_CLIENT_SECRET）→ wrangler secret put / .dev.vars，禁止入本文件。
-# - PII 与环境差异值（邮箱白名单/站点 URL/Client ID）→ "{KEY}" 插值引用（wrangler 原生，渲染不展开）：
-#   值由 .dev.vars（本地）、部署端同名 vars/secret（Cloudflare dashboard 或 CI 导出）解析；缺失即失败（fail-fast）。
+# - PII 与环境差异值（邮箱白名单/站点 URL/Client ID）→ "{KEY}" 渲染时烘焙字面量（实测 wrangler 4.x
+#   不解析 {KEY} 占位符，值必须在构建期就位）：值链 process.env → .dev.vars → DEFAULT_VALUES；
+#   部署真实值时在部署 shell export 同名环境变量覆盖（本地 .dev.vars 为 localhost/占位，仅本地 dev 用）。
 # - 资源 ID（D1/KV/Queue）为基础设施标识符（非秘密），经模板渲染自 .dev.vars（见上）。
 [vars]
 BETTER_AUTH_URL = "{BETTER_AUTH_URL}"
@@ -70,7 +71,7 @@ API_KEY_PREFIX = "{API_KEY_PREFIX}"
 # ====================================================================
 # Staging 环境（wrangler deploy --env staging；worker 名取 STAGING_WORKER_NAME）
 # 与 production 完全隔离：独立 D1/KV/Queue/域名。vars 不继承顶层，需完整声明。
-# 值配置在 .dev.vars 的 STAGING_* 键（--env staging 渲染优先读 .dev.vars.staging）。
+# 值配置在 .dev.vars 的 STAGING_* 键（--env staging 渲染时覆盖顶层同名键）。
 # ====================================================================
 [env.staging]
 name = "{STAGING_WORKER_NAME}"
@@ -101,8 +102,8 @@ max_retries = 3
 crons = ["0 2 * * *"]
 
 [env.staging.vars]
-BETTER_AUTH_URL = "{BETTER_AUTH_URL}"
-GITHUB_CLIENT_ID = "{GITHUB_CLIENT_ID}"
-GITHUB_ALLOWED_EMAILS = "{GITHUB_ALLOWED_EMAILS}"
-REQUEST_LOG_RETENTION_DAYS = "{REQUEST_LOG_RETENTION_DAYS}"
-API_KEY_PREFIX = "{API_KEY_PREFIX}"
+BETTER_AUTH_URL = "{STAGING_BETTER_AUTH_URL}"
+GITHUB_CLIENT_ID = "{STAGING_GITHUB_CLIENT_ID}"
+GITHUB_ALLOWED_EMAILS = "{STAGING_GITHUB_ALLOWED_EMAILS}"
+REQUEST_LOG_RETENTION_DAYS = "{STAGING_REQUEST_LOG_RETENTION_DAYS}"
+API_KEY_PREFIX = "{STAGING_API_KEY_PREFIX}"

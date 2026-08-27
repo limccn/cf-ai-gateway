@@ -12,16 +12,34 @@ export const gatewayAuth = (): MiddlewareHandler<AppEnv> => {
   return async (c, next) => {
     const logger = c.get("logger");
 
+    // P4：Bearer 优先（OpenAI 客户端行为不变）；缺失时回退 x-api-key（Anthropic SDK 默认头）。
+    // token 值只用于 hash 比对，不落日志（security spec）。
     const authHeader = c.req.header("Authorization");
-    const token = authHeader?.startsWith("Bearer ")
+    const bearerToken = authHeader?.startsWith("Bearer ")
       ? authHeader.slice(7).trim()
       : "";
+    const token =
+      bearerToken.length > 0 ? bearerToken : (c.req.header("x-api-key") ?? "").trim();
     if (token.length === 0) {
       logger.warn("gateway_auth_missing", { path: c.req.path });
       return c.json(
-        { error: { message: "Missing API key. Provide 'Authorization: Bearer <gateway_key>'." } },
+        {
+          error: {
+            message:
+              "Missing API key. Provide 'Authorization: Bearer <gateway_key>' or 'x-api-key' header.",
+          },
+        },
         401,
       );
+    }
+
+    // anthropic-version 宽容处理（P4）：缺失不拒绝（curl/多云客户端可能不带）；格式异常仅日志
+    const anthropicVersion = c.req.header("anthropic-version");
+    if (anthropicVersion !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(anthropicVersion)) {
+      logger.warn("anthropic_version_unusual", {
+        version: anthropicVersion,
+        path: c.req.path,
+      });
     }
 
     const hash = await hashToken(token);
