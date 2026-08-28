@@ -3,13 +3,14 @@
 // 时间戳统一 ISO 字符串（type-safety spec）；响应格式 { aggregates, details, total, limit, offset }（M6 前端消费）。
 import { z } from "zod";
 
-export const usageGroupBySchema = z.enum(["date", "model"]);
+export const usageGroupBySchema = z.enum(["date", "model", "hour", "status"]);
 
 export const meUsageQuerySchema = z.object({
   from: z.iso.date().optional(),
   to: z.iso.date().optional(),
   keyId: z.coerce.number().int().positive().optional(),
   model: z.string().max(200).optional(),
+  status: z.enum(["success", "error", "cached", "rejected"]).optional(),
   groupBy: usageGroupBySchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),

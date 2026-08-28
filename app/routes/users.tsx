@@ -1,6 +1,6 @@
 // /users — 用户管理（M6 6.3，admin）：列表搜索/过滤、角色与状态操作、邀请码管理。
 import { useState, type FormEvent } from "react";
-import { Copy, Search, ShieldPlus } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, Power, Search, ShieldPlus } from "lucide-react";
 import { z } from "zod";
 import { useSession } from "@/hooks/use-session";
 import { useUsers } from "@/modules/users/hooks/use-users";
@@ -216,7 +216,7 @@ export default function UsersPage() {
                     <TableHead>Role</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Balance</TableHead>
-                    <TableHead>Joined</TableHead>
+                    <TableHead className="hidden md:table-cell">Joined</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -239,12 +239,14 @@ export default function UsersPage() {
                           </Badge>
                         </TableCell>
                         <TableCell>{formatUsd(item.balance)}</TableCell>
-                        <TableCell className="text-muted-foreground">{formatDateTime(item.createdAt)}</TableCell>
+                        <TableCell className="hidden text-muted-foreground md:table-cell">
+                          {formatDateTime(item.createdAt)}
+                        </TableCell>
                         <TableCell>
-                          <div className="flex items-center justify-end gap-1">
+                          <div className="flex items-center justify-end gap-2">
                             <Button
                               variant="ghost"
-                              size="sm"
+                              size="icon"
                               disabled={isBusy}
                               onClick={() =>
                                 updateUser.mutate({
@@ -252,13 +254,22 @@ export default function UsersPage() {
                                   role: item.role === "admin" ? "member" : "admin",
                                 })
                               }
-                              title={isSelf ? "You cannot change your own role" : "Toggle role"}
+                              aria-label={
+                                item.role === "admin"
+                                  ? `Demote ${item.name} to member`
+                                  : `Promote ${item.name} to admin`
+                              }
+                              title={isSelf ? "You cannot change your own role" : item.role === "admin" ? "Demote to member" : "Promote to admin"}
                             >
-                              {item.role === "admin" ? "Demote" : "Promote"}
+                              {item.role === "admin" ? (
+                                <ArrowDown aria-hidden="true" />
+                              ) : (
+                                <ArrowUp aria-hidden="true" />
+                              )}
                             </Button>
                             <Button
                               variant="ghost"
-                              size="sm"
+                              size="icon"
                               disabled={isBusy || isSelf}
                               className="text-destructive hover:text-destructive"
                               onClick={() =>
@@ -267,9 +278,14 @@ export default function UsersPage() {
                                   status: item.status === "active" ? "disabled" : "active",
                                 })
                               }
-                              title={isSelf ? "You cannot disable your own account" : "Toggle status"}
+                              aria-label={
+                                item.status === "active"
+                                  ? `Disable ${item.name}`
+                                  : `Enable ${item.name}`
+                              }
+                              title={isSelf ? "You cannot disable your own account" : item.status === "active" ? "Disable account" : "Enable account"}
                             >
-                              {item.status === "active" ? "Disable" : "Enable"}
+                              <Power aria-hidden="true" />
                             </Button>
                           </div>
                         </TableCell>

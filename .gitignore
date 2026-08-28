@@ -29,3 +29,6 @@ scripts/ui-audit/
 AGENTS.md
 
 .trellis/
+
+# Playwright MCP 截图/控制台产物
+.playwright-mcp/

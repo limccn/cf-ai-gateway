@@ -5,11 +5,13 @@ import { Filter, RefreshCw } from "lucide-react";
 import type { UsageGroupBy } from "@/modules/usage/types";
 import { useUsage } from "@/modules/usage/hooks/use-usage";
 import { useAdminUsage } from "@/modules/usage/hooks/use-admin-usage";
+import { buildHourlySeries } from "@/modules/usage/hourly";
 import type { UsageParams } from "@/modules/usage/hooks/usage-params";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
 import { useUsers } from "@/modules/users/hooks/use-users";
 import { useSession } from "@/hooks/use-session";
-import { formatDateOnly, formatDateTime, formatNumber, formatShortDate, formatUsd } from "@/lib/format";
+import { useIsMobile } from "@/hooks/use-media-query";
+import { formatDateOnly, formatDateTime, formatDateTimeShort, formatNumber, formatShortDate, formatUsd } from "@/lib/format";
 import { daysAgoParam, toDateParam } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
@@ -33,9 +35,18 @@ import {
 
 const LIMIT = 20;
 
+// 状态语义色（与明细 Badge 配色一致）：success 绿 / cached 黄 / error 红 / rejected 灰
+const STATUS_COLORS: Record<string, string> = {
+  success: "hsl(142 71% 45%)",
+  cached: "hsl(38 92% 50%)",
+  error: "hsl(0 84% 60%)",
+  rejected: "hsl(var(--muted-foreground))",
+};
+
 export default function UsagePage() {
   const { user } = useSession();
   const isAdmin = user?.role === "admin";
+  const isMobile = useIsMobile();
 
   // ===== 筛选状态（点击 Apply 后才写入查询） =====
   const [fromDraft, setFromDraft] = useState(daysAgoParam(30));
@@ -44,6 +55,9 @@ export default function UsagePage() {
   const [modelDraft, setModelDraft] = useState("");
   const [userIdDraft, setUserIdDraft] = useState("");
   const [groupBy, setGroupBy] = useState<UsageGroupBy>("date");
+  const [chartMode, setChartMode] = useState<"day" | "hour">("day");
+  // 明细状态筛选：仅过滤 request_logs（明细 + hour/status 聚合）；date/model 聚合不受影响
+  const [status, setStatus] = useState<"all" | "success" | "error" | "cached" | "rejected">("all");
 
   const [filters, setFilters] = useState<{
     from: string | undefined;
@@ -63,10 +77,29 @@ export default function UsagePage() {
     to: filters.to,
     keyId: filters.keyId,
     model: filters.model,
+    status: status === "all" ? undefined : status,
     groupBy,
     limit: LIMIT,
     offset,
   };
+
+  // Hour 视图固定最近 24h：忽略 from/to 筛选（keyId/model/userId/status 照常过滤）
+  const hourParams: UsageParams =
+    chartMode === "hour"
+      ? {
+          keyId: filters.keyId,
+          model: filters.model,
+          status: status === "all" ? undefined : status,
+          groupBy: "hour",
+          limit: LIMIT,
+          offset,
+        }
+      : { enabled: false };
+  const meHourQuery = useUsage(isAdmin ? { ...hourParams, enabled: false } : hourParams);
+  const adminHourQuery = useAdminUsage(
+    isAdmin ? { ...hourParams, userId: filters.userId } : { ...hourParams, enabled: false },
+  );
+  const hourlyQuery = isAdmin ? adminHourQuery : meHourQuery;
 
   // 两个 hook 始终调用（React Hooks 规则），仅启用其一
   const meQuery = useUsage(isAdmin ? { ...queryParams, enabled: false } : queryParams);
@@ -102,6 +135,7 @@ export default function UsagePage() {
     setModelDraft("");
     setUserIdDraft("");
     setGroupBy("date");
+    setStatus("all");
     setFilters({ from: daysAgoParam(30), to: toDateParam(new Date()), keyId: undefined, model: undefined, userId: undefined });
     setOffset(0);
   };
@@ -126,6 +160,15 @@ export default function UsagePage() {
           color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
         }));
     }
+    if (groupBy === "status") {
+      // 后端只返回有数据的桶；补 0 段，donut 颜色语义稳定
+      return (["success", "cached", "error", "rejected"] as const)
+        .map((s) => ({
+          label: s,
+          value: aggregates.find((agg) => agg.group === s)?.requests ?? 0,
+          color: STATUS_COLORS[s] ?? "hsl(var(--primary))",
+        }));
+    }
     return aggregates
       .filter((agg) => agg.group !== null)
       .map((agg, index) => ({
@@ -134,6 +177,11 @@ export default function UsagePage() {
         color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
       }));
   }, [aggregates, groupBy]);
+
+  const hourlyData = useMemo(
+    () => buildHourlySeries(hourlyQuery.data?.aggregates ?? []),
+    [hourlyQuery.data],
+  );
 
   return (
     <PageContainer>
@@ -225,51 +273,110 @@ export default function UsagePage() {
       </Card>
 
       {/* 图表 */}
-      <div className="mb-6 flex items-center gap-2">
-        <span className="text-sm text-muted-foreground">Group by</span>
-        <Button
-          variant={groupBy === "date" ? "default" : "outline"}
-          size="sm"
-          onClick={() => switchGroupBy("date")}
-        >
-          Date
-        </Button>
-        <Button
-          variant={groupBy === "model" ? "default" : "outline"}
-          size="sm"
-          onClick={() => switchGroupBy("model")}
-        >
-          Model
-        </Button>
-      </div>
-
-      {usageQuery.isLoading ? (
-        <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
-          Loading…
+      {chartMode === "hour" ? (
+        <div className="mb-6 flex items-center gap-2">
+          <span className="text-sm text-muted-foreground">
+            Last 24 hours — hourly request count (from/to filters are ignored)
+          </span>
         </div>
-      ) : usageQuery.isError ? (
-        <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
       ) : (
-        <Card className="mb-6">
-          <CardHeader>
-            <CardTitle>
-              {groupBy === "date" ? "Requests per day" : "Cost by model"}
-            </CardTitle>
-            <CardDescription>
-              {formatDateOnly(filters.from ?? "")} – {formatDateOnly(filters.to ?? "")}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {aggregates.length === 0 ? (
-              <EmptyState title="No usage in this period" description="Try widening the date range or clearing filters." />
-            ) : groupBy === "date" ? (
-              <BarChart data={chartData} height={240} formatValue={formatNumber} />
-            ) : (
-              <DonutChart data={chartData} formatValue={formatUsd} />
-            )}
-          </CardContent>
-        </Card>
+        <div className="mb-6 flex items-center gap-2">
+          <span className="text-sm text-muted-foreground">Group by</span>
+          <Button
+            variant={groupBy === "date" ? "default" : "outline"}
+            size="sm"
+            onClick={() => switchGroupBy("date")}
+          >
+            Date
+          </Button>
+          <Button
+            variant={groupBy === "model" ? "default" : "outline"}
+            size="sm"
+            onClick={() => switchGroupBy("model")}
+          >
+            Model
+          </Button>
+          <Button
+            variant={groupBy === "status" ? "default" : "outline"}
+            size="sm"
+            onClick={() => switchGroupBy("status")}
+          >
+            Status
+          </Button>
+        </div>
       )}
+
+      {chartMode === "hour"
+        ? hourlyQuery.isLoading ? (
+            <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
+              Loading…
+            </div>
+          ) : hourlyQuery.isError ? (
+            <ErrorState message={hourlyQuery.error.message} onRetry={() => hourlyQuery.refetch()} />
+          ) : (
+            <Card className="mb-6">
+              <CardHeader className="flex-row items-center justify-between space-y-0">
+                <div>
+                  <CardTitle>Requests (last 24h)</CardTitle>
+                  <CardDescription>Hourly request count</CardDescription>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button variant="outline" size="sm" onClick={() => setChartMode("day")}>
+                    Day
+                  </Button>
+                  <Button variant="default" size="sm" onClick={() => setChartMode("hour")}>
+                    Hour
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <BarChart data={hourlyData} height={240} formatValue={formatNumber} />
+              </CardContent>
+            </Card>
+          )
+        : usageQuery.isLoading ? (
+            <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
+              Loading…
+            </div>
+          ) : usageQuery.isError ? (
+            <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
+          ) : (
+            <Card className="mb-6">
+              <CardHeader className="flex-row items-center justify-between space-y-0">
+                <div>
+                  <CardTitle>
+                    {groupBy === "date"
+                      ? "Requests per day"
+                      : groupBy === "model"
+                        ? "Cost by model"
+                        : "Requests by status"}
+                  </CardTitle>
+                  <CardDescription>
+                    {formatDateOnly(filters.from ?? "")} – {formatDateOnly(filters.to ?? "")}
+                  </CardDescription>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button variant="default" size="sm" onClick={() => setChartMode("day")}>
+                    Day
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setChartMode("hour")}>
+                    Hour
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {aggregates.length === 0 ? (
+                  <EmptyState title="No usage in this period" description="Try widening the date range or clearing filters." />
+                ) : groupBy === "date" ? (
+                  <BarChart data={chartData} height={240} formatValue={formatNumber} />
+                ) : groupBy === "status" ? (
+                  <DonutChart data={chartData} formatValue={formatNumber} />
+                ) : (
+                  <DonutChart data={chartData} formatValue={formatUsd} />
+                )}
+              </CardContent>
+            </Card>
+          )}
 
       {/* 明细 */}
       <Card>
@@ -280,7 +387,23 @@ export default function UsagePage() {
               {formatNumber(total)} total — page {currentPage} of {totalPages}
             </CardDescription>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            <Select
+              id="usage-status"
+              aria-label="Status filter"
+              value={status}
+              onChange={(e) => {
+                setStatus(e.target.value as typeof status);
+                setOffset(0);
+              }}
+              className="w-36"
+            >
+              <option value="all">All statuses</option>
+              <option value="success">Success</option>
+              <option value="error">Error</option>
+              <option value="cached">Cached</option>
+              <option value="rejected">Rejected</option>
+            </Select>
             <Button
               variant="outline"
               size="sm"
@@ -310,21 +433,23 @@ export default function UsagePage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Time</TableHead>
-                    <TableHead>Key</TableHead>
+                    <TableHead className="hidden sm:table-cell">Key</TableHead>
                     <TableHead>Model</TableHead>
                     <TableHead>Tokens</TableHead>
                     <TableHead>Cost</TableHead>
                     <TableHead>Status</TableHead>
-                    <TableHead>Latency</TableHead>
+                    <TableHead className="hidden md:table-cell">Latency</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {details.map((detail) => (
                     <TableRow key={detail.id}>
-                      <TableCell className="text-muted-foreground">
-                        {formatDateTime(detail.createdAt)}
+                      <TableCell className="whitespace-nowrap text-muted-foreground">
+                        {isMobile
+                          ? formatDateTimeShort(detail.createdAt)
+                          : formatDateTime(detail.createdAt)}
                       </TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">
+                      <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
                         {detail.keyId ?? "—"}
                       </TableCell>
                       <TableCell className="font-medium">{detail.model ?? "—"}</TableCell>
@@ -347,7 +472,7 @@ export default function UsagePage() {
                           {detail.status}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-muted-foreground">
+                      <TableCell className="hidden text-muted-foreground md:table-cell">
                         {detail.latencyMs === null ? "—" : `${formatNumber(detail.latencyMs)}ms`}
                       </TableCell>
                     </TableRow>

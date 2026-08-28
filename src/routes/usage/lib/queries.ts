@@ -10,6 +10,7 @@ export interface UsageFilters {
   userId?: number;
   keyId?: number;
   model?: string;
+  status?: RequestLogStatus; // 仅作用于 request_logs 查询（明细 + status/hour 聚合）；usage_daily 无 status 列
   from?: string; // YYYY-MM-DD（含）
   to?: string; // YYYY-MM-DD（含）
 }
@@ -46,6 +47,9 @@ export function requestLogsWhere(filters: UsageFilters): SQL | undefined {
   }
   if (filters.model !== undefined) {
     conditions.push(eq(requestLogs.model, filters.model));
+  }
+  if (filters.status !== undefined) {
+    conditions.push(eq(requestLogs.status, filters.status));
   }
   if (filters.from !== undefined) {
     conditions.push(
@@ -102,6 +106,45 @@ export async function fetchUsageAggregates(
       .where(where)
       .groupBy(usageDaily.model)
       .orderBy(asc(usageDaily.model));
+    return rows;
+  }
+
+  // 状态占比聚合：usage_daily 无 status 列，从 request_logs 按状态分桶（respect from/to）。
+  // group 键 = status 枚举（success/error/cached/rejected）；前端补缺状态为 0。
+  if (groupBy === "status") {
+    const rows = await db
+      .select({
+        group: requestLogs.status,
+        requests: sql<number>`count(*)`,
+        tokensIn: sql<number>`coalesce(sum(${requestLogs.promptTokens}), 0)`,
+        tokensOut: sql<number>`coalesce(sum(${requestLogs.completionTokens}), 0)`,
+        cost: sql<number>`coalesce(sum(${requestLogs.cost}), 0)`,
+      })
+      .from(requestLogs)
+      .where(requestLogsWhere(filters))
+      .groupBy(requestLogs.status)
+      .orderBy(asc(requestLogs.status));
+    return rows;
+  }
+
+  // 最近 24 小时逐小时聚合：从 request_logs 按 UTC 小时分桶（usage_daily 无小时粒度）。
+  // group 键格式 "YYYY-MM-DDTHH:00:00Z"（与 usage_daily.date 同口径的 UTC 日界）；前端补缺小时为 0。
+  if (groupBy === "hour") {
+    const since = new Date(Date.now() - 24 * 3600 * 1000);
+    // createdAt 为秒（drizzle timestamp mode），直接作 unixepoch 时间戳
+    const hourExpr = sql<string>`strftime('%Y-%m-%dT%H:00:00Z', ${requestLogs.createdAt}, 'unixepoch')`;
+    const rows = await db
+      .select({
+        group: hourExpr,
+        requests: sql<number>`count(*)`,
+        tokensIn: sql<number>`coalesce(sum(${requestLogs.promptTokens}), 0)`,
+        tokensOut: sql<number>`coalesce(sum(${requestLogs.completionTokens}), 0)`,
+        cost: sql<number>`coalesce(sum(${requestLogs.cost}), 0)`,
+      })
+      .from(requestLogs)
+      .where(and(requestLogsWhere(filters), gte(requestLogs.createdAt, since)))
+      .groupBy(hourExpr)
+      .orderBy(asc(hourExpr));
     return rows;
   }
 

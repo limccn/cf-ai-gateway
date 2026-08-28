@@ -24,6 +24,7 @@ export function adminUsageRoute(app: Hono<AppEnv>): void {
         userId: query.userId,
         keyId: query.keyId,
         model: query.model,
+        status: query.status,
         from: query.from,
         to: query.to,
       };

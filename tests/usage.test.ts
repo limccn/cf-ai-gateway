@@ -250,6 +250,183 @@ describe("GET /api/me/usage（member 自己）", () => {
   });
 });
 
+describe("groupBy=hour（最近 24h 逐小时聚合）", () => {
+  /** Date 毫秒 → 与后端 strftime 同格式的 UTC 小时键 "YYYY-MM-DDTHH:00:00Z"。 */
+  const hourKey = (ms: number) => `${new Date(ms).toISOString().slice(0, 13)}:00:00Z`;
+
+  it("按 UTC 小时分桶；窗口外（>24h）不包含；tokens/cost 合计正确", async () => {
+    const userId = await setupUser("member-hour@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const db = createDb(env);
+
+    const now = Date.now();
+    await db.insert(requestLogs).values([
+      { userId, keyId, model: "gpt-4o", promptTokens: 100, completionTokens: 50, cost: 0.001, latencyMs: 12, upstreamLatencyMs: 9, status: "success", createdAt: new Date(now - 3600_000) },
+      { userId, keyId, model: "gpt-4o-mini", promptTokens: 10, completionTokens: 5, cost: 0, latencyMs: 4, upstreamLatencyMs: 3, status: "cached", createdAt: new Date(now - 7200_000) },
+      { userId, keyId, model: "gpt-4o", promptTokens: 1, completionTokens: 1, cost: 0.00001, latencyMs: 5, upstreamLatencyMs: 4, status: "success", createdAt: new Date(now - 25 * 3600_000) },
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson("/api/me/usage?groupBy=hour", cookie);
+    expect(body.success).toBe(true);
+
+    const keys = body.aggregates.map((a) => a.group);
+    expect(keys).toContain(hourKey(now - 3600_000));
+    expect(keys).toContain(hourKey(now - 7200_000));
+    expect(keys).not.toContain(hourKey(now - 25 * 3600_000)); // 窗口外排除
+
+    const first = body.aggregates.find((a) => a.group === hourKey(now - 3600_000));
+    expect(first?.requests).toBe(1);
+    expect(first?.tokensIn).toBe(100);
+    expect(first?.tokensOut).toBe(50);
+    expect(first?.cost).toBeCloseTo(0.001, 12);
+  });
+
+  it("groupBy=hour 支持 keyId/model 过滤；未登录仍 401", async () => {
+    const userId = await setupUser("member-hour2@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const db = createDb(env);
+    const now = Date.now();
+    await db.insert(requestLogs).values([
+      { userId, keyId, model: "gpt-4o", promptTokens: 10, completionTokens: 5, cost: 0.001, latencyMs: 12, upstreamLatencyMs: 9, status: "success", createdAt: new Date(now - 1800_000) },
+      { userId, keyId, model: "gpt-4o-mini", promptTokens: 20, completionTokens: 10, cost: 0.002, latencyMs: 4, upstreamLatencyMs: 3, status: "success", createdAt: new Date(now - 3600_000) },
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson(`/api/me/usage?groupBy=hour&model=gpt-4o`, cookie);
+    expect(body.aggregates).toHaveLength(1);
+    expect(body.aggregates[0]?.requests).toBe(1);
+    expect(body.aggregates[0]?.tokensIn).toBe(10);
+
+    const res = await selfFetch("http://localhost/api/me/usage?groupBy=hour");
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("groupBy=status（状态占比聚合）", () => {
+  it("按状态分桶；tokens/cost 合计正确；窗口外/过滤生效", async () => {
+    const userId = await setupUser("member-status@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const db = createDb(env);
+
+    const now = Date.now();
+    await db.insert(requestLogs).values([
+      { userId, keyId, model: "gpt-4o", promptTokens: 100, completionTokens: 50, cost: 0.001, latencyMs: 12, upstreamLatencyMs: 9, status: "success", createdAt: new Date(now - 3600_000) },
+      { userId, keyId, model: "gpt-4o", promptTokens: 10, completionTokens: 5, cost: 0, latencyMs: 4, upstreamLatencyMs: 3, status: "cached", createdAt: new Date(now - 7200_000) },
+      { userId, keyId, model: "gpt-4o-mini", promptTokens: 50, completionTokens: 20, cost: 0.0005, latencyMs: 8, upstreamLatencyMs: 6, status: "error", createdAt: new Date(now - 10800_000) },
+      { userId, keyId, model: "gpt-4o", promptTokens: 1, completionTokens: 1, cost: 0.00001, latencyMs: 5, upstreamLatencyMs: 4, status: "rejected", createdAt: new Date(now - 14400_000) },
+      { userId, keyId, model: "gpt-4o", promptTokens: 1, completionTokens: 1, cost: 0.00001, latencyMs: 5, upstreamLatencyMs: 4, status: "success", createdAt: new Date(now - 25 * 3600_000) },
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson("/api/me/usage?groupBy=status", cookie);
+    expect(body.success).toBe(true);
+
+    // 4 状态各一桶（窗口内 4 条；25h 前的 success 不因窗口排除——status 聚合 respect from/to，无窗口）
+    expect(body.aggregates).toHaveLength(4);
+    const byGroup = new Map(body.aggregates.map((a) => [a.group, a]));
+    expect(byGroup.get("success")?.requests).toBe(2);
+    expect(byGroup.get("success")?.tokensIn).toBe(101);
+    expect(byGroup.get("success")?.tokensOut).toBe(51);
+    expect(byGroup.get("success")?.cost).toBeCloseTo(0.00101, 12);
+    expect(byGroup.get("cached")?.requests).toBe(1);
+    expect(byGroup.get("cached")?.tokensIn).toBe(10);
+    expect(byGroup.get("error")?.requests).toBe(1);
+    expect(byGroup.get("error")?.cost).toBeCloseTo(0.0005, 12);
+    expect(byGroup.get("rejected")?.requests).toBe(1);
+  });
+
+  it("groupBy=status 支持 from/to 与 model 过滤；未登录 401", async () => {
+    const userId = await setupUser("member-status2@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const db = createDb(env);
+
+    await db.insert(requestLogs).values([
+      { userId, keyId, model: "gpt-4o", promptTokens: 10, completionTokens: 5, cost: 0.001, latencyMs: 12, upstreamLatencyMs: 9, status: "success", createdAt: new Date("2026-08-24T03:00:00Z") },
+      { userId, keyId, model: "gpt-4o-mini", promptTokens: 20, completionTokens: 10, cost: 0.002, latencyMs: 4, upstreamLatencyMs: 3, status: "error", createdAt: new Date("2026-08-25T03:00:00Z") },
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    // from/to 过滤：只看 08-25
+    const body = await getJson("/api/me/usage?groupBy=status&from=2026-08-25&to=2026-08-25", cookie);
+    expect(body.aggregates).toHaveLength(1);
+    expect(body.aggregates[0]?.group).toBe("error");
+    expect(body.aggregates[0]?.requests).toBe(1);
+
+    // model 过滤：只看 gpt-4o
+    const body2 = await getJson("/api/me/usage?groupBy=status&model=gpt-4o", cookie);
+    expect(body2.aggregates).toHaveLength(1);
+    expect(body2.aggregates[0]?.group).toBe("success");
+    expect(body2.aggregates[0]?.requests).toBe(1);
+
+    const res = await selfFetch("http://localhost/api/me/usage?groupBy=status");
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("status 过滤（Request details 状态筛选）", () => {
+  it("status 只过滤明细与 request_logs 聚合；date 聚合不受影响", async () => {
+    const userId = await setupUser("member-sf@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const db = createDb(env);
+
+    const now = Date.now();
+    await db.insert(requestLogs).values([
+      { userId, keyId, model: "gpt-4o", promptTokens: 100, completionTokens: 50, cost: 0.001, latencyMs: 12, upstreamLatencyMs: 9, status: "success", createdAt: new Date(now - 3600_000) },
+      { userId, keyId, model: "gpt-4o-mini", promptTokens: 10, completionTokens: 5, cost: 0, latencyMs: 4, upstreamLatencyMs: 3, status: "error", createdAt: new Date(now - 7200_000) },
+      { userId, keyId, model: "gpt-4o", promptTokens: 30, completionTokens: 15, cost: 0.0003, latencyMs: 8, upstreamLatencyMs: 6, status: "error", createdAt: new Date(now - 10800_000) },
+    ]);
+    await consumeUsageBatch(
+      makeBatch([
+        { userId, keyId, model: "gpt-4o", promptTokens: 100, completionTokens: 50, cost: 0.001, status: "success", ts: now - 3600_000 },
+        { userId, keyId, model: "gpt-4o-mini", promptTokens: 10, completionTokens: 5, cost: 0, status: "error", ts: now - 7200_000 },
+        { userId, keyId, model: "gpt-4o", promptTokens: 30, completionTokens: 15, cost: 0.0003, status: "error", ts: now - 10800_000 },
+      ]),
+      env,
+    );
+
+    const cookie = sessionCookie(await createSession(userId));
+
+    // 只过滤明细：details 全为 error、total=2；date 聚合（usage_daily）仍含全部 3 条
+    const body = await getJson("/api/me/usage?status=error", cookie);
+    expect(body.details).toHaveLength(2);
+    expect(body.details.every((d) => d.status === "error")).toBe(true);
+    expect(body.total).toBe(2);
+    const dailySum = body.aggregates.reduce((s, a) => s + a.requests, 0);
+    expect(dailySum).toBe(3);
+
+    // 组合过滤：status=error + model
+    const body2 = await getJson("/api/me/usage?status=error&model=gpt-4o", cookie);
+    expect(body2.details).toHaveLength(1);
+    expect(body2.details[0]?.model).toBe("gpt-4o");
+    expect(body2.total).toBe(1);
+
+    // hour 聚合联动（同 request_logs 口径）：只看 error
+    const body3 = await getJson("/api/me/usage?groupBy=hour&status=error", cookie);
+    const hourlySum = body3.aggregates.reduce((s, a) => s + a.requests, 0);
+    expect(hourlySum).toBe(2);
+
+    // status 占比聚合联动：只看 error
+    const body4 = await getJson("/api/me/usage?groupBy=status&status=error", cookie);
+    expect(body4.aggregates).toHaveLength(1);
+    expect(body4.aggregates[0]?.group).toBe("error");
+    expect(body4.aggregates[0]?.requests).toBe(2);
+  });
+
+  it("非法 status 值 → 400；未登录 401", async () => {
+    const userId = await setupUser("member-sf2@test.dev", 10);
+    const cookie = sessionCookie(await createSession(userId));
+
+    const res = await selfFetch("http://localhost/api/me/usage?status=bogus", {
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(400);
+
+    const anon = await selfFetch("http://localhost/api/me/usage?status=error");
+    expect(anon.status).toBe(401);
+  });
+});
+
 describe("GET /api/admin/usage（admin 全局）", () => {
   it("按 user/key/model/时间范围过滤；member 访问 → 403", async () => {
     const adminId = await setupUser("admin@test.dev", 0, "admin");

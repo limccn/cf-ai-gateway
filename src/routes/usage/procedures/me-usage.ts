@@ -44,6 +44,7 @@ export function meUsageRoute(app: Hono<AppEnv>): void {
       userId,
       keyId: query.keyId,
       model: query.model,
+      status: query.status,
       from: query.from,
       to: query.to,
     };

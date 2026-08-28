@@ -4,12 +4,13 @@ import { useState, type FormEvent } from "react";
 import { CreditCard, Wallet } from "lucide-react";
 import { z } from "zod";
 import { useSession } from "@/hooks/use-session";
+import { useIsMobile } from "@/hooks/use-media-query";
 import { useUsers } from "@/modules/users/hooks/use-users";
 import { useAdjustBalance } from "@/modules/users/hooks/use-adjust-balance";
 import { useMeTransactions } from "@/modules/billing/hooks/use-me-transactions";
 import type { BalanceTxType, TransactionItem } from "@/modules/billing/types";
 import type { UserResponse } from "@/modules/users/types";
-import { formatDateTime, formatNumber, formatUsd } from "@/lib/format";
+import { formatDateTime, formatDateTimeShort, formatNumber, formatUsd } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -63,6 +64,7 @@ function AmountCell({ amount }: { amount: number }) {
 export default function BillingPage() {
   const { user } = useSession();
   const isAdmin = user?.role === "admin";
+  const isMobile = useIsMobile();
 
   const usersQuery = useUsers(isAdmin ? { limit: 100 } : { limit: 1, enabled: false });
 
@@ -230,14 +232,16 @@ export default function BillingPage() {
                     <TableHead>Type</TableHead>
                     <TableHead>Amount</TableHead>
                     <TableHead>Note</TableHead>
-                    <TableHead>Request</TableHead>
+                    <TableHead className="hidden sm:table-cell">Request</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {items.map((tx) => (
                     <TableRow key={tx.id}>
-                      <TableCell className="text-muted-foreground">
-                        {formatDateTime(tx.createdAt)}
+                      <TableCell className="whitespace-nowrap text-muted-foreground">
+                        {isMobile
+                          ? formatDateTimeShort(tx.createdAt)
+                          : formatDateTime(tx.createdAt)}
                       </TableCell>
                       <TableCell>
                         <Badge variant={typeBadgeVariant(tx.type)}>{tx.type}</Badge>
@@ -248,7 +252,7 @@ export default function BillingPage() {
                       <TableCell className="max-w-64 truncate text-muted-foreground">
                         {tx.note ?? "—"}
                       </TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">
+                      <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
                         {tx.refRequestId ?? "—"}
                       </TableCell>
                     </TableRow>

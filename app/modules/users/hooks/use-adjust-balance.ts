@@ -13,7 +13,9 @@ export function useAdjustBalance() {
         body: JSON.stringify(data),
       }),
     onSuccess: () => {
+      // 用户列表（余额）+ 流水列表都需刷新（调整后 admin 页交易表应立刻可见新记录）
       queryClient.invalidateQueries({ queryKey: ["users"] });
+      queryClient.invalidateQueries({ queryKey: ["transactions"] });
     },
   });
 }

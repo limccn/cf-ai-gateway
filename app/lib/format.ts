@@ -29,6 +29,20 @@ export function formatDateTime(iso: string): string {
   });
 }
 
+/** 紧凑时间格式（移动端表格列用）：Aug 28, 1:10 PM（去年份，保留月/日/时分）。 */
+export function formatDateTimeShort(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function formatDateOnly(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) {
