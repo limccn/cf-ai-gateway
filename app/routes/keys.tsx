@@ -357,8 +357,8 @@ export default function KeysPage() {
                 <TableHead>Status</TableHead>
                 <TableHead>QPS</TableHead>
                 <TableHead>Cache</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="hidden md:table-cell">Created</TableHead>
+                <TableHead className="sticky right-0 bg-card text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -377,8 +377,8 @@ export default function KeysPage() {
                   <TableCell>
                     {key.cacheEnabled ? `${key.cacheTtl}s` : "Off"}
                   </TableCell>
-                  <TableCell className="text-muted-foreground">{formatDateTime(key.createdAt)}</TableCell>
-                  <TableCell>
+                  <TableCell className="hidden text-muted-foreground md:table-cell">{formatDateTime(key.createdAt)}</TableCell>
+                  <TableCell className="sticky right-0 bg-card">
                     <div className="flex items-center justify-end gap-1">
                       <Button variant="ghost" size="sm" onClick={() => setEditing(key)}>
                         Edit

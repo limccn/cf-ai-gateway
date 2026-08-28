@@ -7,7 +7,7 @@ import { useSession } from "@/hooks/use-session";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, buttonVariants } from "@/components/ui/button";
 
-export function UserButton() {
+export function UserButton({ compact = false }: { compact?: boolean }) {
   const { isMounted, isPending, user } = useSession();
 
   if (!isMounted || isPending) {
@@ -26,6 +26,16 @@ export function UserButton() {
     await authClient.signOut();
     queryClient.clear();
   };
+
+  // 平板图标栏（md 范围）：只显示头像，悬停/长按提示姓名
+  if (compact) {
+    return (
+      <div className="flex size-9 items-center justify-center rounded-full bg-primary/20 text-sm font-semibold text-primary" title={user.name}>
+        {user.name.slice(0, 1).toUpperCase()}
+        <span className="sr-only">{user.name}</span>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center gap-3">

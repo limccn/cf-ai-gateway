@@ -167,14 +167,14 @@ export default function BillingPage() {
 
       {/* 流水表 */}
       <Card className="mt-6">
-        <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardHeader className="flex-col items-start gap-3 space-y-0 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle>Transactions</CardTitle>
             <CardDescription>
               {formatNumber(total)} total — page {currentPage} of {totalPages}
             </CardDescription>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
             <Label htmlFor="billing-type" className="sr-only">
               Transaction type
             </Label>
