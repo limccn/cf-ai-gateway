@@ -1,7 +1,6 @@
 // DB → API 响应转换（type-safety spec：枚举列类型断言集中在转换工具，不散落在 handler）。
 import type { User } from "../../../db/schema";
 import type { UserRole, UserStatus } from "../../../types";
-import { maskInviteCode } from "../../../lib/invites";
 import type { InviteCodeResponse, UserResponse } from "../types";
 
 /** DB 用户行 → API 响应（时间戳 ISO 字符串；role/status 窄化为字面量类型）。 */
@@ -19,21 +18,22 @@ export function toUserResponse(user: User): UserResponse {
   };
 }
 
-/** 邀请码行 → API 响应（列表不回显完整 code，仅创建响应返回完整 code）。 */
-export function toInviteCodeResponse(
-  invite: {
-    id: number;
-    code: string;
-    createdBy: number;
-    createdAt: Date;
-    usedAt: Date | null;
-    expiresAt: Date;
-  },
-  mask: boolean,
-): InviteCodeResponse {
+/**
+ * 邀请码行 → API 响应。
+ * 完整 code 对 admin 返回（列表与创建响应一致）：管理页需展示/复制完整码分发，
+ * 脱敏返回会使复制按钮复制出掩码废码（task 08-28-fix-invite-copy）。
+ */
+export function toInviteCodeResponse(invite: {
+  id: number;
+  code: string;
+  createdBy: number;
+  createdAt: Date;
+  usedAt: Date | null;
+  expiresAt: Date;
+}): InviteCodeResponse {
   return {
     id: invite.id,
-    code: mask ? maskInviteCode(invite.code) : invite.code,
+    code: invite.code,
     status: invite.usedAt !== null
       ? "used"
       : invite.expiresAt.getTime() < Date.now()

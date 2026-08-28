@@ -40,6 +40,7 @@ VALUES
   ('claude-haiku-4-5',    1.00,  1.00, 0.10,  5.00,  5.00, unixepoch(), unixepoch()),
   -- DeepSeek（2026-08-26 决策：最新快照价 flash-0731 / pro-0813；缓存价 ≈ 输入价 20%）
   ('deepseek-v4-flash', 0.040, 0.040, 0.008,  0.080,  0.080, unixepoch(), unixepoch()),
+  ('deepseek-v4-flash-vision-exp', 0.040, 0.040, 0.008,  0.080,  0.080, unixepoch(), unixepoch()),
   ('deepseek-v4-pro',   1.122, 1.122, 0.0374, 3.366,  3.366, unixepoch(), unixepoch()),
   -- Qwen（qwen3.7-flash 官方三档 32K/256K 收敛为两档：≤128K $0.03 / >128K $0.10；
   --   ⚠ 官方 >256K 输入 $0.20 / 输出 $0.80，网关按 $0.10/$0.40 少收，属已确认决策）
@@ -53,4 +54,14 @@ VALUES
   ('qwen3.8-plus',  0.32,   0.32,   0.064,  1.28,   1.28,   unixepoch(), unixepoch()),
   ('qwen3.8-max',   2.00,   2.00,   0.25,   6.00,   6.00,   unixepoch(), unixepoch()),
   -- Zhipu（GLM 5.2，官方未分层；缓存价 ≈ 输入价 18.6%）
-  ('glm-5.2',       1.19,   1.19,   0.221,  3.74,   3.74,   unixepoch(), unixepoch());
+  ('glm-5.2',       1.19,   1.19,   0.221,  3.74,   3.74,   unixepoch(), unixepoch()),
+  ('glm-5.3',       1.19,   1.19,   0.221,  3.74,   3.74,   unixepoch(), unixepoch()),
+  ('glm-5.3-flash', 0.040,  0.040,  0.008,  0.080,  0.080,  unixepoch(), unixepoch()),
+  -- Moonshot（官方未分层；缓存价 ≈ 输入价 20%）
+  ('moonshot-v1-8k', 0.10,  0.10,  0.02,  0.30,  0.30,  unixepoch(), unixepoch()),
+  -- MIMO（官方未分层；缓存价 ≈ 输入价 20%）
+  ('mimo-v2.5',    0.10,   0.10,   0.02,   0.30,   0.30,   unixepoch(), unixepoch()),
+  ('mimo-v2.5-pro', 0.10,  0.10,   0.02,   0.30,   0.30,   unixepoch(), unixepoch()),
+  -- Hy3（官方未分层；缓存价 ≈ 输入价 20%）
+  ('hy3',          0.10,   0.10,   0.02,   0.30,   0.30,   unixepoch(), unixepoch());
+

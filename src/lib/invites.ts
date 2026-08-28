@@ -52,7 +52,3 @@ export async function consumeInviteCode(
   return result.meta.changes === 1;
 }
 
-/** 展示用脱敏：仅保留前 4 位（列表接口不回显完整 code）。 */
-export function maskInviteCode(code: string): string {
-  return `${code.slice(0, 4)}****`;
-}

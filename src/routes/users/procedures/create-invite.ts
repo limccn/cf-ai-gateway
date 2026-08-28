@@ -33,10 +33,10 @@ export function createInviteRoute(app: Hono<AppEnv>): void {
       byUserId: adminUserId,
       expiresInDays: body.expiresInDays,
     });
-    // mask=false：创建响应回显完整 code（仅展示一次）
+    // 创建响应回显完整 code（仅展示一次）
     return c.json({
       success: true as const,
-      invite: toInviteCodeResponse(invite, false),
+      invite: toInviteCodeResponse(invite),
     });
   });
 }

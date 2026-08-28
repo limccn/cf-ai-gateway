@@ -5,7 +5,7 @@ import { KeyRound, TrendingUp, Wallet, Zap } from "lucide-react";
 import { useSession } from "@/hooks/use-session";
 import { useUsage } from "@/modules/usage/hooks/use-usage";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
-import { formatNumber, formatUsd, formatDateTime } from "@/lib/format";
+import { formatNumber, formatUsd, formatDateTime, formatShortDate } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { BarChart } from "@/components/charts/bar-chart";
@@ -73,7 +73,7 @@ export default function DashboardPage() {
   const chartData = useMemo(
     () =>
       aggregates.map((agg) => ({
-        label: agg.group ?? "total",
+        label: formatShortDate(agg.group ?? ""),
         value: agg.requests,
       })),
     [aggregates],

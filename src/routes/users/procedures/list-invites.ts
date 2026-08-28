@@ -1,4 +1,4 @@
-// GET /api/users/invites — 邀请码列表（admin；code 脱敏展示，含使用/过期状态）。
+// GET /api/users/invites — 邀请码列表（admin；code 完整返回供复制分发，含使用/过期状态）。
 import { desc } from "drizzle-orm";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../../types";
@@ -14,10 +14,10 @@ export function listInvitesRoute(app: Hono<AppEnv>): void {
       .from(inviteCodes)
       .orderBy(desc(inviteCodes.id))
       .limit(100);
-    // mask=true：列表不回显完整 code
+    // 完整 code：管理页复制按钮依赖它（掩码返回 = 复制出废码，task 08-28-fix-invite-copy）
     return c.json({
       success: true as const,
-      items: rows.map((row) => toInviteCodeResponse(row, true)),
+      items: rows.map((row) => toInviteCodeResponse(row)),
     });
   });
 }

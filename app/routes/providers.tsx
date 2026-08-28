@@ -226,7 +226,8 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       if (httpOptions.value !== undefined) {
         payload.httpOptions = httpOptions.value;
       }
-      const schema = updateProviderFormSchema.extend({
+      // Zod v4：含 refine 的 object schema 不能用 .extend() 覆盖已有 key（会抛错），须用 .safeExtend()
+      const schema = updateProviderFormSchema.safeExtend({
         models: modelsMapTextSchema.optional(),
       });
       const parsed = schema.safeParse({

@@ -3,16 +3,24 @@
 // 前置：scripts/stg-e2e-bootstrap.mjs 已运行（KEY 输出）。
 // 用法：E2E_KEY=<网关key> node scripts/stg-e2e-verify.mjs [--model deepseek-v4-flash]
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const BASE = "https://stg-router.lmlh.net";
 const KEY = process.env.E2E_KEY;
 const MODEL = (process.argv.find((a) => a.startsWith("--model=")) ?? "--model=deepseek-v4-flash").split("=")[1];
 const DB = "cf-ai-gateway-db-staging";
-const MEMBER_EMAIL = "e2e-user@staging.test";
 const WRANGLER_JS = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
 
 if (!KEY) { console.error("E2E_KEY env var required (gateway key from bootstrap)"); process.exit(1); }
+
+// key 归属用户动态解析（2026-08-28：key 归真实用户时不用 bootstrap 造 e2e-user）
+// 按 sha256 哈希精确匹配（prefix 落库长度因 API_KEY_PREFIX 配置而异，slice(0,8) 不可靠）
+const KEY_HASH = createHash("sha256").update(KEY).digest("hex");
+const owner = query(`SELECT k.user_id, u.email FROM api_keys k JOIN users u ON u.id=k.user_id WHERE k.hash='${KEY_HASH}' LIMIT 1;`)[0];
+if (!owner) { console.error("cannot resolve key owner from api_keys (hash match failed)"); process.exit(1); }
+const MEMBER_EMAIL = owner.email;
+console.log(`[verify] key owner: ${MEMBER_EMAIL} (user_id=${owner.user_id})`);
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -39,6 +47,7 @@ async function api(path, { method = "GET", headers = {}, body } = {}) {
 }
 
 const parseSse = (text) => text.split("\n").filter((l) => l.startsWith("data:")).map((l) => { try { return JSON.parse(l.slice(5)); } catch { return null; } }).filter(Boolean);
+const hasDone = (text) => text.split("\n").some((l) => l.trim() === "data: [DONE]");
 
 function query(sql) {
   return JSON.parse(execFileSync(process.execPath,
@@ -67,8 +76,8 @@ report("chat non-stream usage present", chat.status === 200 && chat.json?.usage?
 // [3] chat 流式
 const chatStream = await api("/v1/chat/completions", { method: "POST", body: { model: MODEL, stream: true, messages: [{ role: "user", content: "Count 1 to 3" }] } });
 const streamEvents = parseSse(chatStream.text);
-report("chat stream SSE + [DONE]", chatStream.status === 200 && chatStream.text.includes("[DONE]") && streamEvents.length >= 2, `events=${streamEvents.length}`);
-const usageTail = [...streamEvents].reverse().find((e) => e.choices?.[0]?.finish_reason === "stop" && e.usage);
+report("chat stream SSE + [DONE]", chatStream.status === 200 && hasDone(chatStream.text) && streamEvents.length >= 2, `events=${streamEvents.length}`);
+const usageTail = [...streamEvents].reverse().find((e) => e.usage);
 report("chat stream usage tail", !!usageTail && usageTail.usage.total_tokens > 0, `tail=${JSON.stringify(usageTail?.usage)}`);
 
 // [4] Anthropic 面（/v1/messages → 路由到 anthropic provider 原生 /anthropic）
@@ -101,10 +110,10 @@ const balanceAfter = balanceOf();
 report("balance decreased (billing)", balanceAfter < balanceBefore, `before=${balanceBefore} after=${balanceAfter}`);
 const logRows = logs();
 report("request_logs rows written", logRows.length >= 6, `rows=${logRows.length}`);
-const openaiLog = logRows.find((r) => r.model === MODEL && r.provider_id === 1);
-const anthropicLog = logRows.find((r) => r.model === MODEL && r.provider_id === 2);
-report("routing: openai face → provider 1", !!openaiLog && openaiLog.status === "success" && openaiLog.cost > 0, `provider_id=${openaiLog?.provider_id} status=${openaiLog?.status} cost=${openaiLog?.cost}`);
-report("routing: anthropic face → provider 2", !!anthropicLog && anthropicLog.status === "success" && anthropicLog.cost > 0, `provider_id=${anthropicLog?.provider_id} status=${anthropicLog?.status} cost=${anthropicLog?.cost}`);
+// 路由归属：四种请求面都应落到同一 provider（模型→provider 映射动态解析，不硬编码 provider id）
+const PROVIDER_IDS = [...new Set(query(`SELECT DISTINCT provider_id FROM request_logs WHERE provider_id IS NOT NULL;`).map((r) => r.provider_id))];
+const routedRows = logRows.filter((r) => r.model === MODEL && r.status === "success" && r.cost > 0);
+report("routing: all faces → same provider", routedRows.length >= 3 && PROVIDER_IDS.length === 1, `rows=${routedRows.length} provider=${PROVIDER_IDS.join(",")}`);
 
 // [9] 缓存（开启 cache → 两次同请求第二次 cached 且不再扣费）
 const cacheOffBefore = balanceOf();

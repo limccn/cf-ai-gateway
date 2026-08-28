@@ -46,6 +46,12 @@ export function toDateParam(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
+/** YYYY-MM-DD → MM-DD（图表轴标签；原始串不变则原样返回）。 */
+export function formatShortDate(iso: string): string {
+  const match = /^\d{4}-(\d{2}-\d{2})$/.exec(iso);
+  return match?.[1] ?? iso;
+}
+
 /** 当前日期前推 days 天的 YYYY-MM-DD（UTC）。 */
 export function daysAgoParam(days: number): string {
   const date = new Date();

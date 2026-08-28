@@ -9,7 +9,7 @@ import type { UsageParams } from "@/modules/usage/hooks/usage-params";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
 import { useUsers } from "@/modules/users/hooks/use-users";
 import { useSession } from "@/hooks/use-session";
-import { formatDateOnly, formatDateTime, formatNumber, formatUsd } from "@/lib/format";
+import { formatDateOnly, formatDateTime, formatNumber, formatShortDate, formatUsd } from "@/lib/format";
 import { daysAgoParam, toDateParam } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
@@ -129,7 +129,7 @@ export default function UsagePage() {
     return aggregates
       .filter((agg) => agg.group !== null)
       .map((agg, index) => ({
-        label: agg.group ?? "",
+        label: formatShortDate(agg.group ?? ""),
         value: agg.requests,
         color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
       }));

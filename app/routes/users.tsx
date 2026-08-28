@@ -8,6 +8,7 @@ import { useUpdateUser } from "@/modules/users/hooks/use-update-user";
 import { useInvites } from "@/modules/users/hooks/use-invites";
 import { useCreateInvite } from "@/modules/users/hooks/use-create-invite";
 import { formatDateTime, formatUsd } from "@/lib/format";
+import { copyToClipboard } from "@/lib/clipboard";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
@@ -51,7 +52,9 @@ export default function UsersPage() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteFieldError, setInviteFieldError] = useState<string | null>(null);
   const [createdCode, setCreatedCode] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  /** 最近一次成功复制的邀请码（按卡片显示 "Copied"，2s 复位）。 */
+  const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
 
   const applyFilters = () => {
     setFilters({
@@ -84,11 +87,15 @@ export default function UsersPage() {
   };
 
   const handleCopy = async (code: string) => {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-    } catch {
-      // 剪贴板不可用时静默失败
+    const ok = await copyToClipboard(code);
+    if (ok) {
+      setCopiedCode(code);
+      setCopyError(null);
+      setTimeout(() => {
+        setCopiedCode((current) => (current === code ? null : current));
+      }, 2000);
+    } else {
+      setCopyError("Copy failed — clipboard is unavailable. Select the code manually.");
     }
   };
 
@@ -134,7 +141,7 @@ export default function UsersPage() {
                   </div>
                   <Button variant="ghost" size="sm" onClick={() => handleCopy(invite.code)} disabled={invite.status !== "active"}>
                     <Copy aria-hidden="true" />
-                    {copied ? "Copied" : "Copy"}
+                    {copiedCode === invite.code ? "Copied" : "Copy"}
                   </Button>
                 </div>
               ))}
@@ -142,6 +149,12 @@ export default function UsersPage() {
           )}
         </CardContent>
       </Card>
+
+      {copyError ? (
+        <p role="alert" className="mb-6 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {copyError}
+        </p>
+      ) : null}
 
       {/* 用户列表 */}
       <Card className="mb-6">
@@ -330,7 +343,7 @@ export default function UsersPage() {
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => handleCopy(createdCode)}>
                 <Copy aria-hidden="true" />
-                {copied ? "Copied" : "Copy"}
+                {copiedCode === createdCode ? "Copied" : "Copy"}
               </Button>
               <Button onClick={() => setCreatedCode(null)}>Done</Button>
             </div>
