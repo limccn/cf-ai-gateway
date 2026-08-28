@@ -14,13 +14,14 @@ export function TableHeader({ className, ...props }: HTMLAttributes<HTMLTableSec
 }
 
 export function TableBody({ className, ...props }: HTMLAttributes<HTMLTableSectionElement>) {
-  return <tbody className={cn("[&_tr:last-child]:border-0", className)} {...props} />;
+  // hover 只作用于 body 行（表头行不参与）；group/row 供 sticky 单元格跟随行 hover
+  return <tbody className={cn("[&_tr:last-child]:border-0 [&_tr:hover]:bg-muted/50", className)} {...props} />;
 }
 
 export function TableRow({ className, ...props }: HTMLAttributes<HTMLTableRowElement>) {
   return (
     <tr
-      className={cn("border-b transition-colors hover:bg-muted/50", className)}
+      className={cn("border-b transition-colors group/row", className)}
       {...props}
     />
   );

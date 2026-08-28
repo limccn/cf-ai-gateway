@@ -55,7 +55,9 @@ export function DonutChart({
   const segments = data.map((datum) => {
     const fraction = datum.value / total;
     const dash = fraction * circumference;
-    const offset = -accumulated * circumference;
+    // 起始角用「角度」累计；渲染处 offset * RADIANS * radius 换算为沿弧线的长度偏移。
+    // 注意不可用弧长（fraction * circumference）——再乘 RADIANS*radius 会超转 ~(π/180)·r。
+    const offset = -accumulated * 360;
     accumulated += fraction;
     return { datum, dash, offset };
   });

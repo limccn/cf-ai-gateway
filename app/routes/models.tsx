@@ -1,7 +1,7 @@
 // /models — 模型价格表管理（M6 6.3，admin）：CRUD 表格。
 // 单价单位：USD / 每百万 tokens（与后端 seed.sql 一致）。
 import { useState, type FormEvent } from "react";
-import { Plus } from "lucide-react";
+import { Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { z } from "zod";
 import { useModels } from "@/modules/models/hooks/use-models";
 import { useCreateModel } from "@/modules/models/hooks/use-create-model";
@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ErrorState, EmptyState } from "@/components/ui/states";
 import {
   Table,
@@ -275,6 +276,11 @@ export default function ModelsPage() {
 
   const items = modelsQuery.data?.items ?? [];
 
+  // 前端内存过滤（列表量小；API 无 search 参数）
+  const [search, setSearch] = useState("");
+  const query = search.trim().toLowerCase();
+  const filtered = query ? items.filter((m) => m.model.toLowerCase().includes(query)) : items;
+
   return (
     <PageContainer>
       <PageHeader
@@ -288,65 +294,110 @@ export default function ModelsPage() {
         }
       />
 
-      {modelsQuery.isLoading ? (
-        <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
-          Loading…
-        </div>
-      ) : modelsQuery.isError ? (
-        <ErrorState message={modelsQuery.error.message} onRetry={() => modelsQuery.refetch()} />
-      ) : items.length === 0 ? (
-        <EmptyState
-          title="No price entries yet"
-          description="Add model prices before usage can be billed."
-        />
-      ) : (
-        <div className="overflow-x-auto rounded-lg border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Model</TableHead>
-                <TableHead className="text-right">Input (short → long) / 1M</TableHead>
-                <TableHead className="text-right">Input cached / 1M</TableHead>
-                <TableHead className="text-right">Output (short → long) / 1M</TableHead>
-                <TableHead className="hidden md:table-cell">Updated</TableHead>
-                <TableHead className="sticky right-0 bg-card text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map((item) => (
-                <TableRow key={item.id}>
-                  <TableCell className="font-medium">{item.model}</TableCell>
-                  <TableCell className="text-right whitespace-nowrap">
-                    {formatUsd(item.inputPriceShort)} → {formatUsd(item.inputPriceLong)}
-                  </TableCell>
-                  <TableCell className="text-right">{formatUsd(item.inputPriceCached)}</TableCell>
-                  <TableCell className="text-right whitespace-nowrap">
-                    {formatUsd(item.outputPriceShort)} → {formatUsd(item.outputPriceLong)}
-                  </TableCell>
-                  <TableCell className="hidden text-muted-foreground md:table-cell">
-                    {formatDateTime(item.updatedAt)}
-                  </TableCell>
-                  <TableCell className="sticky right-0 bg-card">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="sm" onClick={() => setEditing(item)}>
-                        Edit
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => setDeleting(item)}
-                      >
-                        Delete
-                      </Button>
-                    </div>
-                  </TableCell>
+      <Card className="mb-6">
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle>Model pricing</CardTitle>
+            <CardDescription>
+              USD per 1M tokens. Arrows show short → long tiers: short = input ≤ 128K tokens,
+              long = input &gt; 128K (longer context bills both input and output at the long
+              rate); cached = input served from cache.
+            </CardDescription>
+          </div>
+          {items.length > 0 ? (
+            <div className="relative w-40 shrink-0">
+              <Search
+                className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <Input
+                aria-label="Search models"
+                className="pl-9"
+                placeholder="Search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+          ) : null}
+        </CardHeader>
+        <CardContent className="p-0">
+          {modelsQuery.isLoading ? (
+            <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
+              Loading…
+            </div>
+          ) : modelsQuery.isError ? (
+            <div className="p-6">
+              <ErrorState message={modelsQuery.error.message} onRetry={() => modelsQuery.refetch()} />
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="p-6">
+              <EmptyState
+                title={items.length === 0 ? "No price entries yet" : "No models match"}
+                description={
+                  items.length === 0
+                    ? "Add model prices before usage can be billed."
+                    : "Try a different search."
+                }
+              />
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Model</TableHead>
+                  <TableHead className="text-right">Input / 1M</TableHead>
+                  <TableHead className="hidden text-right sm:table-cell">Input cached / 1M</TableHead>
+                  <TableHead className="text-right">Output / 1M</TableHead>
+                  <TableHead className="hidden md:table-cell">Updated</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+              </TableHeader>
+              <TableBody>
+                {filtered.map((item) => (
+                  <TableRow key={item.id}>
+                    <TableCell className="font-medium">{item.model}</TableCell>
+                    <TableCell className="text-right whitespace-nowrap">
+                      {formatUsd(item.inputPriceShort)} → {formatUsd(item.inputPriceLong)}
+                    </TableCell>
+                    <TableCell className="hidden text-right sm:table-cell">
+                      {formatUsd(item.inputPriceCached)}
+                    </TableCell>
+                    <TableCell className="text-right whitespace-nowrap">
+                      {formatUsd(item.outputPriceShort)} → {formatUsd(item.outputPriceLong)}
+                    </TableCell>
+                    <TableCell className="hidden text-muted-foreground md:table-cell">
+                      {formatDateTime(item.updatedAt)}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setEditing(item)}
+                          aria-label={`Edit ${item.model}`}
+                          title="Edit"
+                        >
+                          <Pencil aria-hidden="true" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive hover:text-destructive"
+                          onClick={() => setDeleting(item)}
+                          aria-label={`Delete ${item.model}`}
+                          title="Delete"
+                        >
+                          <Trash2 aria-hidden="true" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
       <ModelFormDialog
         open={formOpen || editing !== null}

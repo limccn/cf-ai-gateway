@@ -2,7 +2,7 @@
 // CRUD 表格；models 映射以 textarea 行格式 `内部名=上游名` 编辑，Zod 校验后转为 JSON。
 // httpOptions 以 JSON textarea 编辑（前端校验与后端 httpOptionsSchema 一致，见 src/routes/providers/types.ts）。
 import { useState, type FormEvent } from "react";
-import { Plus } from "lucide-react";
+import { Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { z } from "zod";
 import { useProviders } from "@/modules/providers/hooks/use-providers";
 import { useCreateProvider } from "@/modules/providers/hooks/use-create-provider";
@@ -14,13 +14,15 @@ import { formatDateTime } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
+import { Collapsible } from "@/components/ui/collapsible";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import { ErrorState, EmptyState } from "@/components/ui/states";
 import {
   Table,
@@ -145,7 +147,6 @@ const providerFormSchema = z.object({
   apiKey: z.string().min(1, "API key is required").max(1000),
   models: modelsMapTextSchema,
   weight: z.coerce.number().int("Must be a whole number").min(1, "Min 1").max(1000, "Max 1000"),
-  enabled: z.boolean(),
 });
 
 const updateProviderFormSchema = providerFormSchema
@@ -171,7 +172,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
   const [modelsText, setModelsText] = useState("");
   const [httpOptionsText, setHttpOptionsText] = useState("");
   const [weight, setWeight] = useState(1);
-  const [enabled, setEnabled] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
 
   const [lastOpen, setLastOpen] = useState(false);
@@ -185,7 +186,8 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       setModelsText(editing ? modelsToText(editing.models) : "");
       setHttpOptionsText(editing ? httpOptionsToText(editing.httpOptions) : "");
       setWeight(editing?.weight ?? 1);
-      setEnabled(editing?.enabled ?? true);
+      // 编辑已有高级配置时默认展开，避免用户看不到已配置项
+      setAdvancedOpen(editing ? hasHttpOptions(editing.httpOptions) : false);
       setErrors({});
     }
   }
@@ -209,7 +211,6 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       apiKey,
       models: modelsText,
       weight,
-      enabled,
     };
     if (editing) {
       // 编辑模式：空 apiKey 表示不更换密钥（omit）；空 httpOptions 表示保持原配置
@@ -251,8 +252,10 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
         return;
       }
       try {
+        // 新 provider 恒为 enabled（启停由列表 Action 开关管理，创建时不提供 enabled UI）
         await createProvider.mutateAsync({
           ...parsed.data,
+          enabled: true,
           ...(httpOptions.value !== undefined ? { httpOptions: httpOptions.value } : {}),
         });
         onOpenChange(false);
@@ -339,29 +342,29 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
           />
           {errors.models ? <p className="text-xs text-destructive">{errors.models}</p> : null}
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="provider-http-options">HTTP options (JSON, optional)</Label>
-          <Textarea
-            id="provider-http-options"
-            rows={4}
-            className="font-mono text-xs"
-            placeholder={JSON.stringify(
-              { userAgent: "MyAgent/1.0", headers: { "X-Provider": "acme" }, body: { temperature: 0 } },
-              null,
-              2,
-            )}
-            value={httpOptionsText}
-            onChange={(e) => setHttpOptionsText(e.target.value)}
-            aria-invalid={errors.httpOptions !== undefined}
-          />
-          <p className="text-xs text-muted-foreground">
-            {editing
-              ? "Leave empty to keep the current options; stored header values are shown masked (retype a full value to replace it)."
-              : "Overrides User-Agent, adds/overrides headers and body fields on upstream requests. Header values are encrypted at rest and never shown again."}
-          </p>
-          {errors.httpOptions ? <p className="text-xs text-destructive">{errors.httpOptions}</p> : null}
-        </div>
-        <div className="grid grid-cols-2 gap-4">
+        <Collapsible title="Advanced options" open={advancedOpen} onOpenChange={setAdvancedOpen}>
+          <div className="space-y-2">
+            <Label htmlFor="provider-http-options">HTTP options (JSON, optional)</Label>
+            <Textarea
+              id="provider-http-options"
+              rows={4}
+              className="font-mono text-xs"
+              placeholder={JSON.stringify(
+                { userAgent: "MyAgent/1.0", headers: { "X-Provider": "acme" }, body: { temperature: 0 } },
+                null,
+                2,
+              )}
+              value={httpOptionsText}
+              onChange={(e) => setHttpOptionsText(e.target.value)}
+              aria-invalid={errors.httpOptions !== undefined}
+            />
+            <p className="text-xs text-muted-foreground">
+              {editing
+                ? "Leave empty to keep the current options; stored header values are shown masked (retype a full value to replace it)."
+                : "Overrides User-Agent, adds/overrides headers and body fields on upstream requests. Header values are encrypted at rest and never shown again."}
+            </p>
+            {errors.httpOptions ? <p className="text-xs text-destructive">{errors.httpOptions}</p> : null}
+          </div>
           <div className="space-y-2">
             <Label htmlFor="provider-weight">Weight (load balance)</Label>
             <Input
@@ -378,13 +381,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
             </p>
             {errors.weight ? <p className="text-xs text-destructive">{errors.weight}</p> : null}
           </div>
-          <div className="flex items-end pb-1">
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-              Provider enabled (requests can be routed to it)
-            </label>
-          </div>
-        </div>
+        </Collapsible>
         {errors.root ? <p className="text-xs text-destructive">{errors.root}</p> : null}
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isBusy}>
@@ -403,6 +400,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
 
 export default function ProvidersPage() {
   const providersQuery = useProviders();
+  const updateProvider = useUpdateProvider();
   const deleteProvider = useDeleteProvider();
 
   const [formOpen, setFormOpen] = useState(false);
@@ -410,6 +408,18 @@ export default function ProvidersPage() {
   const [deleting, setDeleting] = useState<ProviderResponse | null>(null);
 
   const items = providersQuery.data?.items ?? [];
+
+  // 前端内存过滤（列表量小；API 无 search 参数）
+  const [search, setSearch] = useState("");
+  const query = search.trim().toLowerCase();
+  const filtered = query
+    ? items.filter(
+        (p) =>
+          p.name.toLowerCase().includes(query) ||
+          p.baseUrl.toLowerCase().includes(query) ||
+          p.apiKeyMasked.toLowerCase().includes(query),
+      )
+    : items;
 
   return (
     <PageContainer>
@@ -424,101 +434,133 @@ export default function ProvidersPage() {
         }
       />
 
-      {providersQuery.isLoading ? (
-        <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
-          Loading…
-        </div>
-      ) : providersQuery.isError ? (
-        <ErrorState message={providersQuery.error.message} onRetry={() => providersQuery.refetch()} />
-      ) : items.length === 0 ? (
-        <EmptyState
-          title="No providers yet"
-          description="Add an upstream provider to start routing requests."
-        />
-      ) : (
-        <div className="overflow-x-auto rounded-lg border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Base URL</TableHead>
-                <TableHead>Key</TableHead>
-                <TableHead>Models</TableHead>
-                <TableHead>HTTP options</TableHead>
-                <TableHead className="hidden sm:table-cell">Weight</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="hidden md:table-cell">Created</TableHead>
-                <TableHead className="sticky right-0 bg-card text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {items.map((provider) => (
-                <TableRow key={provider.id}>
-                  <TableCell className="font-medium">{provider.name}</TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{provider.type}</Badge>
-                  </TableCell>
-                  <TableCell className="max-w-48 truncate text-muted-foreground" title={provider.baseUrl}>
-                    {provider.baseUrl}
-                  </TableCell>
-                  <TableCell>
-                    <code className="font-mono text-xs text-muted-foreground">
-                      {provider.apiKeyMasked}
-                    </code>
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-xs text-muted-foreground">
-                      {Object.keys(provider.models).length} mapping
-                      {Object.keys(provider.models).length === 1 ? "" : "s"}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    {hasHttpOptions(provider.httpOptions) ? (
-                      <Badge variant="outline">configured</Badge>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="hidden sm:table-cell">
-                    <span className="text-xs text-muted-foreground">{provider.weight ?? 1}</span>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <Badge variant={provider.enabled ? "success" : "muted"}>
-                        {provider.enabled ? "enabled" : "disabled"}
-                      </Badge>
-                      {provider.circuitBroken ? (
-                        <Badge variant="destructive" title={`Circuit open since ${provider.circuitReason}`}>
-                          circuit open ({provider.circuitReason})
-                        </Badge>
-                      ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell className="hidden text-muted-foreground md:table-cell">
-                    {formatDateTime(provider.createdAt)}
-                  </TableCell>
-                  <TableCell className="sticky right-0 bg-card">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="sm" onClick={() => setEditing(provider)}>
-                        Edit
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => setDeleting(provider)}
-                      >
-                        Delete
-                      </Button>
-                    </div>
-                  </TableCell>
+      <Card className="mb-6">
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle>Providers</CardTitle>
+            <CardDescription>Add and manage upstream providers</CardDescription>
+          </div>
+          {items.length > 0 ? (
+            <div className="relative w-40 shrink-0">
+              <Search
+                className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <Input
+                aria-label="Search providers"
+                className="pl-9"
+                placeholder="Search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+          ) : null}
+        </CardHeader>
+        <CardContent className="p-0">
+          {providersQuery.isLoading ? (
+            <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
+              Loading…
+            </div>
+          ) : providersQuery.isError ? (
+            <div className="p-6">
+              <ErrorState message={providersQuery.error.message} onRetry={() => providersQuery.refetch()} />
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="p-6">
+              <EmptyState
+                title={items.length === 0 ? "No providers yet" : "No providers match"}
+                description={
+                  items.length === 0
+                    ? "Add an upstream provider to start routing requests."
+                    : "Try a different search."
+                }
+              />
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead className="hidden sm:table-cell">Type</TableHead>
+                  <TableHead>Base URL</TableHead>
+                  <TableHead>Key</TableHead>
+                  <TableHead className="hidden md:table-cell">Created</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+              </TableHeader>
+              <TableBody>
+                {filtered.map((provider) => (
+                  <TableRow key={provider.id}>
+                    <TableCell className="font-medium">{provider.name}</TableCell>
+                    <TableCell className="hidden sm:table-cell">
+                      <Badge variant="outline">{provider.type}</Badge>
+                    </TableCell>
+                    <TableCell className="max-w-48 truncate text-muted-foreground" title={provider.baseUrl}>
+                      {provider.baseUrl}
+                    </TableCell>
+                    <TableCell>
+                      <code className="font-mono text-xs text-muted-foreground">
+                        {provider.apiKeyMasked}
+                      </code>
+                    </TableCell>
+                    <TableCell className="hidden text-muted-foreground md:table-cell">
+                      {formatDateTime(provider.createdAt)}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge variant={provider.enabled ? "success" : "muted"}>
+                          {provider.enabled ? "enabled" : "disabled"}
+                        </Badge>
+                        {provider.circuitBroken ? (
+                          <Badge variant="destructive" title={`Circuit open since ${provider.circuitReason}`}>
+                            circuit open ({provider.circuitReason})
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <Switch
+                          checked={provider.enabled}
+                          onCheckedChange={(next) =>
+                            updateProvider.mutate({ id: provider.id, enabled: next })
+                          }
+                          aria-label={
+                            provider.enabled
+                              ? `Disable ${provider.name}`
+                              : `Enable ${provider.name}`
+                          }
+                          title={provider.enabled ? "Disable provider" : "Enable provider"}
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setEditing(provider)}
+                          aria-label={`Edit ${provider.name}`}
+                          title="Edit"
+                        >
+                          <Pencil aria-hidden="true" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-destructive hover:text-destructive"
+                          onClick={() => setDeleting(provider)}
+                          aria-label={`Delete ${provider.name}`}
+                          title="Delete"
+                        >
+                          <Trash2 aria-hidden="true" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
       <ProviderFormDialog
         open={formOpen || editing !== null}

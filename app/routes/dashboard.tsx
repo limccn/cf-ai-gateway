@@ -1,11 +1,13 @@
 // /dashboard — 概览页（M6 6.3）：余额、Key 数量、用量趋势图、最近请求。
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router";
 import { KeyRound, TrendingUp, Wallet, Zap } from "lucide-react";
 import { useSession } from "@/hooks/use-session";
+import { useIsMobile } from "@/hooks/use-media-query";
 import { useUsage } from "@/modules/usage/hooks/use-usage";
+import { buildHourlySeries } from "@/modules/usage/hourly";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
-import { formatNumber, formatUsd, formatDateTime, formatShortDate } from "@/lib/format";
+import { formatNumber, formatUsd, formatDateTime, formatDateTimeShort, formatShortDate } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { BarChart } from "@/components/charts/bar-chart";
@@ -20,7 +22,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { ErrorState, EmptyState } from "@/components/ui/states";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 function StatCard({
@@ -52,7 +54,10 @@ function StatCard({
 
 export default function DashboardPage() {
   const { user } = useSession();
+  const isMobile = useIsMobile();
+  const [chartMode, setChartMode] = useState<"day" | "hour">("day");
   const usageQuery = useUsage({ groupBy: "date", limit: 7 });
+  const hourlyQuery = useUsage({ groupBy: "hour" });
   const keysQuery = useKeys();
 
   const { aggregates, details } = useMemo(() => {
@@ -77,6 +82,11 @@ export default function DashboardPage() {
         value: agg.requests,
       })),
     [aggregates],
+  );
+
+  const hourlyData = useMemo(
+    () => buildHourlySeries(hourlyQuery.data?.aggregates ?? []),
+    [hourlyQuery.data],
   );
 
   const balance = user?.balance;
@@ -123,19 +133,49 @@ export default function DashboardPage() {
 
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>Requests per day</CardTitle>
-            <CardDescription>Last 30 days of traffic</CardDescription>
+          <CardHeader className="flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle>{chartMode === "day" ? "Requests per day" : "Requests (last 24h)"}</CardTitle>
+              <CardDescription>
+                {chartMode === "day" ? "Last 30 days of traffic" : "Hourly request count"}
+              </CardDescription>
+            </div>
+            <div className="flex items-center gap-1">
+              <Button
+                variant={chartMode === "day" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setChartMode("day")}
+              >
+                Day
+              </Button>
+              <Button
+                variant={chartMode === "hour" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setChartMode("hour")}
+              >
+                Hour
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
-            {usageQuery.isLoading ? (
+            {chartMode === "day" ? (
+              usageQuery.isLoading ? (
+                <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
+                  Loading…
+                </div>
+              ) : usageQuery.isError ? (
+                <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
+              ) : (
+                <BarChart data={chartData} height={220} formatValue={formatNumber} />
+              )
+            ) : hourlyQuery.isLoading ? (
               <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
                 Loading…
               </div>
-            ) : usageQuery.isError ? (
-              <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
+            ) : hourlyQuery.isError ? (
+              <ErrorState message={hourlyQuery.error.message} onRetry={() => hourlyQuery.refetch()} />
             ) : (
-              <BarChart data={chartData} height={220} formatValue={formatNumber} />
+              <BarChart data={hourlyData} height={220} formatValue={formatNumber} />
             )}
           </CardContent>
         </Card>
@@ -185,8 +225,10 @@ export default function DashboardPage() {
                         </Badge>
                       </TableCell>
                       <TableCell>{formatUsd(detail.cost)}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {formatDateTime(detail.createdAt)}
+                      <TableCell className="whitespace-nowrap text-muted-foreground">
+                        {isMobile
+                          ? formatDateTimeShort(detail.createdAt)
+                          : formatDateTime(detail.createdAt)}
                       </TableCell>
                     </TableRow>
                   ))}

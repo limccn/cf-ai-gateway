@@ -7,6 +7,7 @@ export interface UsageParams {
   to?: string; // YYYY-MM-DD
   keyId?: number;
   model?: string;
+  status?: "success" | "error" | "cached" | "rejected"; // 仅过滤 request_logs（明细 + hour/status 聚合）
   groupBy?: UsageGroupBy;
   limit?: number;
   offset?: number;
@@ -20,6 +21,7 @@ export function toUsageQuery(params: UsageParams): string {
     to: params.to,
     keyId: params.keyId,
     model: params.model,
+    status: params.status,
     groupBy: params.groupBy,
     limit: params.limit,
     offset: params.offset,
