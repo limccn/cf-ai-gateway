@@ -7,6 +7,8 @@
 //   - OpenAI 面要求 `Authorization: Bearer sk-mock-openai`
 //   - Anthropic 面要求 `x-api-key: sk-mock-anthropic`
 // 特殊模型：model=error-500 → 恒返回 500（验证网关错误映射）。
+// 落点指纹：非流式响应携带 system_fingerprint="mock:<model>"（disguise 层只重写 model/error.message，
+// 不触碰该字段）——多上游 E2E 用它在 disguise 生效时区分落点 provider。
 import { createServer } from "node:http";
 
 const PORT = Number(process.env.MOCK_PORT ?? 8788);
@@ -73,6 +75,7 @@ function openaiChatResponse(body, model) {
     object: "chat.completion",
     created: nowSeconds(),
     model,
+    system_fingerprint: `mock:${model}`,
     choices: [
       {
         index: 0,

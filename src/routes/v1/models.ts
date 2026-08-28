@@ -32,7 +32,8 @@ export function modelsRoute(app: Hono<AppEnv>): void {
           id: internalModel,
           object: "model",
           created,
-          owned_by: row.name,
+          // 伪装：不暴露真实 provider 名（08-27-disguised-mapping）
+          owned_by: "gateway",
         });
       }
     }

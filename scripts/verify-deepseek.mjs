@@ -2,7 +2,10 @@
 // 前置：`npm run dev` 已启动；本脚本通过管理 API 配置 deepseek provider
 // （key 从环境变量 DEEPSEEK_API_KEY 读取，绝不落盘/入 git），然后验证四个
 // 协议入口 × 非流式/流式对 deepseek-v4-flash / deepseek-v4-pro 的连通。
-// 用法：DEEPSEEK_API_KEY=<key> node scripts/verify-deepseek.mjs [--models deepseek-v4-flash,deepseek-v4-pro]
+// 用法：DEEPSEEK_API_KEY=<key> node scripts/verify-deepseek.mjs [--models deepseek-v4-flash,deepseek-v4-pro] [--disguise <requestModel>]
+//   --disguise <requestModel>：伪装模式 —— provider 映射 { <requestModel>: MODELS[0] }，
+//   请求 <requestModel> 实际送 MODELS[0] 真实上游，断言响应 model 回写为 <requestModel>
+//   （非流式 + 流式 + /v1/messages + /v1/responses + request_logs 按内部名）。
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +14,7 @@ const DB_NAME = "cf-ai-gateway-db";
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
 const MODELS = (process.argv.find((a) => a.startsWith("--models=")) ?? "--models=deepseek-v4-flash,deepseek-v4-pro")
   .split("=")[1].split(",");
+const DISGUISE = process.argv.find((a) => a.startsWith("--disguise="))?.split("=")[1] ?? null;
 const ADMIN_EMAIL = "proto-admin@example.com";
 const PASSWORD = "testpass123";
 
@@ -108,7 +112,10 @@ async function main() {
       body: {
         name: p.name, type: p.type, baseUrl: p.baseUrl,
         apiKey: DEEPSEEK_KEY,
-        models: Object.fromEntries(MODELS.map((m) => [m, m])),
+        // 恒等映射（基线）；--disguise 时伪造成 { requestModel → MODELS[0] }
+        models: DISGUISE
+          ? { [DISGUISE]: MODELS[0] }
+          : Object.fromEntries(MODELS.map((m) => [m, m])),
       },
     });
     report(`create provider ${p.name} (${p.type})`, createProvider.status === 200, `status=${createProvider.status}`);
@@ -118,8 +125,8 @@ async function main() {
   const anthropicProviderId = (providersList.json?.items ?? []).find((p) => p.name === "deepseek-anthropic")?.id;
   report("provider ids resolved", openaiProviderId !== undefined && anthropicProviderId !== undefined, `openai=${openaiProviderId} anthropic=${anthropicProviderId}`);
 
-  // 价格 upsert：POST 409 时 PATCH
-  for (const model of MODELS) {
+  // 价格 upsert：POST 409 时 PATCH（disguise 模式额外为内部名建价）
+  for (const model of [...MODELS, ...(DISGUISE ? [DISGUISE] : [])]) {
     const createPrice = await api("/api/models", { method: "POST", ...authApi, body: { model, inputPriceShort: 1, inputPriceLong: 1, inputPriceCached: 0.25, outputPriceShort: 2, outputPriceLong: 2 } });
     if (createPrice.status === 409) {
       const list = await api("/api/models", authApi);
@@ -147,7 +154,47 @@ async function main() {
     return after;
   };
 
-  // ---------- 2. 四协议入口 × 非流式/流式 ----------
+  if (DISGUISE) {
+    // ---------- 2d. disguise 真实上游：请求内部名 → 真实 DeepSeek，响应全回写 ----------
+    const inner = MODELS[0];
+    console.log(`\n[2d] disguise: 请求 ${DISGUISE} → 实际 ${inner}（真实 DeepSeek 上游）`);
+    const msg = { model: DISGUISE, messages: [{ role: "user", content: "请用一句话介绍你自己" }] };
+
+    let b = balanceSql();
+    const chat = await api("/v1/chat/completions", { method: "POST", headers: proxyAuth, body: msg });
+    report("chat non-stream 200 + 真实内容", chat.status === 200 && chat.json?.choices?.[0]?.message?.content?.length > 0,
+      `status=${chat.status} ${JSON.stringify(chat.json?.error ?? chat.json?.choices?.[0]?.message?.content?.slice(0, 40))}`);
+    report(`chat non-stream model 回写 → ${DISGUISE}`, chat.json?.model === DISGUISE,
+      `model=${chat.json?.model}`);
+    b = expectCharged("chat non-stream (disguise)", b);
+    report("usage present", chat.json?.usage?.prompt_tokens > 0 && chat.json?.usage?.completion_tokens > 0,
+      JSON.stringify(chat.json?.usage));
+
+    const chatStream = await api("/v1/chat/completions", { method: "POST", headers: proxyAuth, body: { ...msg, stream: true } });
+    const chatEvents = parseSse(chatStream.text);
+    const chunkModels = chatEvents.map((e) => e.data?.model).filter((m) => m !== undefined);
+    report("chat stream [DONE] + 每帧 model 回写", chatStream.status === 200 && chatEvents.some((e) => e.done)
+      && chunkModels.length > 0 && chunkModels.every((m) => m === DISGUISE),
+      `frames=${chunkModels.length} models=${[...new Set(chunkModels)].join(",")}`);
+    b = expectCharged("chat stream (disguise)", b);
+
+    const anthBody = { model: DISGUISE, max_tokens: 1024, messages: [{ role: "user", content: "请用一句话介绍你自己" }] };
+    const msgV1 = await api("/v1/messages", { method: "POST", headers: proxyAuth, body: anthBody });
+    report("/v1/messages Anthropic 形态 + model 回写", msgV1.status === 200 && msgV1.json?.type === "message"
+      && msgV1.json?.model === DISGUISE && msgV1.json?.content?.[0]?.text?.length > 0,
+      `status=${msgV1.status} model=${msgV1.json?.model} ${JSON.stringify(msgV1.json?.error)?.slice(0, 220)}`);
+    b = expectCharged("/v1/messages (disguise)", b);
+
+    const resp = await api("/v1/responses", { method: "POST", headers: proxyAuth, body: { model: DISGUISE, input: "请用一句话介绍你自己" } });
+    report("/v1/responses Response 形态 + model 回写", resp.status === 200 && resp.json?.object === "response"
+      && resp.json?.status === "completed" && resp.json?.model === DISGUISE && resp.json?.output_text?.length > 0,
+      `status=${resp.status} model=${resp.json?.model}`);
+    b = expectCharged("/v1/responses (disguise)", b);
+
+    const logs = query(`SELECT provider_id, status FROM request_logs WHERE model='${DISGUISE}' AND status='success' ORDER BY id DESC LIMIT 10;`);
+    report("request_logs 按内部名记录", logs.length >= 4, `hits=${logs.length}`);
+  } else {
+  // ---------- 2. 四协议入口 × 非流式/流式（恒等映射基线） ----------
   for (const model of MODELS) {
     console.log(`\n[2] ${model}`);
     const msg = { model, messages: [{ role: "user", content: "请用一句话介绍你自己" }] };
@@ -203,6 +250,7 @@ async function main() {
     // OpenAI 面 4 次（chat 非流/流 + responses 非流/流）、Anthropic 面 2 次（messages 非流/流）
     report(`${model}: OpenAI-face → openai provider (/v1)`, openaiHits.length >= 4, `hits=${openaiHits.length}`);
     report(`${model}: Anthropic-face → anthropic provider (/anthropic)`, anthropicHits.length >= 2, `hits=${anthropicHits.length}`);
+  }
   }
 
   console.log(`\n=== RESULT: ${passed} passed, ${failed} failed ===`);
