@@ -3,9 +3,9 @@
 # 真实 secrets（BETTER_AUTH_SECRET / GITHUB_CLIENT_SECRET / GATEWAY_SECRET_KEY）仅通过 secret put 注入。
 # wrangler.toml 由 wrangler.toml.template 渲染生成（npm run render:config），勿直接修改生成物。
 
-# ---- Infra 结构配置（模板渲染 token；见 docs/CONFIG-INVENTORY.md） ----
+# ---- Infra 结构配置（模板渲染 token；见 CLAUDE.md §环境与配置） ----
 # wrangler 绑定级字段（name / routes / D1 / KV / Queue）与 [vars] 运行时配置都必须是 toml 字面量
-# （wrangler 4.x 实测不解析 {KEY} 占位符），统一经模板渲染烘焙自本文件。值从 Cloudflare dashboard 获取（docs/DEPLOY.md §1-3）：
+# （wrangler 4.x 实测不解析 {KEY} 占位符），统一经模板渲染烘焙自本文件。值从 Cloudflare dashboard 获取（CLAUDE.md §部署要点）：
 #   WORKER_NAME / DOMAIN      -> Workers & Pages 部署名 / 自定义域名
 #   D1_DB_NAME / D1_DB_ID     -> `wrangler d1 create <name>` 输出（dashboard 复制 database_id）
 #   KV_ID                     -> `wrangler kv namespace create CACHE_KV` 输出

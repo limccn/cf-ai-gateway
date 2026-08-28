@@ -2,7 +2,7 @@
 # 本文件由 scripts/render-wrangler-config.mjs 从本模板生成 wrangler.toml —— 勿直接修改生成物。
 # 改配置数据：编辑 .dev.vars（staging 用 STAGING_* 键；或 CI 注入同名环境变量）后运行 `npm run render:config`。
 # 本地开发（Miniflare）：`npm run dev`（vite dev）。
-# 生产部署从零步骤见 docs/DEPLOY.md（创建 D1/KV/Queue → 迁移 → secrets/vars → OAuth App → 首个 admin → deploy）。
+# 生产部署从零步骤见 CLAUDE.md §部署要点（创建 D1/KV/Queue → 迁移 → secrets/vars → OAuth App → 首个 admin → deploy）。
 # 双环境：顶层 = production（wrangler deploy），[env.staging] = staging（wrangler deploy --env staging）。
 
 name = "{WORKER_NAME}"
@@ -27,7 +27,7 @@ routes = [
 assets = { binding = "ASSETS", directory = "dist/client", run_worker_first = true, not_found_handling = "single-page-application" }
 
 # --- D1：事实库（users / api_keys / providers / balance_tx / request_logs / usage_daily / models） ---
-# database_id 由 `wrangler d1 create` 生成后配置到 .dev.vars 的 D1_DB_ID（见 docs/DEPLOY.md 步骤 1）。
+# database_id 由 `wrangler d1 create` 生成后配置到 .dev.vars 的 D1_DB_ID（见 CLAUDE.md §部署要点 步骤 1）。
 [[d1_databases]]
 binding = "DB"
 database_name = "{D1_DB_NAME}"
@@ -35,7 +35,7 @@ database_id = "{D1_DB_ID}"
 migrations_dir = "drizzle"
 
 # --- KV：响应缓存 + 限流固定窗口计数器（M4 使用） ---
-# id 由 `wrangler kv namespace create` 生成后配置到 .dev.vars 的 KV_ID（见 docs/DEPLOY.md 步骤 2）。
+# id 由 `wrangler kv namespace create` 生成后配置到 .dev.vars 的 KV_ID（见 CLAUDE.md §部署要点 步骤 2）。
 [[kv_namespaces]]
 binding = "CACHE_KV"
 id = "{KV_ID}"

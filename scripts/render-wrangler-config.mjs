@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 渲染 wrangler.toml：wrangler.toml.template + .dev.vars（+ process.env 白名单键）→ wrangler.toml。
 //
-// 背景（docs/CONFIG-INVENTORY.md）：绑定级字段（name / routes / database_id / KV id /
+// 背景（.trellis/spec/governance/config-inventory.md，本地 spec）：绑定级字段（name / routes / database_id / KV id /
 // queue 名）与 [vars] 运行时配置都必须以 TOML 字面量烘焙进生成物——wrangler 4.x **实测不解析**
 // `{KEY}` 占位符（`wrangler deploy --dry-run` 输出 `env.FOO ("{TEST_FOO}")`，字面量原样进运行时）。
 // 因此所有环境差异值统一收进 .dev.vars / process.env，模板驱动渲染（生成物 gitignored）。
@@ -29,7 +29,7 @@ const OUTPUT_PATH = join(ROOT, "wrangler.toml");
 const DOT_VARS = join(ROOT, ".dev.vars");
 const DOT_VARS_STAGING = join(ROOT, ".dev.vars.staging");
 
-// 白名单：与 docs/CONFIG-INVENTORY.md「RENDER-ENV 移管清单」一一对应（20 键）。
+// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（20 键）。
 // 顶层 [vars] 运行时配置（BETTER_AUTH_URL 等）与 infra 键同策略烘焙——wrangler 4.x 不解析
 // {KEY}，值必须在构建期就位。本地默认值（localhost / 占位）来自 .dev.vars，仅用于本地 dev
 // （wrangler dev 时 .dev.vars 优先于 [vars]，不受影响）；部署真实值走 shell export 覆盖。

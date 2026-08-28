@@ -63,7 +63,7 @@ when needed, and settles billing per token from the price table.
 
 ## Local quick start
 
-> Branching model & release flow: see [docs/Branching.md](docs/Branching.md) — trunk-style dev on `develop`, `staging`/`production` as deploy pointer branches, `main` for major versions only.
+> Branching model & release flow: see [CLAUDE.md](CLAUDE.md) — trunk-style dev on `develop`, `staging`/`production` as deploy pointer branches, `main` for major versions only.
 
 ```bash
 git clone <your-repo-url> cf-ai-gateway
@@ -71,10 +71,10 @@ cd cf-ai-gateway
 npm install
 
 # 1. Create .dev.vars (gitignored) from the committed template —
-#    cp .dev.vars.example .dev.vars and fill in local values (see docs/DEPLOY.md §5.3–5.4)
+#    cp .dev.vars.example .dev.vars and fill in local values (see CLAUDE.md §环境与配置)
 
 # 2. Render wrangler.toml from the template (gitignored generated file —
-#    never edit it by hand; infra values come from .dev.vars, see docs/CONFIG-INVENTORY.md)
+#    never edit it by hand; infra values come from .dev.vars, see CLAUDE.md §环境与配置)
 npm run render:config
 
 # 3. Prepare the local D1 database
@@ -130,7 +130,8 @@ npx wrangler d1 execute cf-ai-gateway-db --local \
   node scripts/verify-m4.mjs         # billing, rate limit, cache, admin balance
   ```
 
-- **Acceptance verification record**: `docs/VERIFICATION.md` maps every PRD
+- **Acceptance verification record**: `CLAUDE.md §验收状态` (and the full spec
+  `.trellis/spec/governance/verification.md`) maps every PRD
   acceptance criterion (AC1–AC9) to its verification method, commands, and
   result. AC6/AC9 (GitHub OAuth end-to-end + live deployment) are recorded as
   executed against production and staging.
@@ -153,7 +154,8 @@ npx wrangler deploy --config wrangler.toml --env staging
 
 Deployment from scratch (create D1 / KV / Queue → migrate → secrets → GitHub
 OAuth App → first admin bootstrap → deploy → verify) is documented in
-**[`docs/DEPLOY.md`](./docs/DEPLOY.md)**. The repository ships with
+**[`CLAUDE.md`](./CLAUDE.md) §部署要点** (full manual: local Trellis spec
+`.trellis/spec/governance/deployment.md`). The repository ships with
 `wrangler.toml.template` + `.dev.vars.example` — `wrangler.toml` is a gitignored
 generated file, so run `npm run render:config` (or `npm install` + pre-hooks)
 before any deploy. Validate without uploading via
@@ -225,7 +227,7 @@ both are accepted at every proxy entry point (`x-api-key` falls back when
   the schema/enum (design §2); admin top-ups are recorded as `adjust`.
 - **Live environments require user-provided credentials** (GitHub OAuth App
   client secrets via `wrangler secret put`, real upstream provider keys
-  configured through the admin console) — see `docs/DEPLOY.md` Step 9 for the
+  configured through the admin console) — see `CLAUDE.md §部署要点` for the
   production checklist. Live deployment is done (production
   `router.lmlh.net`, staging `stg-router.lmlh.net`).
 
@@ -241,6 +243,6 @@ src/                 Worker backend (Hono)
 app/                 React SPA (React Router v7, React Query, Tailwind)
 tests/               Vitest + Miniflare suite
 scripts/             mock upstream + E2E verification scripts
-docs/                DEPLOY.md (production manual), VERIFICATION.md (AC record)
+CLAUDE.md            knowledge entry (git workflow / env config / deploy / AC summary; full specs: local .trellis/spec/governance/)
 drizzle/             SQL migrations
 ```
