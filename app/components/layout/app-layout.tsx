@@ -94,7 +94,7 @@ export function AppLayout() {
               end={item.end}
               className={({ isActive }) =>
                 cn(
-                  "whitespace-nowrap rounded-md px-3 py-1.5 text-sm",
+                  "whitespace-nowrap rounded-md px-3 py-2 text-sm",
                   isActive ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted",
                 )
               }
@@ -106,10 +106,10 @@ export function AppLayout() {
       </nav>
 
       <div className="flex">
-        {/* 桌面侧边栏 */}
-        <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r md:flex">
-          <div className="flex h-14 items-center border-b px-5">
-            <LinkBrand />
+        {/* 桌面侧边栏（md 平板为图标栏，lg 起全宽；图标 title 提示） */}
+        <aside className="sticky top-0 hidden h-screen w-16 shrink-0 flex-col border-r md:flex lg:w-60">
+          <div className="flex h-14 items-center justify-center border-b px-0 lg:justify-start lg:px-5">
+            <LinkBrand compact />
           </div>
           <nav className="flex-1 space-y-1 overflow-y-auto p-3" aria-label="Main navigation">
             {visibleItems.map((item) => (
@@ -117,9 +117,10 @@ export function AppLayout() {
                 key={item.to}
                 to={item.to}
                 end={item.end}
+                title={item.label}
                 className={({ isActive }) =>
                   cn(
-                    "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                    "flex items-center justify-center gap-3 rounded-md px-0 py-2 text-sm font-medium transition-colors lg:justify-start lg:px-3",
                     isActive
                       ? "bg-primary/15 text-primary"
                       : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -127,12 +128,17 @@ export function AppLayout() {
                 }
               >
                 <span className="[&_svg]:size-4">{item.icon}</span>
-                {item.label}
+                <span className="hidden lg:inline">{item.label}</span>
               </NavLink>
             ))}
           </nav>
           <div className="border-t p-3">
-            <UserButton />
+            <div className="flex justify-center lg:hidden">
+              <UserButton compact />
+            </div>
+            <div className="hidden lg:block">
+              <UserButton />
+            </div>
           </div>
         </aside>
 
@@ -145,11 +151,18 @@ export function AppLayout() {
   );
 }
 
-function LinkBrand() {
+function LinkBrand({ compact = false }: { compact?: boolean }) {
   return (
-    <NavLink to="/dashboard" className="flex items-center gap-2">
-      <ShieldCheck className="size-5 text-primary" aria-hidden="true" />
-      <span className="text-sm font-semibold tracking-tight">AI API Gateway</span>
+    <NavLink to="/dashboard" className="flex items-center gap-2" title="AI API Gateway">
+      <ShieldCheck className="size-5 shrink-0 text-primary" aria-hidden="true" />
+      <span
+        className={cn(
+          "text-sm font-semibold tracking-tight",
+          compact ? "hidden lg:inline" : "inline",
+        )}
+      >
+        AI API Gateway
+      </span>
     </NavLink>
   );
 }

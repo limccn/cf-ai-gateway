@@ -308,8 +308,8 @@ export default function ModelsPage() {
                 <TableHead className="text-right">Input (short → long) / 1M</TableHead>
                 <TableHead className="text-right">Input cached / 1M</TableHead>
                 <TableHead className="text-right">Output (short → long) / 1M</TableHead>
-                <TableHead>Updated</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="hidden md:table-cell">Updated</TableHead>
+                <TableHead className="sticky right-0 bg-card text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -323,10 +323,10 @@ export default function ModelsPage() {
                   <TableCell className="text-right whitespace-nowrap">
                     {formatUsd(item.outputPriceShort)} → {formatUsd(item.outputPriceLong)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground">
+                  <TableCell className="hidden text-muted-foreground md:table-cell">
                     {formatDateTime(item.updatedAt)}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="sticky right-0 bg-card">
                     <div className="flex items-center justify-end gap-1">
                       <Button variant="ghost" size="sm" onClick={() => setEditing(item)}>
                         Edit

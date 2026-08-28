@@ -446,10 +446,10 @@ export default function ProvidersPage() {
                 <TableHead>Key</TableHead>
                 <TableHead>Models</TableHead>
                 <TableHead>HTTP options</TableHead>
-                <TableHead>Weight</TableHead>
+                <TableHead className="hidden sm:table-cell">Weight</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="hidden md:table-cell">Created</TableHead>
+                <TableHead className="sticky right-0 bg-card text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -480,7 +480,7 @@ export default function ProvidersPage() {
                       <span className="text-xs text-muted-foreground">—</span>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="hidden sm:table-cell">
                     <span className="text-xs text-muted-foreground">{provider.weight ?? 1}</span>
                   </TableCell>
                   <TableCell>
@@ -495,10 +495,10 @@ export default function ProvidersPage() {
                       ) : null}
                     </div>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">
+                  <TableCell className="hidden text-muted-foreground md:table-cell">
                     {formatDateTime(provider.createdAt)}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="sticky right-0 bg-card">
                     <div className="flex items-center justify-end gap-1">
                       <Button variant="ghost" size="sm" onClick={() => setEditing(provider)}>
                         Edit
