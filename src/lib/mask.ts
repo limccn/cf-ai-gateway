@@ -12,3 +12,11 @@ export function maskSecret(prefix: string): string {
 export function extractSecretPrefix(secret: string): string {
   return secret.slice(0, 10);
 }
+
+/**
+ * Header 值展示脱敏（`****abcd` 风格）：短值全掩，长值保留末 4 位用于识别。
+ * httpOptions.headers 值可能含上游认证信息，GET /api/providers 时使用。
+ */
+export function maskHeaderValue(value: string): string {
+  return value.length <= 4 ? "****" : `****${value.slice(-4)}`;
+}

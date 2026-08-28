@@ -18,6 +18,11 @@ export function createProviderRoute(app: Hono<AppEnv>): void {
     const db = createDb(c.env);
 
     const apiKeyEnc = await encryptSecret(body.apiKey, c.env.GATEWAY_SECRET_KEY);
+    // httpOptions 与 apiKey 同规范 AES-GCM 加密（headers 可能含上游认证值）
+    const httpOptionsEnc =
+      body.httpOptions !== undefined
+        ? await encryptSecret(JSON.stringify(body.httpOptions), c.env.GATEWAY_SECRET_KEY)
+        : null;
 
     const [provider] = await db
       .insert(providers)
@@ -30,6 +35,7 @@ export function createProviderRoute(app: Hono<AppEnv>): void {
         models: JSON.stringify(body.models),
         enabled: body.enabled,
         weight: body.weight,
+        httpOptionsEnc,
       })
       .returning();
     if (!provider) {
@@ -37,6 +43,9 @@ export function createProviderRoute(app: Hono<AppEnv>): void {
     }
 
     logger.info("provider_created", { providerId: provider.id, type: provider.type });
-    return c.json({ success: true as const, provider: toProviderResponse(provider) });
+    return c.json({
+      success: true as const,
+      provider: toProviderResponse(provider, body.httpOptions ?? null),
+    });
   });
 }
