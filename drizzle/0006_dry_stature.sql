@@ -1,0 +1,2 @@
+ALTER TABLE `request_logs` ADD `request_id` text;--> statement-breakpoint
+CREATE UNIQUE INDEX `request_logs_request_id_idx` ON `request_logs` (`request_id`) WHERE "request_logs"."request_id" IS NOT NULL;

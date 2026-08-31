@@ -1,16 +1,19 @@
 // Anthropic 入站协议适配（D2）：Anthropic Messages API ↔ 网关内部 OpenAI Chat Completions 形态。
-// 方向与正向 anthropicAdapter 相反，不复用其内部函数（仅复用 sse.ts 的 parseSseStream 与
-// stop_reason 映射表的逆向查表）：
+// 方向与正向 anthropicAdapter 相反，不复用其内部函数（仅复用 stop_reason 映射表的逆向查表）：
 // - buildInternalFromAnthropic：入站 Anthropic 请求 → 内部 OpenAI chat 形态（AB §3.1）
 // - transformResponseToAnthropic：内部 chat 响应 → Anthropic message（AB §3.2）
-// - transformStreamToAnthropic：上游 OpenAI chat SSE → Anthropic SSE（AB §3.3）
+// - transformStreamToAnthropic：上游 OpenAI chat SSE → Anthropic SSE（AB §3.3，R2.4 走统一帧层）
 // 合成响应 id 统一用 msg_ 前缀（D11；流式/非流式共用同一生成器）。
 // 信息损失点（P5，丢弃 + 告警日志）：top_k / metadata / thinking / service_tier / output_config；
 // image source.url → 400 invalid_request_error（零 SSRF 面）。
 import type { Logger } from "../lib/logger";
 import { logger as moduleLogger } from "../lib/logger";
 import { AdapterError } from "./types";
-import { parseSseStream, type SseEvent } from "./sse";
+import {
+  pipeSseStream,
+  type SseEvent,
+  type SseFrameTransform,
+} from "./sse-pipe";
 
 type JsonObject = Record<string, unknown>;
 
@@ -508,15 +511,15 @@ interface StreamBlockState {
 }
 
 /**
- * 上游 OpenAI chat.completion.chunk SSE → Anthropic SSE（AB §3.3 状态机）。
+ * 上游 OpenAI chat.completion.chunk SSE 事件 → Anthropic SSE 帧转换（AB §3.3 状态机，
+ * R2.4 统一 SsePipe 帧层，消除转换器自有 decode/parse）。
  * 事件序列：message_start → content_block_start/delta/stop（text 与 tool_use 按块 index）→
  * message_delta（finish_reason 双射 + output_tokens=上游尾包值）→ message_stop；
  * 无 [DONE]（终事件即 message_stop）；流内错误 → error 事件注入并终止。
  * 帧格式：`event: <type>\ndata: <json>\n\n`（与 Anthropic 官方一致，客户端按 event 名区分）。
+ * 每次调用创建独立状态机；consume 返回 false 后 pump 继续排空上游（结算需看到流结束）。
  */
-export function transformStreamToAnthropic(
-  body: ReadableStream<Uint8Array>,
-): ReadableStream<Uint8Array> {
+export function createStreamToAnthropicTransform(): SseFrameTransform {
   const encoder = new TextEncoder();
   const messageId = newAnthropicMessageId();
   let model = "";
@@ -620,7 +623,7 @@ export function transformStreamToAnthropic(
       return;
     }
     if (typeof data !== "object" || Array.isArray(data)) {
-      return; // ping / 未知事件
+      return; // ping / 未知事件 / 非 JSON 帧（容错跳过，不打断流）
     }
     const obj = data as JsonObject;
     // 模型名取自首 chunk（上游模型名；message_start 快照使用）
@@ -737,25 +740,31 @@ export function transformStreamToAnthropic(
     }
   }
 
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        for await (const event of parseSseStream(body)) {
-          if (terminated) {
-            break;
-          }
-          handleEvent(event, controller);
-        }
-        if (!terminated) {
-          handleEvent({ event: "message", data: null }, controller);
-        }
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Upstream stream error";
-        sendErrorEvent(controller, message);
-      } finally {
-        controller.close();
+  return {
+    consume(event, controller) {
+      handleEvent(event, controller);
+      return !terminated;
+    },
+    onError(error, controller) {
+      const message =
+        error instanceof Error ? error.message : "Upstream stream error";
+      sendErrorEvent(controller, message); // 输出 error 事件后由 pipe 正常关闭（旧语义）
+    },
+    onEnd(controller) {
+      // 上游正常结束（未到终态）：合成 data:null 终事件（message_delta 兜底 + message_stop）
+      if (!terminated) {
+        handleEvent({ event: "message", data: null }, controller);
       }
     },
-  });
+  };
+}
+
+/**
+ * 上游 OpenAI chat SSE 字节流 → Anthropic SSE（字节级包装，供 backward-compat；
+ * 主路径由代理管线直接消费 createStreamToAnthropicTransform 的帧）。
+ */
+export function transformStreamToAnthropic(
+  body: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  return pipeSseStream(body, { transform: createStreamToAnthropicTransform() });
 }

@@ -3,6 +3,8 @@ import { applyD1Migrations, env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { and, desc, eq } from "drizzle-orm";
 import { createDb } from "../src/db";
+import { consumeBillingBatch } from "../src/lib/billing-queue";
+import type { BillingEvent } from "../src/lib/billing-queue";
 import {
   apiKeys,
   balanceTx,
@@ -29,6 +31,74 @@ export async function applyMigrations(): Promise<void> {
 export async function clearKv(): Promise<void> {
   const listed = await env.CACHE_KV.list();
   await Promise.all(listed.keys.map((k) => env.CACHE_KV.delete(k.name)));
+}
+
+// ============ 延迟计费（08-31-perf-v2）测试辅助 ============
+// 请求路径成功时只向 BILLING_QUEUE 发事件（不写 D1）；单测环境不自动投递队列消息，
+// 与 usage.test.ts 的 consumeUsageBatch 驱动模式一致：构造批 → 手动驱动消费者。
+
+export interface BillingEventInput {
+  userId: number;
+  keyId: number;
+  providerId: number | null;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens?: number;
+  latencyMs?: number;
+  upstreamLatencyMs?: number | null;
+  ts?: number;
+}
+
+/** 构造 Queues 计费批（模拟消费者收到的 MessageBatch<unknown>）。 */
+export function makeBillingBatch(events: BillingEvent[]): MessageBatch<unknown> {
+  return {
+    queue: "billing-aggregation",
+    messages: events.map((body, index) => ({
+      id: `billing-msg-${index}`,
+      timestamp: new Date(body.ts),
+      body,
+      attempts: 1,
+      retry: () => {},
+      ack: () => {},
+    })),
+    metadata: {
+      metrics: {
+        backlogCount: events.length,
+        backlogBytes: 0,
+        oldestMessageTimestamp: new Date(),
+      },
+    },
+    retryAll: () => {},
+    ackAll: () => {},
+  };
+}
+
+/**
+ * 驱动延迟计费消费者（模拟 Queues 投递 → consumeBillingBatch）。
+ * 成功请求的响应路径只 enqueue 事件；测试侧按已知结算数据构造事件后手动消费，
+ * 断言余额/流水/明细在消费者批内落定。
+ */
+export async function settleDelayedBilling(events: BillingEventInput[]): Promise<void> {
+  await consumeBillingBatch(
+    makeBillingBatch(
+      events.map((e) => ({
+        requestId: crypto.randomUUID(),
+        userId: e.userId,
+        keyId: e.keyId,
+        providerId: e.providerId,
+        model: e.model,
+        promptTokens: e.promptTokens,
+        completionTokens: e.completionTokens,
+        ...(e.cachedTokens !== undefined ? { cachedTokens: e.cachedTokens } : {}),
+        status: "success" as const,
+        latencyMs: e.latencyMs ?? 0,
+        upstreamLatencyMs: e.upstreamLatencyMs ?? null,
+        ts: e.ts ?? Date.now(),
+      })),
+    ),
+    env,
+  );
 }
 
 export async function setupUser(

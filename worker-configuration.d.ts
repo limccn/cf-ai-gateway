@@ -5,6 +5,7 @@ interface __BaseEnv_Env {
 	CACHE_KV: KVNamespace;
 	DB: D1Database;
 	USAGE_QUEUE: Queue;
+	BILLING_QUEUE: Queue;
 	BETTER_AUTH_SECRET: string;
 	BETTER_AUTH_URL: string;
 	GITHUB_CLIENT_ID: string;

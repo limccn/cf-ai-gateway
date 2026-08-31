@@ -11,6 +11,7 @@ import { env } from "cloudflare:test";
 import { createDb } from "../src/db";
 import { providers } from "../src/db/schema";
 import { encryptSecret } from "../src/lib/security";
+import { buildCacheKey, hashRequestBody } from "../src/lib/response-cache";
 import {
   applyMigrations,
   clearKv,
@@ -18,6 +19,7 @@ import {
   getBalance,
   latestLogStatus,
   selfFetch,
+  settleDelayedBilling,
   setupKey,
   setupPrice,
   setupProviderWithModel,
@@ -149,8 +151,8 @@ function chatResponse(): Record<string, unknown> {
 describe("伪装：OpenAI 非流式", () => {
   it("T1 别名映射：响应 model 回写为请求名；请求侧仍发映射值；计费按内部名", async () => {
     const userId = await setupUser("disguise-ns@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupAliasProvider(MODEL, UPSTREAM_MODEL, "openai");
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupAliasProvider(MODEL, UPSTREAM_MODEL, "openai");
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     let capturedBody = "";
@@ -169,15 +171,18 @@ describe("伪装：OpenAI 非流式", () => {
     const upstreamBody = JSON.parse(capturedBody) as { model: string };
     expect(upstreamBody["model"]).toBe(UPSTREAM_MODEL);
 
-    // 计费/日志按内部名（价格已按 MODEL 注册）
+    // 延迟计费：消费者批内落账（计费/日志按内部名，价格已按 MODEL 注册）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");
   });
 
-  it("T9 缓存命中：首次与命中响应均为伪装名，命中不触发上游", async () => {
+  it("T9 缓存命中：首次与命中响应均为伪装名，命中不触发上游（R2 高频重传语义）", async () => {
     const userId = await setupUser("disguise-cache@test.dev", 10);
-    const { plaintext } = await setupKey(userId, { cacheEnabled: true, cacheTtl: 3600 });
+    const { keyId, plaintext } = await setupKey(userId, { cacheEnabled: true, cacheTtl: 3600 });
     await setupAliasProvider(MODEL, UPSTREAM_MODEL, "openai");
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
@@ -187,6 +192,7 @@ describe("伪装：OpenAI 非流式", () => {
       return new Response(JSON.stringify(chatResponse()), { status: 200 });
     });
 
+    // R2：第 1 次只计数、第 2 次写缓存（waitUntil 异步）、第 3 次命中
     const first = await postChat(plaintext);
     expect(first.status).toBe(200);
     expect(((await first.json()) as { model: string })["model"]).toBe(MODEL);
@@ -194,8 +200,18 @@ describe("伪装：OpenAI 非流式", () => {
 
     const second = await postChat(plaintext);
     expect(second.status).toBe(200);
-    expect(((await second.json()) as { model: string })["model"]).toBe(MODEL);
-    expect(upstreamCalls).toBe(1); // 缓存命中，未再转发
+    expect(upstreamCalls).toBe(2); // 第 2 次仍转发（未达命中）
+
+    const bodyHash = await hashRequestBody(JSON.parse(chatBody()) as Record<string, unknown>);
+    const cacheKey = buildCacheKey(keyId, MODEL, bodyHash);
+    await vi.waitFor(async () => {
+      expect(await env.CACHE_KV.get(cacheKey)).not.toBeNull();
+    });
+
+    const third = await postChat(plaintext);
+    expect(third.status).toBe(200);
+    expect(((await third.json()) as { model: string })["model"]).toBe(MODEL);
+    expect(upstreamCalls).toBe(2); // 缓存命中，未再转发
     expect(await latestLogStatus(userId)).toBe("cached");
   });
 });
@@ -203,8 +219,8 @@ describe("伪装：OpenAI 非流式", () => {
 describe("伪装：OpenAI 流式", () => {
   it("T2 别名映射：每 chunk model 回写；[DONE] 与 usage 尾包正常；结算扣费", async () => {
     const userId = await setupUser("disguise-sse@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupAliasProvider(MODEL, UPSTREAM_MODEL, "openai");
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupAliasProvider(MODEL, UPSTREAM_MODEL, "openai");
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     const chunk = (payload: string): string =>
@@ -233,7 +249,10 @@ describe("伪装：OpenAI 流式", () => {
     expect(text).toContain("data: [DONE]");
     expect(text).toContain('"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}');
 
-    // 流式结算正常（按内部名价格）
+    // 流式结算正常（按内部名价格；延迟计费：消费者批内落账）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
   });
@@ -270,8 +289,8 @@ describe("伪装：Anthropic 正向（OpenAI 请求 → anthropic 上游）", ()
 
   it("T3b 流式：Anthropic SSE 转换后每 chunk model 回写", async () => {
     const userId = await setupUser("disguise-anth-fwd-sse@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupAliasProvider(MODEL, "claude-sonnet-5-upstream", "anthropic");
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupAliasProvider(MODEL, "claude-sonnet-5-upstream", "anthropic");
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     const frame = (event: string, payload: string): string =>
@@ -302,6 +321,10 @@ describe("伪装：Anthropic 正向（OpenAI 请求 → anthropic 上游）", ()
     }
     expect(text).toContain("data: [DONE]");
 
+    // 延迟计费：消费者批内落账（按内部名价格）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
   });
@@ -327,8 +350,8 @@ describe("伪装：Anthropic 入站（Anthropic 请求 → openai 上游）", ()
 
   it("T4b 流式：message_start.message.model 回写，其余事件不受影响", async () => {
     const userId = await setupUser("disguise-anth-in-sse@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupAliasProvider(MODEL, UPSTREAM_MODEL, "openai");
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupAliasProvider(MODEL, UPSTREAM_MODEL, "openai");
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     const chunk = (payload: string): string =>
@@ -359,6 +382,10 @@ describe("伪装：Anthropic 入站（Anthropic 请求 → openai 上游）", ()
     expect(text).toContain("event: message_stop");
     expect(text).not.toContain("data: [DONE]"); // Anthropic 出站无 [DONE]
 
+    // 延迟计费：消费者批内落账（入站 anthropic 请求，模型名按请求名计费）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
   });

@@ -9,6 +9,7 @@ import { desc, eq } from "drizzle-orm";
 import { createDb } from "../src/db";
 import { providers, requestLogs } from "../src/db/schema";
 import { encryptSecret } from "../src/lib/security";
+import { buildCacheKey, hashRequestBody } from "../src/lib/response-cache";
 import type { HttpOptions } from "../src/providers/types";
 import {
   applyMigrations,
@@ -18,6 +19,7 @@ import {
   getBalance,
   selfFetch,
   sessionCookie,
+  settleDelayedBilling,
   setupKey,
   setupPrice,
   setupProviderWithModel,
@@ -122,8 +124,8 @@ async function setupProviderWithHttpOptions(
 describe("R1：模型路由 [1m] 后缀适配", () => {
   it("请求 [1m]：上游转发无后缀映射值、明细/计费剥离为无后缀、价格按无后缀", async () => {
     const userId = await setupUser("r1-suffix@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupProviderWithModel(MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(MODEL);
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     let upstreamBody: { model?: string } = {};
@@ -137,7 +139,10 @@ describe("R1：模型路由 [1m] 后缀适配", () => {
 
     // 上游默认无后缀（[1m] 仅下游别名；仅显式 mapping 才可能带后缀）
     expect(upstreamBody["model"]).toBe(MODEL);
-    // 计费：余额按无后缀价格扣费、usage 流水 +1
+    // 计费：延迟计费消费者批内落账，余额按无后缀价格扣费、usage 流水 +1
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     // 明细：model 剥离为无后缀
@@ -146,19 +151,20 @@ describe("R1：模型路由 [1m] 后缀适配", () => {
 
   it("显式映射含 [1m]：精确优先（映射值为完整上游名，计费剥离）", async () => {
     const userId = await setupUser("r1-explicit@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
+    const { keyId, plaintext } = await setupKey(userId);
     // 独立模型名：避免与 setupProviderWithModel 的 mock-provider 进入同一候选池
     const explicitModel = "gpt-4o-explicit";
     const db = createDb(env);
     // 双映射：无后缀 + 显式 [1m]（各自上游名不同，用显式 [1m] 的值区分落点）
     const apiKeyEnc = await encryptSecret("sk-mock", env.GATEWAY_SECRET_KEY);
-    await db.insert(providers).values({
+    const inserted = await db.insert(providers).values({
       name: "r1-explicit-provider",
       type: "openai",
       baseUrl: "http://127.0.0.1:1/v1",
       apiKeyEnc,
       models: JSON.stringify({ [explicitModel]: explicitModel, [`${explicitModel}[1m]`]: `${explicitModel}-1m` }),
-    });
+    }).returning({ id: providers.id });
+    const providerId = inserted[0]?.id ?? null;
     await setupPrice(explicitModel, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     let upstreamModel = "";
@@ -170,6 +176,10 @@ describe("R1：模型路由 [1m] 后缀适配", () => {
     const res = await postChat(plaintext, `${explicitModel}[1m]`);
     expect(res.status).toBe(200);
     expect(upstreamModel).toBe(`${explicitModel}-1m`); // 显式映射的完整上游名，不再补后缀
+    // 明细由延迟计费消费者落账（model 剥离为无后缀）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: explicitModel, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await latestLogModel(userId)).toBe(explicitModel);
   });
 
@@ -185,9 +195,9 @@ describe("R1：模型路由 [1m] 后缀适配", () => {
     expect(await latestLogModel(userId)).toBe("no-such-model");
   });
 
-  it("缓存共享：`xxx` 与 `xxx[1m]` 命中同一缓存键（第二次不转发、明细记 cached）", async () => {
+  it("缓存共享：`xxx` 与 `xxx[1m]` 命中同一缓存键（R2 计数后命中、不转发、明细记 cached）", async () => {
     const userId = await setupUser("r1-cache@test.dev", 10);
-    const { plaintext } = await setupKey(userId, { cacheEnabled: true });
+    const { keyId, plaintext } = await setupKey(userId, { cacheEnabled: true });
     await setupProviderWithModel(MODEL);
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
@@ -197,14 +207,29 @@ describe("R1：模型路由 [1m] 后缀适配", () => {
       return new Response(JSON.stringify(CHAT_RESPONSE), { status: 200 });
     });
 
+    // R2：第 1 次只计数、第 2 次写缓存（waitUntil 异步）、第 3 次命中
     const first = await postChat(plaintext, MODEL);
     expect(first.status).toBe(200);
     expect(upstreamCalls).toBe(1);
 
     const second = await postChat(plaintext, `${MODEL}[1m]`);
     expect(second.status).toBe(200);
-    // 缓存命中：不再转发（bodyHash 已按计费名归一化）
-    expect(upstreamCalls).toBe(1);
+    expect(upstreamCalls).toBe(2); // 第 2 次仍未达命中（未写缓存）
+
+    // bodyHash 已按计费名归一化：无后缀与 [1m] 命中同一缓存键
+    const bodyHash = await hashRequestBody({
+      model: MODEL,
+      messages: [{ role: "user", content: "hello" }],
+    });
+    const cacheKey = buildCacheKey(keyId, MODEL, bodyHash);
+    await vi.waitFor(async () => {
+      expect(await env.CACHE_KV.get(cacheKey)).not.toBeNull();
+    });
+
+    const third = await postChat(plaintext, `${MODEL}[1m]`);
+    expect(third.status).toBe(200);
+    // 缓存命中：不再转发
+    expect(upstreamCalls).toBe(2);
     // cached 明细 model 剥离
     expect(await latestLogModel(userId)).toBe(MODEL);
   });

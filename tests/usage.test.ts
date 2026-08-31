@@ -427,6 +427,201 @@ describe("status 过滤（Request details 状态筛选）", () => {
   });
 });
 
+describe("range 快捷维度（08-31-usage-stats-dimensions）", () => {
+  /**
+   * 造数辅助：相对「当前时刻的本地日界」偏移插入 request_logs。
+   * tzOffsetMin 与 API 一致：UTC+8 → 480。本地日 0:00 的 UTC 时刻 = floor((now+off)/day)*day - off。
+   */
+  function seedLogs(
+    userId: number,
+    keyId: number,
+    logs: Array<{ label: string; ms: number; model?: string }>,
+  ): Promise<void> {
+    const db = createDb(env);
+    return db.insert(requestLogs).values(
+      logs.map((log) => ({
+        userId,
+        keyId,
+        model: log.model ?? "gpt-4o",
+        promptTokens: 10,
+        completionTokens: 5,
+        cost: 0.001,
+        status: "success",
+        createdAt: new Date(log.ms),
+      })),
+    ).then(() => undefined);
+  }
+  const localStart = (tzOffsetMin: number) => {
+    const off = tzOffsetMin * 60_000;
+    const now = Date.now();
+    return Math.floor((now + off) / 86_400_000) * 86_400_000 - off;
+  };
+  const hourKey = (ms: number, tzOffsetMin: number) => {
+    const shifted = new Date(ms + tzOffsetMin * 60_000);
+    return `${shifted.toISOString().slice(0, 13)}:00:00Z`;
+  };
+  const dayKey = (ms: number, tzOffsetMin: number) => {
+    const shifted = new Date(ms + tzOffsetMin * 60_000);
+    return shifted.toISOString().slice(0, 10);
+  };
+  const DAY = 86_400_000;
+
+  it("range=today&tzOffsetMin=480：本地日界分桶（跨 UTC 日界数据入本地日期），窗口外排除", async () => {
+    const userId = await setupUser("range-today@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 480;
+    const localToday = localStart(tz);
+    // 本地今日 04:00（UTC 昨日 20:00，跨 UTC 日界）、本地今日 10:00；本地昨日 23:00（窗口外）
+    await seedLogs(userId, keyId, [
+      { label: "today-04", ms: localToday + 4 * 3600_000 },
+      { label: "today-10", ms: localToday + 10 * 3600_000 },
+      { label: "yesterday-23", ms: localToday - 3600_000 },
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson(`/api/me/usage?range=today&tzOffsetMin=${tz}`, cookie);
+    expect(body.success).toBe(true);
+
+    // 两条入同桶（本地今日 04:00 与 10:00 不同桶；窗口外数据排除）
+    const keys = body.aggregates.map((a) => a.group);
+    expect(keys).toContain(hourKey(localToday + 4 * 3600_000, tz));
+    expect(keys).toContain(hourKey(localToday + 10 * 3600_000, tz));
+    expect(keys).not.toContain(hourKey(localToday - 3600_000, tz)); // 本地昨日（UTC 今日）排除
+    const agg = body.aggregates.find((a) => a.group === hourKey(localToday + 4 * 3600_000, tz));
+    expect(agg?.requests).toBe(1);
+    expect(agg?.tokensIn).toBe(10);
+    expect(agg?.cost).toBeCloseTo(0.001, 12);
+    // 明细同窗口
+    expect(body.total).toBe(2);
+  });
+
+  it("range=yesterday&tzOffsetMin=480：本地昨日桶；本地今日数据排除", async () => {
+    const userId = await setupUser("range-yesterday@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 480;
+    const localToday = localStart(tz);
+    await seedLogs(userId, keyId, [
+      { label: "y-day-04", ms: localToday - 20 * 3600_000 }, // 本地昨日 04:00
+      { label: "y-day-10", ms: localToday - 14 * 3600_000 }, // 本地昨日 10:00
+      { label: "today-02", ms: localToday + 2 * 3600_000 }, // 本地今日（排除）
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson(`/api/me/usage?range=yesterday&tzOffsetMin=${tz}`, cookie);
+    expect(body.aggregates.map((a) => a.group)).toContain(hourKey(localToday - 20 * 3600_000, tz));
+    expect(body.aggregates).toHaveLength(2);
+    expect(body.total).toBe(2);
+  });
+
+  it("range=last14 / last30：天桶端点（含今日），明细窗口边界正确", async () => {
+    const userId = await setupUser("range-last@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 0;
+    const localToday = localStart(tz);
+    const seed = async (daysBack: number, hourOffsetMs = 0) =>
+      seedLogs(userId, keyId, [{ label: `d${daysBack}`, ms: localToday - daysBack * DAY + hourOffsetMs }]);
+
+    // last14 边界：今天（含）、13 天前（含）、14 天前（排除）
+    // last30 边界：今天（含）、29 天前（含）、30 天前（排除）
+    await seed(0);
+    await seed(13);
+    await seed(14);
+    await seed(29);
+    await seed(30);
+    const cookie = sessionCookie(await createSession(userId));
+    const body14 = await getJson(`/api/me/usage?range=last14`, cookie);
+    const keys14 = body14.aggregates.map((a) => a.group);
+    expect(keys14).toContain(dayKey(localToday, tz));
+    expect(keys14).toContain(dayKey(localToday - 13 * DAY, tz));
+    expect(keys14).not.toContain(dayKey(localToday - 14 * DAY, tz));
+    expect(body14.total).toBe(2);
+
+    // last30 边界：今天 + 29 天前（含）；30 天前（排除）
+    const body30 = await getJson(`/api/me/usage?range=last30`, cookie);
+    const keys30 = body30.aggregates.map((a) => a.group);
+    expect(keys30).toContain(dayKey(localToday, tz));
+    expect(keys30).toContain(dayKey(localToday - 29 * DAY, tz));
+    expect(keys30).not.toContain(dayKey(localToday - 30 * DAY, tz));
+    // 0/13/14/29 天前 4 条在窗内；30 天前排除
+    expect(body30.total).toBe(4);
+  });
+
+  it("tzOffsetMin 缺省 = UTC：与 UTC 日界一致（AC-6）", async () => {
+    const userId = await setupUser("range-utc@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const localToday = localStart(0);
+    // UTC 今日 03:00；UTC 昨日 23:00（本地昨日）→ today 窗口只含前者
+    await seedLogs(userId, keyId, [
+      { label: "utc-today", ms: localToday + 3 * 3600_000 },
+      { label: "utc-yesterday", ms: localToday - 3600_000 },
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson(`/api/me/usage?range=today`, cookie);
+    expect(body.aggregates).toHaveLength(1);
+    expect(body.aggregates[0]?.group).toBe(hourKey(localToday + 3 * 3600_000, 0));
+    expect(body.total).toBe(1);
+  });
+
+  it("range 模式下 model/keyId/status 过滤仍生效（admin 额外 userId）", async () => {
+    const adminId = await setupUser("range-admin@test.dev", 0, "admin");
+    const userId = await setupUser("range-filter@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 480;
+    const localToday = localStart(tz);
+    await seedLogs(userId, keyId, [
+      { label: "gpt-4o", ms: localToday + 2 * 3600_000, model: "gpt-4o" },
+      { label: "gpt-4o-mini", ms: localToday + 3 * 3600_000, model: "gpt-4o-mini" },
+    ]);
+
+    const adminCookie = sessionCookie(await createSession(adminId));
+    // admin：userId + model 过滤 + range 同窗
+    const body = await getJson(
+      `/api/admin/usage?range=today&tzOffsetMin=${tz}&userId=${userId}&model=gpt-4o`,
+      adminCookie,
+    );
+    expect(body.aggregates).toHaveLength(1);
+    expect(body.total).toBe(1);
+
+    // member：keyId 过滤
+    const memberCookie = sessionCookie(await createSession(userId));
+    const body2 = await getJson(`/api/me/usage?range=today&tzOffsetMin=${tz}&keyId=${keyId}&model=gpt-4o-mini`, memberCookie);
+    expect(body2.aggregates).toHaveLength(1);
+    expect(body2.total).toBe(1);
+  });
+
+  it("tzOffsetMin 超界（1000）→ 400；非法 range → 400", async () => {
+    const userId = await setupUser("range-invalid@test.dev", 10);
+    const cookie = sessionCookie(await createSession(userId));
+    const bad = await selfFetch("http://localhost/api/me/usage?range=today&tzOffsetMin=1000", {
+      headers: { Cookie: cookie },
+    });
+    expect(bad.status).toBe(400);
+    const badRange = await selfFetch("http://localhost/api/me/usage?range=year", {
+      headers: { Cookie: cookie },
+    });
+    expect(badRange.status).toBe(400);
+  });
+
+  it("range 存在时 from/to/groupBy 宽松忽略（不报错，窗口以 range 为准）", async () => {
+    const userId = await setupUser("range-ignore@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 480;
+    const localToday = localStart(tz);
+    await seedLogs(userId, keyId, [{ label: "today-06", ms: localToday + 6 * 3600_000 }]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    // from/to/groupBy 与 range 同传：range 优先，不 400
+    const body = await getJson(
+      `/api/me/usage?range=today&tzOffsetMin=${tz}&from=1999-01-01&to=1999-12-31&groupBy=date`,
+      cookie,
+    );
+    expect(body.success).toBe(true);
+    expect(body.aggregates.map((a) => a.group)).toContain(hourKey(localToday + 6 * 3600_000, tz));
+    expect(body.total).toBe(1);
+  });
+});
+
 describe("GET /api/admin/usage（admin 全局）", () => {
   it("按 user/key/model/时间范围过滤；member 访问 → 403", async () => {
     const adminId = await setupUser("admin@test.dev", 0, "admin");
@@ -520,7 +715,9 @@ describe("保留期清理（5.4）", () => {
 
     const silentLogger = { info: () => {}, warn: () => {}, error: () => {} };
     const result = await runRequestLogCleanup(db, 10, silentLogger);
-    expect(result.deleted).toBe(1);
+    // 全表清理（无 userId 过滤）：同文件 range 测试造的 13/14+ 天前行也计入 → deleted 用 ≥1；
+    // 精确性由下方 remaining 断言保证（自己用户超期行被删、近期行保留）
+    expect(result.deleted).toBeGreaterThanOrEqual(1);
     expect(result.truncated).toBe(false);
 
     const remaining = await db

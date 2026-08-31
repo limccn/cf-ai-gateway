@@ -12,10 +12,14 @@ import type {
   UpstreamRequest,
 } from "./types";
 import { AdapterError } from "./types";
-import { parseSseStream, type SseEvent } from "./sse";
 import { parseOpenAiUsage } from "./openai";
 import { applyHttpBody, buildUpstreamHeaders } from "./http-options";
 import { resolveModelId } from "../lib/model-id";
+import {
+  pipeSseStream,
+  type SseEvent,
+  type SseFrameTransform,
+} from "./sse-pipe";
 
 const ANTHROPIC_MESSAGES_PATH = "/v1/messages";
 /** Anthropic 要求 max_tokens 必填；未提供时取此默认值（M4 起按模型默认配置）。 */
@@ -471,7 +475,8 @@ function transformResponse(body: unknown): unknown {
 // ============ 流式转换（Anthropic SSE → OpenAI chunk SSE） ============
 
 /**
- * Anthropic SSE 事件流 → OpenAI chat.completion.chunk SSE。
+ * Anthropic SSE 事件 → OpenAI chat.completion.chunk SSE 帧转换（统一 SsePipe 帧层，
+ * 08-31-1102 R2.4：消除转换器自有 decode/parse）。
  * 事件映射：
  *   message_start          → 首 chunk（delta.role/content 占位）+ 记录 input_tokens
  *   content_block_start    → tool_use 块 → delta.tool_calls（含 name）
@@ -479,10 +484,10 @@ function transformResponse(body: unknown): unknown {
  *   message_delta          → finish_reason chunk + 记录 output_tokens
  *   message_stop           → usage 尾包 chunk + data: [DONE]
  *   error                  → OpenAI 风格 error data 块（尽力通知客户端）
+ * 每次调用创建独立状态机（转换器可被代理管线在结算管线上消费同一批帧）。
+ * 无 onError：上游读错误沿用旧行为（输出 error），由 pipe 默认处理。
  */
-function transformStreamToOpenAI(
-  body: ReadableStream<Uint8Array>,
-): ReadableStream<Uint8Array> {
+export function createStreamToOpenAITransform(): SseFrameTransform {
   const encoder = new TextEncoder();
   const created = Math.floor(Date.now() / 1000);
   let id = "chatcmpl";
@@ -503,18 +508,18 @@ function transformStreamToOpenAI(
     return { id, object: "chat.completion.chunk", created, model, choices };
   }
 
-  /** 处理单个 SSE 事件；返回是否应终止（已发送 [DONE]）。 */
-  function handleEvent(
+  /** 逐帧消费：false = 已终态（[DONE] 已发），停止投喂后续事件。 */
+  function consume(
     event: SseEvent,
     controller: ReadableStreamDefaultController<Uint8Array>,
-  ): void {
+  ): boolean {
     // [DONE] 已发送后忽略后续事件（message_stop/error 之后上游不应再有事件）
     if (doneSent) {
-      return;
+      return false;
     }
     const data = event.data;
     if (!data || typeof data !== "object") {
-      return; // ping / 空事件
+      return true; // ping / 空事件 / 非 JSON 帧（容错跳过，不打断流）
     }
     const obj = data as JsonObject;
     const type = obj["type"];
@@ -546,7 +551,7 @@ function transformStreamToOpenAI(
       enqueue(controller, baseChunk(
         [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
       ));
-      return;
+      return true;
     }
 
     if (event.event === "content_block_start" || type === "content_block_start") {
@@ -571,13 +576,13 @@ function transformStreamToOpenAI(
           ));
         }
       }
-      return;
+      return true;
     }
 
     if (event.event === "content_block_delta" || type === "content_block_delta") {
       const delta = obj["delta"];
       if (!delta || typeof delta !== "object") {
-        return;
+        return true;
       }
       const d = delta as JsonObject;
       const index = typeof obj["index"] === "number" ? obj["index"] : 0;
@@ -594,7 +599,7 @@ function transformStreamToOpenAI(
           }],
         ));
       }
-      return;
+      return true;
     }
 
     if (event.event === "message_delta" || type === "message_delta") {
@@ -612,7 +617,7 @@ function transformStreamToOpenAI(
       enqueue(controller, baseChunk(
         [{ index: 0, delta: {}, finish_reason: mapFinishReason(stopReason) }],
       ));
-      return;
+      return true;
     }
 
     if (event.event === "message_stop" || type === "message_stop") {
@@ -632,7 +637,7 @@ function transformStreamToOpenAI(
       enqueue(controller, usageChunk);
       doneSent = true;
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      return;
+      return false; // 终态：停止投喂
     }
 
     if (event.event === "error" || type === "error") {
@@ -649,28 +654,32 @@ function transformStreamToOpenAI(
       );
       doneSent = true;
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      return;
+      return false; // 终态：停止投喂
     }
 
     // content_block_stop / ping 等：无输出
+    return true;
   }
 
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        for await (const event of parseSseStream(body)) {
-          handleEvent(event, controller);
-        }
-        if (!doneSent) {
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        }
-      } catch (error) {
-        controller.error(error);
-      } finally {
-        controller.close();
+  return {
+    consume,
+    onEnd(controller) {
+      // 上游正常结束但未到终态（如截断流）：补 [DONE]（旧语义）
+      if (!doneSent) {
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       }
     },
-  });
+  };
+}
+
+/**
+ * 上游 Anthropic SSE 字节流 → OpenAI chunk SSE（字节级包装，供适配器接口与
+ * corner 路径使用；主路径由代理管线直接消费 createStreamToOpenAITransform 的帧）。
+ */
+export function transformStreamToOpenAI(
+  body: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  return pipeSseStream(body, { transform: createStreamToOpenAITransform() });
 }
 
 export const anthropicAdapter: ProviderAdapter = {
@@ -714,4 +723,7 @@ export const anthropicAdapter: ProviderAdapter = {
   parseStreamUsage: parseOpenAiUsage, // 变换后的尾包已是 OpenAI 形态
 
   transformStreamToOpenAI,
+
+  // R2.4：帧级转换器（代理管线在结算管线上消费同一批帧，消除重复编解码）
+  createStreamToOpenAI: createStreamToOpenAITransform,
 };

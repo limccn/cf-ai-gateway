@@ -3,6 +3,7 @@
 // - 数据库列名 snake_case；时间戳 integer epoch seconds（drizzle mode "timestamp"）。
 // - 网关 API Key 只存 sha256 哈希（spec 强制）；上游 Provider 密钥 AES-GCM 加密后存储。
 // - 金额一律 REAL（虚拟币）；价格单位为 USD / 每百万 tokens。
+import { sql } from "drizzle-orm";
 import {
   index,
   integer,
@@ -239,10 +240,13 @@ export const balanceTx = sqliteTable(
 // --- 请求明细 ---
 // 鉴权失败（rejected）/未路由时 user_id / key_id / provider_id 为 null；
 // latency 字段仅在转发后存在。
+// request_id：延迟计费幂等键（请求路径生成的 UUID；成功路径明细由计费消费者写入，
+// 部分唯一索引保证重复投递（at-least-once）只落一行；旧行/错误路径同步明细不受限）。
 export const requestLogs = sqliteTable(
   "request_logs",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
+    requestId: text("request_id"),
     userId: integer("user_id").references(() => users.id),
     keyId: integer("key_id").references(() => apiKeys.id),
     providerId: integer("provider_id").references(() => providers.id),
@@ -261,6 +265,9 @@ export const requestLogs = sqliteTable(
     index("request_logs_created_at_idx").on(table.createdAt),
     index("request_logs_user_id_idx").on(table.userId),
     index("request_logs_key_id_idx").on(table.keyId),
+    uniqueIndex("request_logs_request_id_idx")
+      .on(table.requestId)
+      .where(sql`${table.requestId} IS NOT NULL`),
   ],
 );
 

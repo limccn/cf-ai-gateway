@@ -4,6 +4,7 @@
 // 入站协议错误形态（Anthropic：`{type:"error",error:{type,message}}`）。
 // 状态码与 message 原文不动；豁免 SSE（非 JSON）与已带协议错误标记（顶层 type:"error"）的响应。
 import type { MiddlewareHandler } from "hono";
+import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../types";
 import { toUnifiedErrorBody } from "./error-format";
@@ -51,15 +52,24 @@ function extractOpenAiMessage(body: unknown): string | null {
 
 export interface ErrorAdaptOptions {
   format: ErrorAdaptFormat;
+  /**
+   * 动态格式解析（08-31-protocol-auto-detect，design §4.2）：按请求上下文决定改写形态。
+   * 返回 null → 不改写（保持 OpenAI 统一形态）；缺省 undefined → 恒用 options.format（现状行为逐字节不变）。
+   */
+  resolveFormat?: (c: Context<AppEnv>) => ErrorAdaptFormat | null;
 }
 
 export function createErrorAdaptMiddleware(
   options: ErrorAdaptOptions,
 ): MiddlewareHandler<AppEnv> {
-  const { format } = options;
+  const { format, resolveFormat } = options;
   return async (c, next) => {
     await next();
     const res = c.res;
+    // 动态格式（协议感知）：resolveFormat 返回 null → 不改写（OpenAI 形态原样返回）；
+    // 返回 undefined（未提供）→ 缺省 format（现状行为）。注意不能用 `?? format`（会吞掉 null）。
+    const resolved = resolveFormat?.(c);
+    const activeFormat = resolved === undefined ? format : resolved;
     // 仅改写错误响应（4xx/5xx）；2xx 响应（含 SSE 成功流）原样返回
     if (res.status < 400 || res.status >= 600) {
       return;
@@ -84,11 +94,11 @@ export function createErrorAdaptMiddleware(
     if (message === null) {
       return;
     }
-    if (format === "anthropic") {
+    if (activeFormat === "anthropic") {
       c.get("logger")?.warn("inbound_error_rewritten", {
         path: c.req.path,
         status: res.status,
-        format,
+        format: activeFormat,
       });
       c.res = c.json(
         {

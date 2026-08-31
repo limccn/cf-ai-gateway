@@ -137,6 +137,29 @@ describe("maskModelInStream", () => {
     expect(out).toContain("data: [DONE]\r\n\r\n"); // 分隔符原字节保留（不归一化换行）
   });
 
+  it("恒等映射短路（R2.3）：直接返回输入流对象（零 decode/encode/parse）", () => {
+    const source = bytes(`data: {"model":"claude-sonnet-5","choices":[]}\n\ndata: [DONE]\n\n`);
+    // 同一模型名 → 返回原流引用（不创建新流、不消费）
+    expect(maskModelInStream(source, "claude-sonnet-5", "claude-sonnet-5")).toBe(source);
+  });
+
+  it("恒等映射：字节与输入完全一致（含 CRLF 分隔符）", async () => {
+    const sse =
+      `data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"delta":{"content":"a"},"finish_reason":null}]}\r\n\r\n` +
+      `data: [DONE]\r\n\r\n`;
+    const out = await readAll(maskModelInStream(bytes(sse), "m", "m"));
+    expect(out).toBe(sse);
+  });
+
+  it("空 upstream 模型名不短路（回写语义保留）", async () => {
+    const sse =
+      `data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"deepseek-chat","choices":[]}\n\n` +
+      `data: [DONE]\n\n`;
+    const out = await readAll(maskModelInStream(bytes(sse), REQUEST, ""));
+    expect(out).toContain(`"model":"${REQUEST}"`);
+    expect(out).not.toContain("deepseek-chat");
+  });
+
   it("CRLF 分隔符跨 chunk 切分：分帧边界识别不依赖缓冲边界", async () => {
     const sse =
       `data: {"id":"1","object":"chat.completion.chunk","created":0,"model":"deepseek-chat","choices":[]}\r\n\r\n` +

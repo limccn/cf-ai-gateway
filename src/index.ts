@@ -28,6 +28,7 @@ import billingRouter from "./routes/billing/router";
 import { toUnifiedErrorBody } from "./lib/error-format";
 import { logger } from "./lib/logger";
 import { consumeUsageBatch } from "./lib/usage-aggregation";
+import { consumeBillingBatch } from "./lib/billing-queue";
 import { parseRetentionDays, runRequestLogCleanup } from "./lib/cleanup";
 import { createDb } from "./db";
 import type { AppEnv } from "./types";
@@ -147,7 +148,13 @@ export async function queue(
   env: Env,
   _ctx: ExecutionContext,
 ): Promise<void> {
-  await consumeUsageBatch(batch, env);
+  // 按队列名分流：BILLING_QUEUE → 延迟计费消费者；其余（USAGE_QUEUE）→ 用量聚合消费者。
+  // 队列名来自 [vars]（render 烘焙）；未知队列名回退 usage 聚合（非法消息会校验失败跳过并记日志）。
+  if (batch.queue === env.BILLING_QUEUE_NAME) {
+    await consumeBillingBatch(batch, env);
+  } else {
+    await consumeUsageBatch(batch, env);
+  }
 }
 
 // Scheduled cron（M5 5.4）：按保留期清理过期 request_logs（默认 30 天，env REQUEST_LOG_RETENTION_DAYS 可配置）。

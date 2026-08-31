@@ -1,6 +1,7 @@
 // Provider 适配器契约（design.md §4）。
 // 适配器职责：OpenAI 形态内部请求 → 上游请求；上游响应 → OpenAI 形态（含流式 SSE）。
 // 注册表：src/providers/index.ts；新增 Provider 类型只需实现本接口。
+import type { SseFrameTransform } from "./sse-pipe";
 
 /** 网关内部统一请求形态 = OpenAI 兼容格式。 */
 export type EndpointKind = "chat" | "completions" | "embeddings";
@@ -79,6 +80,12 @@ export interface ProviderAdapter {
   parseStreamUsage(tailChunk: unknown): TokenUsage | null;
   /** 上游流式响应体 → OpenAI SSE（OpenAI 透传；Anthropic 逐事件转换）。 */
   transformStreamToOpenAI(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array>;
+  /**
+   * 流式：帧级转换器（R2.4 统一 SsePipe 帧层）——上游 SSE 事件逐帧消费并 enqueue
+   * OpenAI 出站字节。OpenAI 透传不实现；Anthropic 实现。代理管线在结算管线上
+   * 消费同一批帧（消除重复 decode/parse）。每次调用创建独立状态机。
+   */
+  createStreamToOpenAI?(): SseFrameTransform;
 }
 
 export type ProviderType = "openai" | "anthropic";

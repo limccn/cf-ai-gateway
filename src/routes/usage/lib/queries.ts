@@ -4,7 +4,7 @@ import type { SQL } from "drizzle-orm";
 import type { Db } from "../../../db";
 import { requestLogs, usageDaily } from "../../../db/schema";
 import type { RequestLogStatus } from "../../../lib/billing";
-import type { UsageGroupBy, UsageOutput } from "../types";
+import type { UsageGroupBy, UsageOutput, UsageRange } from "../types";
 
 export interface UsageFilters {
   userId?: number;
@@ -13,6 +13,8 @@ export interface UsageFilters {
   status?: RequestLogStatus; // 仅作用于 request_logs 查询（明细 + status/hour 聚合）；usage_daily 无 status 列
   from?: string; // YYYY-MM-DD（含）
   to?: string; // YYYY-MM-DD（含）
+  range?: UsageRange; // 预设快捷窗口（08-31-usage-stats-dimensions），优先于 from/to
+  tzOffsetMin?: number; // 客户端时区偏移分钟（缺省 0 = UTC），作用于窗口边界与分桶
 }
 
 /** usage_daily 聚合条件：date 列直接按文本范围比较（YYYY-MM-DD 字典序 = 时间序）。 */
@@ -64,6 +66,64 @@ export function requestLogsWhere(filters: UsageFilters): SQL | undefined {
   return conditions.length > 0 ? and(...conditions) : undefined;
 }
 
+// ============ 快捷窗口（08-31-usage-stats-dimensions） ============
+
+/** 本地日 0:00 的 UTC 时刻（tzOffsetMin = 客户端时区偏移分钟，UTC+8 → 480）。 */
+function localTodayStartUtc(nowMs: number, tzOffsetMin: number): number {
+  const offsetMs = tzOffsetMin * 60_000;
+  return Math.floor((nowMs + offsetMs) / 86_400_000) * 86_400_000 - offsetMs;
+}
+
+export interface RangeWindow {
+  start: Date;
+  end: Date;
+  granularity: "hour" | "day";
+}
+
+/**
+ * 预设窗口解析（design §3，含今日）：本地日界按 tzOffsetMin 计算。
+ * - today      [todayStart, todayStart+24h)        小时 24 桶
+ * - yesterday  [todayStart-24h, todayStart)        小时 24 桶
+ * - last14     [todayStart-13d, todayStart+24h)    天 14 桶
+ * - last30     [todayStart-29d, todayStart+24h)    天 30 桶
+ * last14/last30 终点为明日日界（含今日整天），与「含今日」口径一致。
+ */
+export function resolveRangeWindow(
+  range: UsageRange,
+  tzOffsetMin: number,
+  nowMs = Date.now(),
+): RangeWindow {
+  const todayStart = localTodayStartUtc(nowMs, tzOffsetMin);
+  const day = 86_400_000;
+  switch (range) {
+    case "today":
+      return { start: new Date(todayStart), end: new Date(todayStart + day), granularity: "hour" };
+    case "yesterday":
+      return {
+        start: new Date(todayStart - day),
+        end: new Date(todayStart),
+        granularity: "hour",
+      };
+    case "last14":
+      return {
+        start: new Date(todayStart - 13 * day),
+        end: new Date(todayStart + day),
+        granularity: "day",
+      };
+    case "last30":
+      return {
+        start: new Date(todayStart - 29 * day),
+        end: new Date(todayStart + day),
+        granularity: "day",
+      };
+  }
+}
+
+/** SQLite strftime modifier："+480 minutes" / "-120 minutes"（zod int 校验后拼接，无注入面）。 */
+export function tzOffsetModifier(tzOffsetMin: number): string {
+  return `${tzOffsetMin >= 0 ? "+" : ""}${tzOffsetMin} minutes`;
+}
+
 // ============ 聚合查询 ============
 
 export interface UsageAggregateRow {
@@ -87,6 +147,34 @@ export async function fetchUsageAggregates(
   filters: UsageFilters,
   groupBy: UsageGroupBy | undefined,
 ): Promise<UsageAggregateRow[]> {
+  // range 快捷窗口优先（08-31-usage-stats-dimensions）：从 request_logs 按本地时区窗口实时聚合
+  if (filters.range !== undefined) {
+    const { start, end, granularity } = resolveRangeWindow(
+      filters.range,
+      filters.tzOffsetMin ?? 0,
+    );
+    const modifier = tzOffsetModifier(filters.tzOffsetMin ?? 0);
+    // createdAt 为秒（drizzle timestamp mode），直接作 unixepoch 时间戳；
+    // 分桶键 = 偏移后本地时间（小时 "YYYY-MM-DDTHH:00:00Z" / 天 "YYYY-MM-DD"，Z 仅为格式标记）
+    const bucketExpr =
+      granularity === "hour"
+        ? sql<string>`strftime('%Y-%m-%dT%H:00:00Z', ${requestLogs.createdAt}, 'unixepoch', ${modifier})`
+        : sql<string>`strftime('%Y-%m-%d', ${requestLogs.createdAt}, 'unixepoch', ${modifier})`;
+    const rows = await db
+      .select({
+        group: bucketExpr,
+        requests: sql<number>`count(*)`,
+        tokensIn: sql<number>`coalesce(sum(${requestLogs.promptTokens}), 0)`,
+        tokensOut: sql<number>`coalesce(sum(${requestLogs.completionTokens}), 0)`,
+        cost: sql<number>`coalesce(sum(${requestLogs.cost}), 0)`,
+      })
+      .from(requestLogs)
+      .where(and(requestLogsWhere(filters), gte(requestLogs.createdAt, start), lt(requestLogs.createdAt, end)))
+      .groupBy(bucketExpr)
+      .orderBy(asc(bucketExpr));
+    return rows;
+  }
+
   const where = usageDailyWhere(filters);
 
   if (groupBy === "date") {
@@ -182,7 +270,13 @@ export async function fetchUsageDetails(
   limit: number,
   offset: number,
 ): Promise<UsageDetailsPage> {
-  const where = requestLogsWhere(filters);
+  // range 快捷窗口优先（与聚合同窗口）；requestLogsWhere 不含 range 分支，需显式叠加窗口条件
+  let where = requestLogsWhere(filters);
+  if (filters.range !== undefined) {
+    const { start, end } = resolveRangeWindow(filters.range, filters.tzOffsetMin ?? 0);
+    const window = and(gte(requestLogs.createdAt, start), lt(requestLogs.createdAt, end));
+    where = where === undefined ? window : and(where, window);
+  }
   const rows = await db
     .select({
       id: requestLogs.id,

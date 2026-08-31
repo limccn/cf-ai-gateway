@@ -25,8 +25,10 @@ export function adminUsageRoute(app: Hono<AppEnv>): void {
         keyId: query.keyId,
         model: query.model,
         status: query.status,
-        from: query.from,
-        to: query.to,
+        // range 快捷窗口优先（同 me-usage）
+        ...(query.range !== undefined
+          ? { range: query.range, tzOffsetMin: query.tzOffsetMin ?? 0 }
+          : { from: query.from, to: query.to }),
       };
       const [aggregates, page] = await Promise.all([
         fetchUsageAggregates(db, filters, query.groupBy),

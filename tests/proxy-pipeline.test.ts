@@ -3,6 +3,13 @@
 // 错误路径、GET /v1/models，以及 A3 x-api-key 鉴权回退。
 // 基线先行：作为 A2 proxyRoute 参数化「逐字节不变」的对照基准。
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+// sendBillingEvent mock：断言计费事件载荷（requestId 来源），其余模块保持真实
+// （helpers.settleDelayedBilling 仍走真实 consumeBillingBatch，本文件其他用例不受影响）。
+vi.mock("../src/lib/billing-queue", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../src/lib/billing-queue")>();
+  return { ...mod, sendBillingEvent: vi.fn().mockResolvedValue(undefined) };
+});
+import { sendBillingEvent, type BillingEvent } from "../src/lib/billing-queue";
 import {
   applyMigrations,
   clearKv,
@@ -10,6 +17,7 @@ import {
   getBalance,
   latestLogStatus,
   selfFetch,
+  settleDelayedBilling,
   setupKey,
   setupPrice,
   setupProviderWithModel,
@@ -79,10 +87,10 @@ async function postChat(plaintext: string, body?: string): Promise<Response> {
 }
 
 describe("管道：/v1/chat/completions 非流式", () => {
-  it("成功：透传上游响应、按 usage 扣费、明细记 success", async () => {
+  it("成功：透传上游响应、延迟计费（响应先回，扣费由消费者落定）", async () => {
     const userId = await setupUser("pipeline-ok@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupProviderWithModel(MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(MODEL);
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     let capturedUrl = "";
@@ -107,10 +115,59 @@ describe("管道：/v1/chat/completions 非流式", () => {
     const upstreamBody = JSON.parse(capturedBody) as { model: string };
     expect(upstreamBody["model"]).toBe(MODEL);
 
-    // 计费：余额扣减 + usage 流水 + success 明细
+    // 延迟计费：响应路径 0 同步 D1 写（响应已回但明细/扣费未落）
+    expect(await latestLogStatus(userId)).toBeNull();
+
+    // 消费者批内落账：余额扣减 + usage 流水 + success 明细
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");
+  });
+
+  it("成功：requestId 优先取 cf-ray 头（无头回退 UUID，幂等键唯一性由两端保证）", async () => {
+    const userId = await setupUser("pipeline-cfray@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    await setupProviderWithModel(MODEL);
+    await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+    stubUpstreamFetch(() =>
+      new Response(JSON.stringify(CHAT_RESPONSE), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const mockedSend = vi.mocked(sendBillingEvent);
+    mockedSend.mockClear();
+
+    // 带 cf-ray 头（生产边缘必有）→ 计费事件幂等键 = 边缘请求 id（可与 CF 日志关联）
+    const withRay = await selfFetch("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${plaintext}`,
+        "cf-ray": "7f3d1a2b3c4d5e6f-AMS",
+      },
+      body: chatBody(),
+    });
+    expect(withRay.status).toBe(200);
+    await vi.waitFor(() => expect(mockedSend).toHaveBeenCalled());
+    const eventWithRay = mockedSend.mock.calls.at(-1)?.[1] as BillingEvent;
+    expect(eventWithRay.requestId).toBe("7f3d1a2b3c4d5e6f-AMS");
+
+    // 无 cf-ray 头（本地/dev/miniflare）→ 回退 crypto.randomUUID()
+    const noRay = await selfFetch("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${plaintext}` },
+      body: chatBody(),
+    });
+    expect(noRay.status).toBe(200);
+    await vi.waitFor(() => expect(mockedSend.mock.calls.length).toBeGreaterThanOrEqual(2));
+    const eventNoRay = mockedSend.mock.calls.at(-1)?.[1] as BillingEvent;
+    expect(eventNoRay.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
   });
 
   it("404：模型不可路由 → 不转发、不扣费、明细记 rejected", async () => {
@@ -164,10 +221,10 @@ describe("管道：/v1/chat/completions 非流式", () => {
 });
 
 describe("管道：/v1/chat/completions 流式", () => {
-  it("成功：SSE 透传 + 尾包 usage 结算扣费", async () => {
+  it("成功：SSE 透传 + 尾包 usage 结算（延迟计费，消费者落账）", async () => {
     const userId = await setupUser("pipeline-stream@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupProviderWithModel(MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(MODEL);
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     const sse =
@@ -191,7 +248,13 @@ describe("管道：/v1/chat/completions 流式", () => {
     expect(text).toContain("data: [DONE]");
     expect(text).toContain('"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}');
 
-    // 尾包结算（流完整消费后 settle 回调已执行）
+    // 流式 settle：回调只发计费事件（0 同步 D1 写），消费后明细未落
+    expect(await latestLogStatus(userId)).toBeNull();
+
+    // 消费者批内落账：尾包 usage 结算扣费
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");

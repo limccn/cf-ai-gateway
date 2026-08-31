@@ -4,7 +4,9 @@
 //   - 非流式 JSON 响应顶层 model 字段（OpenAI chat.completion / Anthropic message 两种形态）
 //   - 流式 SSE 帧的 model 字段（OpenAI chunk 顶层 + Anthropic message_start.message.model）
 //   - 错误消息文本中的上游模型名（精确字符串替换）
-// 恒等映射（models[model] === model）时所有函数为无副作用恒等变换（零回归）。
+// 恒等映射（models[model] === model）时所有函数为无副作用恒等变换（零回归）；
+// maskModelInStream 恒等时字节级透传（R2.3，零 decode/encode/parse）。
+import { splitNextFrame } from "../providers/sse-pipe";
 
 /** 错误消息文本替换：上游模型名 → 请求内部名（split/join 避免正则特殊字符问题；
  * 恒等映射短路返回原串）。 */
@@ -111,16 +113,21 @@ function rewriteFrame(
 }
 
 /**
- * 流式 SSE 帧重写：按空行分帧（LF `\n\n` 与 CRLF `\r\n\r\n` 分隔符都识别 —— OpenAI
- * 透传路径是上游原始字节，部分上游/代理以 \r\n 结尾，见 sse.ts 同款归一化注释），
- * 逐帧调用 maskModelInData。帧结构/顺序/终止语义不变（[DONE]、message_stop 由内层
- * 转换器负责，本层只替换字段值；分隔符原字节保留，不归一化换行）。
+ * 流式 SSE 帧重写：按空行分帧（LF `\n\n` 与 CRLF `\r\n\r\n` 分隔符都识别，复用公共
+ * splitNextFrame 最早边界语义 —— OpenAI 透传路径是上游原始字节，部分上游/代理以
+ * \r\n 结尾），逐帧调用 maskModelInData。帧结构/顺序/终止语义不变（[DONE]、
+ * message_stop 由内层转换器负责，本层只替换字段值；分隔符原字节保留，不归一化换行）。
+ * 恒等映射（upstreamModel === requestModel）→ 直接返回输入流（字节级透传，R2.3）。
+ * 注意：空 upstreamModel 不短路（回写语义保留，见 maskModelInErrorMessage 的空串特例）。
  */
 export function maskModelInStream(
   body: ReadableStream<Uint8Array>,
   requestModel: string,
   upstreamModel: string,
 ): ReadableStream<Uint8Array> {
+  if (upstreamModel === requestModel) {
+    return body;
+  }
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
@@ -137,25 +144,15 @@ export function maskModelInStream(
           buffer += decoder.decode(value, { stream: true });
           // 取最早的分帧边界（LF/CRLF 分隔符互不包含，取 min 即确定；缓冲不足时留在 buffer）
           for (;;) {
-            const lfIndex = buffer.indexOf("\n\n");
-            const crlfIndex = buffer.indexOf("\r\n\r\n");
-            let index = -1;
-            let sepLen = 0;
-            if (lfIndex !== -1 && (crlfIndex === -1 || lfIndex < crlfIndex)) {
-              index = lfIndex;
-              sepLen = 2;
-            } else if (crlfIndex !== -1) {
-              index = crlfIndex;
-              sepLen = 4;
-            }
-            if (index === -1) {
+            const frame = splitNextFrame(buffer);
+            if (frame === null) {
               break;
             }
-            const sep = buffer.slice(index, index + sepLen);
-            const block = buffer.slice(0, index);
-            buffer = buffer.slice(index + sepLen);
+            buffer = frame.rest;
             controller.enqueue(
-              encoder.encode(`${rewriteFrame(block, requestModel, upstreamModel)}${sep}`),
+              encoder.encode(
+                `${rewriteFrame(frame.block, requestModel, upstreamModel)}${frame.sep}`,
+              ),
             );
           }
         }

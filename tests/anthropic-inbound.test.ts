@@ -23,6 +23,7 @@ import {
   getBalance,
   latestLogStatus,
   selfFetch,
+  settleDelayedBilling,
   setupKey,
   setupPrice,
   setupProviderWithModel,
@@ -665,8 +666,8 @@ describe("transformStreamToAnthropic（流式出站）", () => {
 describe("端到端：三路径等价（openai 上游）", () => {
   it("/anthropic/v1/messages 与 /anthropic/messages 与 /v1/messages 均返回 Anthropic message 形态", async () => {
     const userId = await setupUser("anthro-paths@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupProviderWithModel(MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(MODEL);
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     let capturedUrl = "";
@@ -712,7 +713,15 @@ describe("端到端：三路径等价（openai 上游）", () => {
       { role: "user", content: "hello" },
     ]);
 
-    // 计费入账（usage 从上游 raw body 提取）：三路径各计费一次
+    // 延迟计费：三路径各发一次计费事件，响应路径 0 同步 D1 写
+    expect(await latestLogStatus(userId)).toBeNull();
+
+    // 消费者批内落账（usage 从上游 raw body 提取）：三路径各计费一次
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - 3 * EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(3);
     expect(await latestLogStatus(userId)).toBe("success");
@@ -864,8 +873,8 @@ describe("端到端：鉴权（x-api-key / Bearer）与错误重写", () => {
 describe("端到端：anthropic 上游（正向适配器自洽闭环）", () => {
   it("非流式：上游 Anthropic message → 回译 Anthropic message（usage 换算入账）", async () => {
     const userId = await setupUser("anthro-upstream@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupAnthropicProviderWithModel(ANTHROPIC_MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupAnthropicProviderWithModel(ANTHROPIC_MODEL);
     await setupPrice(ANTHROPIC_MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     let capturedUrl = "";
@@ -902,14 +911,18 @@ describe("端到端：anthropic 上游（正向适配器自洽闭环）", () => 
     expect(json["stop_reason"]).toBe("end_turn");
     expect(json["usage"]).toEqual({ input_tokens: 100, output_tokens: 50 });
 
+    // 延迟计费：消费者批内落账
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: ANTHROPIC_MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
   });
 
-  it("流式：上游 Anthropic SSE → 正向转换 → 结算 → 回译 Anthropic SSE（尾包 output_tokens）", async () => {
+  it("流式：anthropic 上游 → P2a 协议短路（原样透传）+ Anthropic 提取器结算", async () => {
     const userId = await setupUser("anthro-upstream-stream@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupAnthropicProviderWithModel(ANTHROPIC_MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupAnthropicProviderWithModel(ANTHROPIC_MODEL);
     await setupPrice(ANTHROPIC_MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     const upstreamSse = [
@@ -951,13 +964,18 @@ describe("端到端：anthropic 上游（正向适配器自洽闭环）", () => 
       "message_stop",
     ]);
     const start = events[0]?.data["message"] as Record<string, unknown>;
-    expect(String(start["id"])).toMatch(/^msg_/);
-    expect((start["usage"] as Record<string, unknown>)["input_tokens"]).toBe(0);
+    // P2a 短路：事件原样透传（id/usage 来自上游原值；旧行为为合成 msg_ id + input_tokens:0，
+    // 见 design §3.3 兼容性变更 1）
+    expect(String(start["id"])).toBe("msg_01s");
+    expect((start["usage"] as Record<string, unknown>)["input_tokens"]).toBe(100);
     const delta = events[5]?.data as Record<string, unknown>;
     expect(delta["delta"]).toEqual({ stop_reason: "end_turn", stop_sequence: null });
     expect(delta["usage"]).toEqual({ output_tokens: 50 });
 
-    // 流式尾包结算（usage 从正向转换的 OpenAI 尾包提取）
+    // 结算：Anthropic 提取器（message_start 100 + message_delta 50 合成）→ 延迟计费消费者落账
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: ANTHROPIC_MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");
@@ -967,8 +985,8 @@ describe("端到端：anthropic 上游（正向适配器自洽闭环）", () => 
 describe("端到端：openai 上游流式", () => {
   it("上游 OpenAI SSE → Anthropic SSE（message_start…message_stop）+ 尾包结算", async () => {
     const userId = await setupUser("anthro-openai-stream@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupProviderWithModel(MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(MODEL);
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     const sse = [
@@ -994,6 +1012,10 @@ describe("端到端：openai 上游流式", () => {
     expect(text).toContain("event: message_stop");
     expect(text).not.toContain("[DONE]");
 
+    // 延迟计费：消费者批内落账
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
   });

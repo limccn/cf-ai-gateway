@@ -1,13 +1,20 @@
 // 用量报表模块（M5 5.3）：Zod schema + 类型定义（api-module spec：集中式类型）。
 // 约定：from/to 为 YYYY-MM-DD（含当日，UTC 日界，与 usage_daily.date 口径一致）；
 // 时间戳统一 ISO 字符串（type-safety spec）；响应格式 { aggregates, details, total, limit, offset }（M6 前端消费）。
+// range/tzOffsetMin（08-31-usage-stats-dimensions）：预设快捷窗口（今日/昨日/最近14天/最近30天，
+// 含今日，本地时区日界），优先于 from/to/groupBy（宽松处理不报错）；tzOffsetMin = 客户端时区偏移分钟
+// （UTC+8 → 480，±840 校验，缺省 0 = UTC）。
 import { z } from "zod";
 
 export const usageGroupBySchema = z.enum(["date", "model", "hour", "status"]);
 
+export const usageRangeSchema = z.enum(["today", "yesterday", "last14", "last30"]);
+
 export const meUsageQuerySchema = z.object({
   from: z.iso.date().optional(),
   to: z.iso.date().optional(),
+  range: usageRangeSchema.optional(),
+  tzOffsetMin: z.coerce.number().int().min(-840).max(840).optional(),
   keyId: z.coerce.number().int().positive().optional(),
   model: z.string().max(200).optional(),
   status: z.enum(["success", "error", "cached", "rejected"]).optional(),
@@ -55,6 +62,7 @@ export const usageOutputSchema = z.object({
 // ============= 类型导出 =============
 
 export type UsageGroupBy = z.infer<typeof usageGroupBySchema>;
+export type UsageRange = z.infer<typeof usageRangeSchema>;
 export type MeUsageQuery = z.infer<typeof meUsageQuerySchema>;
 export type AdminUsageQuery = z.infer<typeof adminUsageQuerySchema>;
 export type UsageAggregate = z.infer<typeof usageAggregateSchema>;

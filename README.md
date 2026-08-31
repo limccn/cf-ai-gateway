@@ -193,7 +193,7 @@ Proxy API (gateway-key auth, three protocol entry points):
 | `POST /v1/completions` | OpenAI | Text completions |
 | `POST /v1/embeddings` | OpenAI | Embeddings |
 | `GET /v1/models` | OpenAI | Configured model list |
-| `POST /v1/messages` | Anthropic Messages | Anthropic Messages API (same converter as `/anthropic`) |
+| `POST /v1/messages` | Dual auto-detect | Anthropic Messages **or** OpenAI Chat Completions — detected per request (hard signals, else `claude-*` → Anthropic / otherwise OpenAI) |
 | `POST /v1/responses` | OpenAI Responses | Responses API (streaming SSE has no `[DONE]` terminator, per official protocol) |
 | `POST /anthropic/v1/messages` | Anthropic Messages | Anthropic Messages API — official Anthropic SDK baseURL target |
 | `POST /anthropic/messages` | Anthropic Messages | Alias of the above (pathless SDK baseURLs) |
@@ -201,7 +201,9 @@ Proxy API (gateway-key auth, three protocol entry points):
 Errors follow the protocol of the entry point: OpenAI style
 `{ "error": { "message": "..." } }` on the `/v1/*` surfaces (including Zod
 validation failures), Anthropic style `{ "type": "error", "error": { "type": ..., "message": ... } }`
-on the `/anthropic/*` and `/v1/messages` surfaces.
+on the `/anthropic/*` surfaces. `/v1/messages` errors follow the *detected* protocol:
+Anthropic-detected requests get Anthropic error shapes, OpenAI-detected requests get
+OpenAI error shapes; requests that mix both protocols are rejected with `400`.
 
 ### SDK baseURL conventions
 

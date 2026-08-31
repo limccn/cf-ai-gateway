@@ -24,6 +24,7 @@ import {
   getBalance,
   selfFetch,
   sessionCookie,
+  settleDelayedBilling,
   setupKey,
   setupPrice,
   setupProvider,
@@ -238,7 +239,10 @@ describe("多候选：故障转移", () => {
     expect((await readCircuit(env.CACHE_KV, a))?.reason).toBe("5xx");
     expect(await readCircuit(env.CACHE_KV, b)).toBeNull();
 
-    // 双明细：先 error(A) 后 success(B)；计费只按成功结算
+    // 双明细：error(A) 同步落、success(B) 由延迟计费消费者落账（按成功 provider 结算）
+    await settleDelayedBilling([
+      { userId, keyId, providerId: b, model, promptTokens: 100, completionTokens: 50 },
+    ]);
     const logs = await logsFor(keyId);
     expect(logs.map((l) => [l.providerId, l.status])).toEqual([
       [a, "error"],
@@ -274,6 +278,10 @@ describe("多候选：故障转移", () => {
     expect(called[1]).toContain("b.test");
     expect((await readCircuit(env.CACHE_KV, a))?.reason).toBe("429");
 
+    // success(B) 明细由延迟计费消费者落账（error(A) 同步落）
+    await settleDelayedBilling([
+      { userId, keyId, providerId: b, model, promptTokens: 100, completionTokens: 50 },
+    ]);
     const logs = await logsFor(keyId);
     expect(logs.map((l) => [l.providerId, l.status])).toEqual([
       [a, "error"],
@@ -309,6 +317,10 @@ describe("多候选：故障转移", () => {
     expect(called[1]).toContain("b.test");
     expect((await readCircuit(env.CACHE_KV, a))?.reason).toBe("network");
 
+    // success(B) 明细由延迟计费消费者落账（error(A) 同步落）
+    await settleDelayedBilling([
+      { userId, keyId, providerId: b, model, promptTokens: 100, completionTokens: 50 },
+    ]);
     const logs = await logsFor(keyId);
     expect(logs.map((l) => [l.providerId, l.status])).toEqual([
       [a, "error"],
@@ -430,7 +442,10 @@ describe("多候选：故障转移", () => {
     const text = await res.text();
     expect(text).toContain('"delta":{"role":"assistant","content":"Hel"');
     expect(text).toContain("data: [DONE]");
-    // 尾包结算（流完整消费后 settle 回调已执行）
+    // 尾包结算：settle 回调只发计费事件，消费者批内落账（error(A) 同步、success(B) 延迟）
+    await settleDelayedBilling([
+      { userId, keyId, providerId: b, model, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect((await logsFor(keyId)).map((l) => l.status)).toEqual(["error", "success"]);

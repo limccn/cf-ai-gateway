@@ -45,8 +45,10 @@ export function meUsageRoute(app: Hono<AppEnv>): void {
       keyId: query.keyId,
       model: query.model,
       status: query.status,
-      from: query.from,
-      to: query.to,
+      // range 快捷窗口优先（from/to 宽松忽略：range 存在时不传，窗口由 resolveRangeWindow 决定）
+      ...(query.range !== undefined
+        ? { range: query.range, tzOffsetMin: query.tzOffsetMin ?? 0 }
+        : { from: query.from, to: query.to }),
     };
     const [aggregates, page] = await Promise.all([
       fetchUsageAggregates(db, filters, query.groupBy),

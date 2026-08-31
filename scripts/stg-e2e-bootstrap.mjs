@@ -37,15 +37,22 @@ let keyPlain = null;
 const keyRows = q(`SELECT id, hash FROM api_keys WHERE user_id=${memberId} AND name='e2e-test';`);
 if (keyRows[0]) {
   console.log(`[bootstrap] api key exists id=${keyRows[0].id}（明文不可恢复，重新生成）`);
+  // 外键依赖链：balance_tx.ref_request_id → request_logs；usage_daily.key_id / request_logs.key_id → api_keys。
+  // 按依赖序清理该 member 的 E2E 残留（balance_tx → usage_daily → request_logs → api_keys）。
   execFileSync(process.execPath, [WRANGLER_JS, "d1", "execute", DB, "--remote", "--env", "staging", "--config", "wrangler.toml",
-    "--command", `DELETE FROM api_keys WHERE id=${keyRows[0].id};`], { stdio: "inherit" });
+    "--command",
+    `DELETE FROM balance_tx WHERE user_id=${memberId}; DELETE FROM usage_daily WHERE key_id=${keyRows[0].id}; ` +
+    `DELETE FROM request_logs WHERE key_id=${keyRows[0].id}; DELETE FROM api_keys WHERE id=${keyRows[0].id};`],
+    { stdio: "inherit" });
 }
 keyPlain = `sk-e2e-${randomBytes(16).toString("hex")}`;
 const hash = createHash("sha256").update(keyPlain).digest("hex");
 const prefix = keyPlain.slice(0, 8);
+// cache_enabled=1：E2E 需验证缓存命中链路（miss 计数/写缓存/命中不扣费）；
+// 曾为 0 导致 stg-e2e-verify 的缓存部分断言全部无效（命中永不发生）。
 execFileSync(process.execPath, [WRANGLER_JS, "d1", "execute", DB, "--remote", "--env", "staging", "--config", "wrangler.toml",
   "--command", `INSERT INTO api_keys (user_id, name, hash, prefix, status, qps_limit, cache_enabled, cache_ttl, created_at)
-    VALUES (${memberId}, 'e2e-test', '${hash}', '${prefix}', 'active', 60, 0, 3600, ${now});`], { stdio: "inherit" });
+    VALUES (${memberId}, 'e2e-test', '${hash}', '${prefix}', 'active', 60, 1, 3600, ${now});`], { stdio: "inherit" });
 
 console.log(`[bootstrap] api key created for member id=${memberId}`);
 console.log(`KEY=${keyPlain}`);

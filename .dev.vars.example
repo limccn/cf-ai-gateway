@@ -9,7 +9,8 @@
 #   WORKER_NAME / DOMAIN      -> Workers & Pages 部署名 / 自定义域名
 #   D1_DB_NAME / D1_DB_ID     -> `wrangler d1 create <name>` 输出（dashboard 复制 database_id）
 #   KV_ID                     -> `wrangler kv namespace create CACHE_KV` 输出
-#   QUEUE_NAME                -> `wrangler queues create <name>` 创建的队列名
+#   QUEUE_NAME                -> `wrangler queues create <name>` 创建的队列名（usage 聚合）
+#   BILLING_QUEUE_NAME        -> `wrangler queues create <name>` 创建的延迟计费队列名
 # staging 环境用同名前缀 STAGING_*；`npm run render:config -- --env staging` 用 STAGING_* 键覆盖同名键。
 # 注意：部署真实环境时在部署 shell export 同名环境变量覆盖本地占位值（process.env 优先于本文件）。
 WORKER_NAME=cf-ai-gateway
@@ -18,12 +19,14 @@ D1_DB_NAME=cf-ai-gateway-db
 D1_DB_ID=00000000-0000-0000-0000-000000000000
 KV_ID=00000000000000000000000000000000
 QUEUE_NAME=usage-aggregation
+BILLING_QUEUE_NAME=billing-aggregation
 STAGING_WORKER_NAME=cf-ai-gateway-staging
 STAGING_DOMAIN=stg-router.lmlh.net
 STAGING_D1_DB_NAME=cf-ai-gateway-db-staging
 STAGING_D1_DB_ID=00000000-0000-0000-0000-000000000000
 STAGING_KV_ID=00000000000000000000000000000000
 STAGING_QUEUE_NAME=usage-aggregation-staging
+STAGING_BILLING_QUEUE_NAME=billing-aggregation-staging
 
 # ---- Better Auth ----
 # 会话签名密钥（生产必须为随机值，>=32 字符；不要与 GATEWAY_SECRET_KEY 相同）

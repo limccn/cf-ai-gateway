@@ -2,10 +2,10 @@
 // 按日期柱状图 / 按模型环形图，明细分页表格。
 import { useMemo, useState } from "react";
 import { Filter, RefreshCw } from "lucide-react";
-import type { UsageGroupBy } from "@/modules/usage/types";
+import type { UsageGroupBy, UsageRange } from "@/modules/usage/types";
 import { useUsage } from "@/modules/usage/hooks/use-usage";
 import { useAdminUsage } from "@/modules/usage/hooks/use-admin-usage";
-import { buildHourlySeries } from "@/modules/usage/hourly";
+import { buildRangeSeries, getTzOffsetMin, RANGE_OPTIONS } from "@/modules/usage/range";
 import type { UsageParams } from "@/modules/usage/hooks/usage-params";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
 import { useUsers } from "@/modules/users/hooks/use-users";
@@ -43,6 +43,12 @@ const STATUS_COLORS: Record<string, string> = {
   rejected: "hsl(var(--muted-foreground))",
 };
 
+// 快捷维度 chips（RANGE_OPTIONS + 自定义）：label/title/desc 复用 RANGE_OPTIONS
+const RANGE_CHOICES: Array<{ value: UsageRange | "custom"; label: string }> = [
+  ...RANGE_OPTIONS.map(({ value, label }) => ({ value, label })),
+  { value: "custom", label: "Custom" },
+];
+
 export default function UsagePage() {
   const { user } = useSession();
   const isAdmin = user?.role === "admin";
@@ -55,7 +61,10 @@ export default function UsagePage() {
   const [modelDraft, setModelDraft] = useState("");
   const [userIdDraft, setUserIdDraft] = useState("");
   const [groupBy, setGroupBy] = useState<UsageGroupBy>("date");
-  const [chartMode, setChartMode] = useState<"day" | "hour">("day");
+  // 快捷维度：today/yesterday/last14/last30 与自定义（custom=from/to+groupBy）互斥
+  const [range, setRange] = useState<UsageRange | "custom">("last30");
+  // 时区快照与查询参数同源（模块加载时计算一次；窗口边界与桶构建共用）
+  const tzOffsetMin = useMemo(() => getTzOffsetMin(), []);
   // 明细状态筛选：仅过滤 request_logs（明细 + hour/status 聚合）；date/model 聚合不受影响
   const [status, setStatus] = useState<"all" | "success" | "error" | "cached" | "rejected">("all");
 
@@ -72,34 +81,16 @@ export default function UsagePage() {
   const keysQuery = useKeys();
   const usersQuery = useUsers(isAdmin ? { limit: 100 } : { limit: 1, enabled: false });
 
+  const isRangeMode = range !== "custom";
   const queryParams: UsageParams = {
-    from: filters.from,
-    to: filters.to,
+    // 快捷维度模式：range+tzOffsetMin 优先（后端忽略 from/to/groupBy）；自定义模式照常
+    ...(isRangeMode ? { range, tzOffsetMin } : { from: filters.from, to: filters.to, groupBy }),
     keyId: filters.keyId,
     model: filters.model,
     status: status === "all" ? undefined : status,
-    groupBy,
     limit: LIMIT,
     offset,
   };
-
-  // Hour 视图固定最近 24h：忽略 from/to 筛选（keyId/model/userId/status 照常过滤）
-  const hourParams: UsageParams =
-    chartMode === "hour"
-      ? {
-          keyId: filters.keyId,
-          model: filters.model,
-          status: status === "all" ? undefined : status,
-          groupBy: "hour",
-          limit: LIMIT,
-          offset,
-        }
-      : { enabled: false };
-  const meHourQuery = useUsage(isAdmin ? { ...hourParams, enabled: false } : hourParams);
-  const adminHourQuery = useAdminUsage(
-    isAdmin ? { ...hourParams, userId: filters.userId } : { ...hourParams, enabled: false },
-  );
-  const hourlyQuery = isAdmin ? adminHourQuery : meHourQuery;
 
   // 两个 hook 始终调用（React Hooks 规则），仅启用其一
   const meQuery = useUsage(isAdmin ? { ...queryParams, enabled: false } : queryParams);
@@ -135,6 +126,7 @@ export default function UsagePage() {
     setModelDraft("");
     setUserIdDraft("");
     setGroupBy("date");
+    setRange("last30");
     setStatus("all");
     setFilters({ from: daysAgoParam(30), to: toDateParam(new Date()), keyId: undefined, model: undefined, userId: undefined });
     setOffset(0);
@@ -145,12 +137,24 @@ export default function UsagePage() {
     setOffset(0);
   };
 
+  const switchRange = (next: UsageRange | "custom") => {
+    setRange(next);
+    setOffset(0);
+  };
+
   const keys = keysQuery.data?.items ?? [];
   const users = usersQuery.data?.items ?? [];
   const totalPages = Math.max(1, Math.ceil(total / LIMIT));
   const currentPage = Math.floor(offset / LIMIT) + 1;
 
   const chartData = useMemo(() => {
+    if (isRangeMode) {
+      // 快捷维度：固定桶（24/24/14/30），缺数据补 0；color 供 BarChart/DonutChart 统一类型
+      return buildRangeSeries(aggregates, range, tzOffsetMin).map((point, index) => ({
+        ...point,
+        color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
+      }));
+    }
     if (groupBy === "model") {
       return aggregates
         .filter((agg) => agg.group !== null)
@@ -176,12 +180,19 @@ export default function UsagePage() {
         value: agg.requests,
         color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
       }));
-  }, [aggregates, groupBy]);
+  }, [aggregates, groupBy, isRangeMode, range, tzOffsetMin]);
 
-  const hourlyData = useMemo(
-    () => buildHourlySeries(hourlyQuery.data?.aggregates ?? []),
-    [hourlyQuery.data],
-  );
+  const rangeMeta = isRangeMode ? RANGE_OPTIONS.find((o) => o.value === range) : undefined;
+  const chartTitle = isRangeMode
+    ? (rangeMeta?.title ?? "Requests")
+    : groupBy === "date"
+      ? "Requests per day"
+      : groupBy === "model"
+        ? "Cost by model"
+        : "Requests by status";
+  const chartDesc = isRangeMode
+    ? (rangeMeta?.desc ?? "")
+    : `${formatDateOnly(filters.from ?? "")} – ${formatDateOnly(filters.to ?? "")}`;
 
   return (
     <PageContainer>
@@ -196,6 +207,18 @@ export default function UsagePage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            {RANGE_CHOICES.map((option) => (
+              <Button
+                key={option.value}
+                variant={range === option.value ? "default" : "outline"}
+                size="sm"
+                onClick={() => switchRange(option.value)}
+              >
+                {option.label}
+              </Button>
+            ))}
+          </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div className="space-y-2">
               <Label htmlFor="usage-from">From</Label>
@@ -203,6 +226,7 @@ export default function UsagePage() {
                 id="usage-from"
                 type="date"
                 value={fromDraft}
+                disabled={isRangeMode}
                 onChange={(e) => setFromDraft(e.target.value)}
               />
             </div>
@@ -212,6 +236,7 @@ export default function UsagePage() {
                 id="usage-to"
                 type="date"
                 value={toDraft}
+                disabled={isRangeMode}
                 onChange={(e) => setToDraft(e.target.value)}
               />
             </div>
@@ -273,110 +298,64 @@ export default function UsagePage() {
       </Card>
 
       {/* 图表 */}
-      {chartMode === "hour" ? (
-        <div className="mb-6 flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">
-            Last 24 hours — hourly request count (from/to filters are ignored)
-          </span>
-        </div>
-      ) : (
-        <div className="mb-6 flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">Group by</span>
-          <Button
-            variant={groupBy === "date" ? "default" : "outline"}
-            size="sm"
-            onClick={() => switchGroupBy("date")}
-          >
-            Date
-          </Button>
-          <Button
-            variant={groupBy === "model" ? "default" : "outline"}
-            size="sm"
-            onClick={() => switchGroupBy("model")}
-          >
-            Model
-          </Button>
-          <Button
-            variant={groupBy === "status" ? "default" : "outline"}
-            size="sm"
-            onClick={() => switchGroupBy("status")}
-          >
-            Status
-          </Button>
-        </div>
-      )}
+      <div className="mb-6 flex items-center gap-2">
+        <span className="text-sm text-muted-foreground">Group by</span>
+        <Button
+          variant={groupBy === "date" ? "default" : "outline"}
+          size="sm"
+          disabled={isRangeMode}
+          onClick={() => switchGroupBy("date")}
+        >
+          Date
+        </Button>
+        <Button
+          variant={groupBy === "model" ? "default" : "outline"}
+          size="sm"
+          disabled={isRangeMode}
+          onClick={() => switchGroupBy("model")}
+        >
+          Model
+        </Button>
+        <Button
+          variant={groupBy === "status" ? "default" : "outline"}
+          size="sm"
+          disabled={isRangeMode}
+          onClick={() => switchGroupBy("status")}
+        >
+          Status
+        </Button>
+        {isRangeMode ? (
+          <span className="text-xs text-muted-foreground">Quick ranges use fixed date buckets</span>
+        ) : null}
+      </div>
 
-      {chartMode === "hour"
-        ? hourlyQuery.isLoading ? (
-            <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
-              Loading…
+      {usageQuery.isLoading ? (
+        <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
+          Loading…
+        </div>
+      ) : usageQuery.isError ? (
+        <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
+      ) : (
+        <Card className="mb-6">
+          <CardHeader className="flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle>{chartTitle}</CardTitle>
+              <CardDescription>{chartDesc}</CardDescription>
             </div>
-          ) : hourlyQuery.isError ? (
-            <ErrorState message={hourlyQuery.error.message} onRetry={() => hourlyQuery.refetch()} />
-          ) : (
-            <Card className="mb-6">
-              <CardHeader className="flex-row items-center justify-between space-y-0">
-                <div>
-                  <CardTitle>Requests (last 24h)</CardTitle>
-                  <CardDescription>Hourly request count</CardDescription>
-                </div>
-                <div className="flex items-center gap-1">
-                  <Button variant="outline" size="sm" onClick={() => setChartMode("day")}>
-                    Day
-                  </Button>
-                  <Button variant="default" size="sm" onClick={() => setChartMode("hour")}>
-                    Hour
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <BarChart data={hourlyData} height={240} formatValue={formatNumber} />
-              </CardContent>
-            </Card>
-          )
-        : usageQuery.isLoading ? (
-            <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
-              Loading…
-            </div>
-          ) : usageQuery.isError ? (
-            <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
-          ) : (
-            <Card className="mb-6">
-              <CardHeader className="flex-row items-center justify-between space-y-0">
-                <div>
-                  <CardTitle>
-                    {groupBy === "date"
-                      ? "Requests per day"
-                      : groupBy === "model"
-                        ? "Cost by model"
-                        : "Requests by status"}
-                  </CardTitle>
-                  <CardDescription>
-                    {formatDateOnly(filters.from ?? "")} – {formatDateOnly(filters.to ?? "")}
-                  </CardDescription>
-                </div>
-                <div className="flex items-center gap-1">
-                  <Button variant="default" size="sm" onClick={() => setChartMode("day")}>
-                    Day
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => setChartMode("hour")}>
-                    Hour
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent>
-                {aggregates.length === 0 ? (
-                  <EmptyState title="No usage in this period" description="Try widening the date range or clearing filters." />
-                ) : groupBy === "date" ? (
-                  <BarChart data={chartData} height={240} formatValue={formatNumber} />
-                ) : groupBy === "status" ? (
-                  <DonutChart data={chartData} formatValue={formatNumber} />
-                ) : (
-                  <DonutChart data={chartData} formatValue={formatUsd} />
-                )}
-              </CardContent>
-            </Card>
-          )}
+          </CardHeader>
+          <CardContent>
+            {aggregates.length === 0 ? (
+              <EmptyState title="No usage in this period" description="Try widening the date range or clearing filters." />
+            ) : isRangeMode || groupBy === "date" ? (
+              <BarChart data={chartData} height={240} formatValue={formatNumber} />
+            ) : groupBy === "status" ? (
+              <DonutChart data={chartData} formatValue={formatNumber} />
+            ) : (
+              <DonutChart data={chartData} formatValue={formatUsd} />
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* 明细 */}
       <Card>

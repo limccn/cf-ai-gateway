@@ -8,6 +8,7 @@ import { AdapterError } from "../../providers/types";
 import type { AppEnv } from "../../types";
 import {
   buildInternalFromResponses,
+  createStreamToResponsesTransform,
   transformResponseToResponses,
   transformStreamToResponses,
 } from "../../providers/responses";
@@ -44,6 +45,9 @@ export const responsesProxyOptions: ProxyEndpointOptions = {
   inputSchema: responsesInputSchema,
   toInternal: toInternalSafe,
   transformResponse: transformResponseWithModel,
+  // R2.4 帧级转换：OpenAI 上游时在结算管线上消费同一批帧（主路径）；
+  // 保留字节级 transformStream 供 anthropic 上游 corner 使用（proxy 按上游类型分支）。
+  streamConsumer: createStreamToResponsesTransform,
   transformStream: transformStreamToResponses,
   cachePrefix: "responses:",
   // 协议偏好：OpenAI 面请求优先 type=openai 的 provider；仅配 anthropic provider 时回退转换转发。

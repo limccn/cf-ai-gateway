@@ -50,6 +50,16 @@ queue = "{QUEUE_NAME}"
 max_batch_size = 32
 max_retries = 3
 
+# --- Queues：延迟计费管道（08-31-perf-v2：成功路径计费解耦，消费者批内扣费） ---
+[[queues.producers]]
+binding = "BILLING_QUEUE"
+queue = "{BILLING_QUEUE_NAME}"
+
+[[queues.consumers]]
+queue = "{BILLING_QUEUE_NAME}"
+max_batch_size = 32
+max_retries = 3
+
 # --- Cron：request_logs 保留期清理（M5 5.4；UTC 每日 02:00；本地 wrangler dev 不自动触发） ---
 [triggers]
 crons = ["0 2 * * *"]
@@ -67,6 +77,8 @@ GITHUB_CLIENT_ID = "{GITHUB_CLIENT_ID}"
 GITHUB_ALLOWED_EMAILS = "{GITHUB_ALLOWED_EMAILS}"
 REQUEST_LOG_RETENTION_DAYS = "{REQUEST_LOG_RETENTION_DAYS}"
 API_KEY_PREFIX = "{API_KEY_PREFIX}"
+# 延迟计费队列名（queue() handler 按队列名分流；与 [[queues.producers]] binding 同名绑定配合）
+BILLING_QUEUE_NAME = "{BILLING_QUEUE_NAME}"
 
 # ====================================================================
 # Staging 环境（wrangler deploy --env staging；worker 名取 STAGING_WORKER_NAME）
@@ -98,6 +110,15 @@ queue = "{STAGING_QUEUE_NAME}"
 max_batch_size = 32
 max_retries = 3
 
+[[env.staging.queues.producers]]
+binding = "BILLING_QUEUE"
+queue = "{STAGING_BILLING_QUEUE_NAME}"
+
+[[env.staging.queues.consumers]]
+queue = "{STAGING_BILLING_QUEUE_NAME}"
+max_batch_size = 32
+max_retries = 3
+
 [env.staging.triggers]
 crons = ["0 2 * * *"]
 
@@ -107,3 +128,4 @@ GITHUB_CLIENT_ID = "{STAGING_GITHUB_CLIENT_ID}"
 GITHUB_ALLOWED_EMAILS = "{STAGING_GITHUB_ALLOWED_EMAILS}"
 REQUEST_LOG_RETENTION_DAYS = "{STAGING_REQUEST_LOG_RETENTION_DAYS}"
 API_KEY_PREFIX = "{STAGING_API_KEY_PREFIX}"
+BILLING_QUEUE_NAME = "{STAGING_BILLING_QUEUE_NAME}"

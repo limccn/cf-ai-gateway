@@ -96,8 +96,11 @@ interface UsageAggRow {
   cost: number;
 }
 
-/** 单条 INSERT 的行数上限：8 列/行 → 800 变量 < SQLite 999 变量上限（D1 同）。 */
-const UPSERT_CHUNK_SIZE = 100;
+/**
+ * 单条 INSERT 的行数上限：D1 每语句 bound parameters 上限 100（并非 SQLite 的 999；
+ * 实测 30 行×8 列=240 参数整语句失败）→ 8 列/行 → 每 chunk ≤ 12 行（12×8=96 ≤ 100）。
+ */
+const UPSERT_CHUNK_SIZE = 12;
 
 /**
  * Queues 消费者：批内先按 (user_id, key_id, model, date) 内存分组求和（无循环内 await），

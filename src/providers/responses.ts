@@ -1,5 +1,5 @@
 // OpenAI Responses API 入站协议适配（D1-D8）：POST /v1/responses ↔ 网关内部 OpenAI Chat Completions 形态。
-// 方向与正向适配器相反，不复用其内部函数（仅复用 sse.ts 的 parseSseStream）：
+// 方向与正向适配器相反，不复用其内部函数（R2.4 起流式走统一 SsePipe 帧层）：
 // - buildInternalFromResponses：入站 Responses 请求 → 内部 OpenAI chat 形态（OR §2.1 / design §3.2）
 // - transformResponseToResponses：内部 chat 响应 → Responses response（OR §2.2 / design §3.3）
 // - transformStreamToResponses：上游 OpenAI chat SSE → Responses SSE（OR §1.3/§2.2 / design §3.4）
@@ -9,7 +9,11 @@
 import type { Logger } from "../lib/logger";
 import { logger as moduleLogger } from "../lib/logger";
 import { AdapterError } from "./types";
-import { parseSseStream, type SseEvent } from "./sse";
+import {
+  pipeSseStream,
+  type SseEvent,
+  type SseFrameTransform,
+} from "./sse-pipe";
 
 type JsonObject = Record<string, unknown>;
 
@@ -648,7 +652,8 @@ interface ToolItemState {
 }
 
 /**
- * 上游 OpenAI chat.completion.chunk SSE → Responses SSE（OR §1.3/§2.2 / design §3.4 状态机）。
+ * 上游 OpenAI chat.completion.chunk SSE 事件 → Responses SSE 帧转换（OR §1.3/§2.2 /
+ * design §3.4 状态机；R2.4 统一 SsePipe 帧层，消除转换器自有 decode/parse）。
  * 事件序列：response.created → response.in_progress → output_item.added → content_part.added →
  * output_text.delta×N →（finish）output_text.done → content_part.done → output_item.done →
  * response.completed（usage 换算并入）→ 流终止（无 [DONE]、无 event: 行，纯 data: JSON 帧）。
@@ -658,10 +663,10 @@ interface ToolItemState {
  * message item 恒含 content 数组；status 显式（completed/incomplete/failed）。
  * 异常兜底（OR §4 风险 3）：流在未收到 finish_reason 时结束 → 尽力合成 response.failed；
  * 上游 error data 块 → error 事件（SDK 收到即抛，流终止）。
+ * 每次调用创建独立状态机；consume 返回 false 后 pump 继续排空上游（结算由 pump 拥有，
+ * 响应不早于结算关闭——旧实现用注释规避的 settle 竞态由此从构造上消除）。
  */
-export function transformStreamToResponses(
-  body: ReadableStream<Uint8Array>,
-): ReadableStream<Uint8Array> {
+export function createStreamToResponsesTransform(): SseFrameTransform {
   const encoder = new TextEncoder();
   const responseId = newResponseId();
   const createdAt = Math.floor(Date.now() / 1000);
@@ -914,7 +919,7 @@ export function transformStreamToResponses(
       return;
     }
     if (typeof data !== "object" || Array.isArray(data)) {
-      return; // ping / 未知事件
+      return; // ping / 未知事件 / 非 JSON 帧（容错跳过，不打断流）
     }
     const obj = data as JsonObject;
     // 模型名取自首 chunk（上游模型名；response 快照使用）
@@ -979,32 +984,36 @@ export function transformStreamToResponses(
     }
   }
 
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        for await (const event of parseSseStream(body)) {
-          if (terminated) {
-            // 终态事件已发出：继续排空上游（不 break）——wrapStreamWithSettlement 的结算
-            // 在上游流读完并关闭后才完成，提前 break 会让响应先于结算关闭（settle 竞态）。
-            continue;
-          }
-          handleEvent(event, controller);
+  return {
+    consume(event, controller) {
+      handleEvent(event, controller);
+      // 终态后 pump 继续排空上游（不投喂）；结算由 pump 拥有，响应不早于结算关闭
+      return !terminated;
+    },
+    onError(error, controller) {
+      const message = error instanceof Error ? error.message : "Upstream stream error";
+      sendErrorEvent(controller, message); // 输出 error 事件后由 pipe 正常关闭（旧语义）
+    },
+    onEnd(controller) {
+      // 上游流结束（无论是否收到 [DONE]）：若尚未终态，尽力合成（OR §4 风险 3）
+      if (!terminated) {
+        closeItems(controller);
+        if (finishReason !== null) {
+          sendTerminal(controller);
+        } else {
+          sendFailed(controller, "Upstream stream ended without a finish_reason");
         }
-        // 上游流结束（无论是否收到 [DONE]）：若尚未终态，尽力合成（OR §4 风险 3）
-        if (!terminated) {
-          closeItems(controller);
-          if (finishReason !== null) {
-            sendTerminal(controller);
-          } else {
-            sendFailed(controller, "Upstream stream ended without a finish_reason");
-          }
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Upstream stream error";
-        sendErrorEvent(controller, message);
-      } finally {
-        controller.close();
       }
     },
-  });
+  };
+}
+
+/**
+ * 上游 OpenAI chat SSE 字节流 → Responses SSE（字节级包装，供 corner 路径
+ * （anthropic 上游）使用；主路径由代理管线直接消费 createStreamToResponsesTransform 的帧）。
+ */
+export function transformStreamToResponses(
+  body: ReadableStream<Uint8Array>,
+): ReadableStream<Uint8Array> {
+  return pipeSseStream(body, { transform: createStreamToResponsesTransform() });
 }

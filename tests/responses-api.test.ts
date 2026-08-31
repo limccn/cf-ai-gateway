@@ -24,6 +24,7 @@ import {
   getBalance,
   latestLogStatus,
   selfFetch,
+  settleDelayedBilling,
   setupKey,
   setupPrice,
   setupProviderWithModel,
@@ -812,8 +813,8 @@ describe("transformStreamToResponses（流式出站）", () => {
 describe("端到端：非流式（openai 上游）", () => {
   it("Responses 请求 → 翻译转发 /chat/completions → Responses 响应 + usage 入账", async () => {
     const userId = await setupUser("resp-openai@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupProviderWithModel(MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(MODEL);
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     let capturedUrl = "";
@@ -865,7 +866,10 @@ describe("端到端：非流式（openai 上游）", () => {
       { role: "user", content: "hello" },
     ]);
 
-    // 计费入账（usage 从上游 raw body 提取）
+    // 计费入账（usage 从上游 raw body 提取；延迟计费：消费者批内落账）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");
@@ -875,8 +879,8 @@ describe("端到端：非流式（openai 上游）", () => {
 describe("端到端：非流式（anthropic 上游自洽闭环）", () => {
   it("上游 Anthropic message → 正向回译 → Responses 响应（usage 换算入账）", async () => {
     const userId = await setupUser("resp-anthropic@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupAnthropicProviderWithModel(ANTHROPIC_MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupAnthropicProviderWithModel(ANTHROPIC_MODEL);
     await setupPrice(ANTHROPIC_MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     let capturedUrl = "";
@@ -911,6 +915,10 @@ describe("端到端：非流式（anthropic 上游自洽闭环）", () => {
     ]);
     expect(json["usage"]).toEqual({ input_tokens: 100, output_tokens: 50, total_tokens: 150 });
 
+    // 延迟计费：消费者批内落账（anthropic 上游换算 usage）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: ANTHROPIC_MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
   });
@@ -919,8 +927,8 @@ describe("端到端：非流式（anthropic 上游自洽闭环）", () => {
 describe("端到端：流式", () => {
   it("openai 上游 SSE → Responses SSE 事件序列 + 尾包结算", async () => {
     const userId = await setupUser("resp-openai-stream@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupProviderWithModel(MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(MODEL);
     await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     const sse = [
@@ -948,7 +956,10 @@ describe("端到端：流式", () => {
     expect(text).not.toContain("[DONE]");
     expect(text).not.toContain("event:");
 
-    // 流式尾包结算（usage 从内部 OpenAI 尾包提取）
+    // 流式尾包结算（usage 从内部 OpenAI 尾包提取；延迟计费：消费者批内落账）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");
@@ -956,8 +967,8 @@ describe("端到端：流式", () => {
 
   it("anthropic 上游 SSE → 正向转换 → 结算 → Responses SSE", async () => {
     const userId = await setupUser("resp-anthropic-stream@test.dev", 10);
-    const { plaintext } = await setupKey(userId);
-    await setupAnthropicProviderWithModel(ANTHROPIC_MODEL);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupAnthropicProviderWithModel(ANTHROPIC_MODEL);
     await setupPrice(ANTHROPIC_MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
 
     const upstreamSse = [
@@ -1000,6 +1011,10 @@ describe("端到端：流式", () => {
       total_tokens: 150,
     });
 
+    // 延迟计费：消费者批内落账
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: ANTHROPIC_MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
   });

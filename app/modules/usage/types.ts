@@ -4,6 +4,7 @@ import type {
   UsageDetail,
   UsageGroupBy,
   UsageOutput,
+  UsageRange,
   MeUsageQuery,
   AdminUsageQuery,
 } from "../../../src/routes/usage/types";
@@ -13,6 +14,7 @@ export type {
   UsageDetail,
   UsageGroupBy,
   UsageOutput,
+  UsageRange,
   MeUsageQuery,
   AdminUsageQuery,
 };

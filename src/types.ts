@@ -34,6 +34,8 @@ export type Variables = {
   role?: UserRole;
   // 由 gatewayAuth 注入（代理面 Bearer 网关 Key 鉴权，与 /api/* 会话鉴权并存）
   gatewayAuth?: GatewayAuthContext;
+  // 由 protocolDetectMiddleware 注入（/v1/messages 双协议感知；未检测 = undefined）
+  detectedProtocol?: import("./lib/protocol-detect").Protocol;
 };
 
 export type AppEnv = {

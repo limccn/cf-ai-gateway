@@ -1,12 +1,15 @@
 // M4 端到端验证脚本（本地 dev + mock 上游）：计费 + 限流 + 缓存。
-// 覆盖（PRD 4.1-4.6）：
-//   4.1 价格表 admin CRUD（/api/models）+ 非流式条件 UPDATE 原子扣费 + balance_tx usage 流水
-//   4.2 流式 SSE 尾包 usage 结算
-//   4.3 失败语义：上游 500 不扣费，request_logs 记 error
+// 覆盖（PRD 4.1-4.6 + 08-31-perf-v2 延迟计费/R2 缓存收窄）：
+//   4.1 价格表 admin CRUD（/api/models）+ 非流式计费：响应先回，扣费由 BILLING_QUEUE 消费者
+//       异步落定（轮询 D1 断言 明细 request_id + 条件 UPDATE + balance_tx usage 流水）
+//   4.2 流式 SSE 尾包 usage 结算（同样延迟落定，轮询）
+//   4.3 失败语义：上游 500 不扣费，request_logs 记 error（同步，request_id 为 NULL）
 //   4.4 限流：KV 固定窗口计数器，qpsLimit 可配置，超限 429
-//   4.5 缓存：命中直接返回（不转发、不扣费），明细记 cached
+//   4.5 缓存（R2 收窄）：第 1 次只计数、第 2 次写缓存、第 3 次命中直接返回（不转发、不扣费），
+//       命中明细记 cached（同步）；>32KB 大请求不评估缓存
 //   4.6 admin 余额调整 API（/api/users/:id/balance，±）
 // 前置：
+//   - 本地 D1 已应用迁移（`npm run db:migrate -- --local`，含 0006 request_id 列）
 //   - `node scripts/mock-upstream.mjs` 已启动（8788）
 //   - `npm run dev` 已启动（http://localhost:5173，可 BASE_URL 覆盖）
 // 用法：node scripts/verify-m4.mjs
@@ -166,6 +169,24 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * 轮询 D1 直到 fn() 返回真值或超时（延迟计费断言用：成功路径扣费由队列消费者异步落定，
+ * 响应已先返回；本地 dev 队列投递+消费在毫秒~秒级，轮询 15s 覆盖冷启动队列）。
+ */
+async function poll(fn, timeoutMs = 15000, intervalMs = 250) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = fn();
+    if (value) {
+      return value;
+    }
+    if (Date.now() > deadline) {
+      return null;
+    }
+    await sleep(intervalMs);
+  }
+}
+
 async function main() {
   console.log(`\n=== M4 verify @ ${BASE} ===`);
 
@@ -264,8 +285,8 @@ async function main() {
     query(`SELECT balance FROM users WHERE email='${ADMIN_EMAIL}';`)[0]?.balance;
   const approx = (a, b) => Math.abs(a - b) < 1e-9;
 
-  // ---------- 4. 非流式扣费（4.1） ----------
-  console.log("\n[4] non-stream billing (conditional UPDATE + usage tx)");
+  // ---------- 4. 非流式计费（4.1 + 08-31-perf-v2 延迟计费） ----------
+  console.log("\n[4] non-stream billing (delayed: response first, consumer settles)");
   const createProvider = await api("/api/providers", { method: "POST", ...authApi, body: OPENAI_PROVIDER });
   report("create openai provider", createProvider.status === 200, `status=${createProvider.status}`);
 
@@ -280,21 +301,28 @@ async function main() {
     body: { model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] },
   });
   report("non-stream chat 200", chat.status === 200, `status=${chat.status}`);
-  const balanceAfterChat = balanceSql();
-  report("non-stream cost=4.5e-6 charged", approx(balanceAfterChat, 60 - CHAT_COST), `balance=${balanceAfterChat}`);
+
+  // 延迟计费：响应已先返回；明细 + 扣费 + usage 流水由 BILLING_QUEUE 消费者异步落定 → 轮询 D1
+  const nonStreamSettled = await poll(() => {
+    const log = query(
+      `SELECT status, cost, model, request_id FROM request_logs WHERE user_id=(SELECT id FROM users WHERE email='${ADMIN_EMAIL}') AND status='success' ORDER BY id DESC LIMIT 1;`,
+    )[0];
+    if (!log || !approx(log.cost, CHAT_COST)) {
+      return null;
+    }
+    return { log, balance: balanceSql() };
+  });
+  report("delayed settlement: success log + cost", nonStreamSettled !== null, JSON.stringify(nonStreamSettled?.log ?? null));
+  report("success log carries request_id (幂等键)", nonStreamSettled !== null && nonStreamSettled.log.request_id !== null, `request_id=${nonStreamSettled?.log?.request_id}`);
+  report("non-stream cost=4.5e-6 charged", approx(nonStreamSettled?.balance, 60 - CHAT_COST), `balance=${nonStreamSettled?.balance}`);
 
   const usageTx = query(
     `SELECT amount, ref_request_id FROM balance_tx WHERE user_id=(SELECT id FROM users WHERE email='${ADMIN_EMAIL}') AND type='usage' ORDER BY id DESC LIMIT 1;`,
   );
   report("D1: usage tx amount=-4.5e-6 + ref_request_id", usageTx.length === 1 && approx(usageTx[0].amount, -CHAT_COST) && usageTx[0].ref_request_id !== null, `amount=${usageTx[0]?.amount}`);
 
-  const successLog = query(
-    `SELECT status, cost, model FROM request_logs WHERE user_id=(SELECT id FROM users WHERE email='${ADMIN_EMAIL}') ORDER BY id DESC LIMIT 1;`,
-  );
-  report("D1: request_logs success + cost", successLog.length === 1 && successLog[0].status === "success" && approx(successLog[0].cost, CHAT_COST) && successLog[0].model === "gpt-4o-mini", JSON.stringify(successLog[0]));
-
-  // ---------- 5. 流式尾包结算（4.2） ----------
-  console.log("\n[5] stream settlement (SSE usage tail)");
+  // ---------- 5. 流式尾包结算（4.2 + 延迟落定） ----------
+  console.log("\n[5] stream settlement (SSE usage tail, delayed)");
   const chatStream = await api("/v1/chat/completions", {
     method: "POST",
     headers: proxyAuth,
@@ -303,8 +331,13 @@ async function main() {
   const streamEvents = parseSse(chatStream.text);
   const usageTail = streamEvents.find((e) => e.data?.usage);
   report("stream SSE + usage tail (10/5) + [DONE]", chatStream.status === 200 && usageTail?.data?.usage?.prompt_tokens === 10 && usageTail?.data?.usage?.completion_tokens === 5 && streamEvents.some((e) => e.done), `events=${streamEvents.length}`);
-  const balanceAfterStream = balanceSql();
-  report("stream cost=4.5e-6 charged", approx(balanceAfterStream, 60 - 2 * CHAT_COST), `balance=${balanceAfterStream}`);
+
+  // settle 回调只发计费事件；扣费由消费者异步落定 → 轮询余额 = 60 - 2×CHAT_COST
+  const streamBalance = await poll(() => {
+    const b = balanceSql();
+    return approx(b, 60 - 2 * CHAT_COST) ? b : null;
+  });
+  report("stream cost=4.5e-6 charged (delayed)", streamBalance !== null, `balance=${streamBalance}`);
 
   // ---------- 6. 失败语义（4.3） ----------
   console.log("\n[6] failure semantics (upstream 500 → no charge)");
@@ -319,28 +352,36 @@ async function main() {
   report("500 not charged", approx(balanceAfter500, balanceBefore500), `balance=${balanceAfter500}`);
 
   const errorLog = query(
-    `SELECT status FROM request_logs WHERE user_id=(SELECT id FROM users WHERE email='${ADMIN_EMAIL}') AND model='error-500' ORDER BY id DESC LIMIT 1;`,
+    `SELECT status, request_id FROM request_logs WHERE user_id=(SELECT id FROM users WHERE email='${ADMIN_EMAIL}') AND model='error-500' ORDER BY id DESC LIMIT 1;`,
   );
   report("D1: request_logs error", errorLog.length === 1 && errorLog[0].status === "error", JSON.stringify(errorLog[0]));
+  report("error log request_id is NULL (尝试级行不占幂等键)", errorLog.length === 1 && errorLog[0].request_id === null, `request_id=${errorLog[0]?.request_id}`);
 
-  // ---------- 7. 缓存（4.5） ----------
-  console.log("\n[7] response cache (hit → no charge, log cached)");
+  // ---------- 7. 缓存（4.5 + R2 收窄：≤32KB ∧ 高频 ≥2/10min 才写） ----------
+  console.log("\n[7] response cache (R2: miss-count → miss-write → hit, no charge on hit)");
   const createCacheKey = await api("/api/keys", { method: "POST", ...authApi, body: { name: "m4-cache-key", cacheEnabled: true, cacheTtl: 3600 } });
   const cachePlaintext = createCacheKey.json?.plaintext ?? "";
   report("create cache-enabled key", createCacheKey.status === 200 && createCacheKey.json?.key?.cacheEnabled === true, `status=${createCacheKey.status}`);
   const cacheAuth = { Authorization: `Bearer ${cachePlaintext}` };
 
   const cacheBody = { model: "gpt-4o-mini", messages: [{ role: "user", content: "cache me" }] };
-  const cacheMiss = await api("/v1/chat/completions", { method: "POST", headers: cacheAuth, body: cacheBody });
-  report("cache miss → 200", cacheMiss.status === 200 && cacheMiss.json?.choices?.[0]?.message?.content?.includes("Hello from OpenAI mock"), `status=${cacheMiss.status}`);
-  const balanceAfterCacheMiss = balanceSql();
-  report("cache miss charged (4.5e-6)", approx(balanceAfterCacheMiss, 60 - 3 * CHAT_COST), `balance=${balanceAfterCacheMiss}`);
+  const cacheMiss1 = await api("/v1/chat/completions", { method: "POST", headers: cacheAuth, body: cacheBody });
+  report("cache miss #1 → 200 (第 1 次只计数)", cacheMiss1.status === 200 && cacheMiss1.json?.choices?.[0]?.message?.content?.includes("Hello from OpenAI mock"), `status=${cacheMiss1.status}`);
+  const cacheMiss2 = await api("/v1/chat/completions", { method: "POST", headers: cacheAuth, body: cacheBody });
+  report("cache miss #2 → 200 (达阈值 → 写缓存)", cacheMiss2.status === 200 && cacheMiss2.json?.choices?.[0]?.message?.content === cacheMiss1.json?.choices?.[0]?.message?.content, `status=${cacheMiss2.status}`);
 
-  await sleep(1000); // 等待 waitUntil 缓存写完成
+  // 两次 miss 的扣费由消费者异步落定 → 轮询余额 = 60 - 4×CHAT_COST
+  const cacheMissBalance = await poll(() => {
+    const b = balanceSql();
+    return approx(b, 60 - 4 * CHAT_COST) ? b : null;
+  });
+  report("2 cache misses charged (2×4.5e-6, delayed)", cacheMissBalance !== null, `balance=${cacheMissBalance}`);
+
+  await sleep(1000); // 等待 waitUntil 缓存写完成（第 2 次 miss 响应后）
 
   const balanceBeforeCacheHit = balanceSql();
   const cacheHit = await api("/v1/chat/completions", { method: "POST", headers: cacheAuth, body: cacheBody });
-  report("cache hit → 200 (same content)", cacheHit.status === 200 && cacheHit.json?.choices?.[0]?.message?.content === cacheMiss.json?.choices?.[0]?.message?.content, `status=${cacheHit.status}`);
+  report("cache hit → 200 (same content)", cacheHit.status === 200 && cacheHit.json?.choices?.[0]?.message?.content === cacheMiss1.json?.choices?.[0]?.message?.content, `status=${cacheHit.status}`);
   const balanceAfterCacheHit = balanceSql();
   report("cache hit not charged", approx(balanceAfterCacheHit, balanceBeforeCacheHit), `balance=${balanceAfterCacheHit}`);
 
@@ -348,6 +389,24 @@ async function main() {
     `SELECT status FROM request_logs WHERE user_id=(SELECT id FROM users WHERE email='${ADMIN_EMAIL}') ORDER BY id DESC LIMIT 1;`,
   );
   report("D1: request_logs cached", cachedLog.length === 1 && cachedLog[0].status === "cached", JSON.stringify(cachedLog[0]));
+
+  // >32KB 请求跳过整个缓存评估（R2 前置过滤）：同体连发 3 次均转发并扣费、无命中
+  const bigBalanceBefore = balanceSql();
+  const bigBody = { model: "gpt-4o-mini", messages: [{ role: "user", content: "x".repeat(40 * 1024) }] };
+  const bigStatuses = [];
+  for (let i = 0; i < 3; i += 1) {
+    const r = await api("/v1/chat/completions", { method: "POST", headers: cacheAuth, body: bigBody });
+    bigStatuses.push(r.status);
+  }
+  const bigBalanceAfter = await poll(() => {
+    const b = balanceSql();
+    return approx(b, bigBalanceBefore - 3 * CHAT_COST) ? b : null;
+  });
+  report("3× >32KB same-body → 3×200 + 3×charged (无缓存命中)", bigStatuses.every((s) => s === 200) && bigBalanceAfter !== null, `statuses=${bigStatuses.join(",")}`);
+  const cachedCount = query(
+    `SELECT COUNT(*) AS n FROM request_logs WHERE user_id=(SELECT id FROM users WHERE email='${ADMIN_EMAIL}') AND status='cached';`,
+  )[0]?.n;
+  report("only 1 cached log (命中明细；大请求零 cached)", Number(cachedCount) === 1, `cached=${cachedCount}`);
 
   // ---------- 8. 限流（4.4） ----------
   console.log("\n[8] rate limit (KV fixed window, qpsLimit=2)");

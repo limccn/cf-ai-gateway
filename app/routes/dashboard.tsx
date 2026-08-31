@@ -5,9 +5,10 @@ import { KeyRound, TrendingUp, Wallet, Zap } from "lucide-react";
 import { useSession } from "@/hooks/use-session";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { useUsage } from "@/modules/usage/hooks/use-usage";
-import { buildHourlySeries } from "@/modules/usage/hourly";
+import { buildRangeSeries, getTzOffsetMin, RANGE_OPTIONS } from "@/modules/usage/range";
+import type { UsageRange } from "@/modules/usage/types";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
-import { formatNumber, formatUsd, formatDateTime, formatDateTimeShort, formatShortDate } from "@/lib/format";
+import { formatNumber, formatUsd, formatDateTime, formatDateTimeShort } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { BarChart } from "@/components/charts/bar-chart";
@@ -55,9 +56,10 @@ function StatCard({
 export default function DashboardPage() {
   const { user } = useSession();
   const isMobile = useIsMobile();
-  const [chartMode, setChartMode] = useState<"day" | "hour">("day");
-  const usageQuery = useUsage({ groupBy: "date", limit: 7 });
-  const hourlyQuery = useUsage({ groupBy: "hour" });
+  const [range, setRange] = useState<UsageRange>("last30");
+  // 时区快照与查询参数同源（模块加载时计算一次；窗口边界与桶构建共用）
+  const tzOffsetMin = useMemo(() => getTzOffsetMin(), []);
+  const usageQuery = useUsage({ range, tzOffsetMin, limit: 7 });
   const keysQuery = useKeys();
 
   const { aggregates, details } = useMemo(() => {
@@ -76,18 +78,13 @@ export default function DashboardPage() {
   }, [aggregates]);
 
   const chartData = useMemo(
-    () =>
-      aggregates.map((agg) => ({
-        label: formatShortDate(agg.group ?? ""),
-        value: agg.requests,
-      })),
-    [aggregates],
+    () => buildRangeSeries(aggregates, range, tzOffsetMin),
+    [aggregates, range, tzOffsetMin],
   );
 
-  const hourlyData = useMemo(
-    () => buildHourlySeries(hourlyQuery.data?.aggregates ?? []),
-    [hourlyQuery.data],
-  );
+  // find 必中（range 来自 RANGE_OPTIONS 枚举）；noUncheckedIndexedAccess 下数组索引可能 undefined，用 as 收敛
+  const rangeMeta =
+    RANGE_OPTIONS.find((o) => o.value === range) ?? (RANGE_OPTIONS[3] as (typeof RANGE_OPTIONS)[number]);
 
   const balance = user?.balance;
   const keysCount = keysQuery.data?.items.length;
@@ -135,47 +132,31 @@ export default function DashboardPage() {
         <Card className="lg:col-span-2">
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <div>
-              <CardTitle>{chartMode === "day" ? "Requests per day" : "Requests (last 24h)"}</CardTitle>
-              <CardDescription>
-                {chartMode === "day" ? "Last 30 days of traffic" : "Hourly request count"}
-              </CardDescription>
+              <CardTitle>{rangeMeta.title}</CardTitle>
+              <CardDescription>{rangeMeta.desc}</CardDescription>
             </div>
             <div className="flex items-center gap-1">
-              <Button
-                variant={chartMode === "day" ? "default" : "outline"}
-                size="sm"
-                onClick={() => setChartMode("day")}
-              >
-                Day
-              </Button>
-              <Button
-                variant={chartMode === "hour" ? "default" : "outline"}
-                size="sm"
-                onClick={() => setChartMode("hour")}
-              >
-                Hour
-              </Button>
+              {RANGE_OPTIONS.map((option) => (
+                <Button
+                  key={option.value}
+                  variant={range === option.value ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setRange(option.value)}
+                >
+                  {option.label}
+                </Button>
+              ))}
             </div>
           </CardHeader>
           <CardContent>
-            {chartMode === "day" ? (
-              usageQuery.isLoading ? (
-                <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
-                  Loading…
-                </div>
-              ) : usageQuery.isError ? (
-                <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
-              ) : (
-                <BarChart data={chartData} height={220} formatValue={formatNumber} />
-              )
-            ) : hourlyQuery.isLoading ? (
+            {usageQuery.isLoading ? (
               <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
                 Loading…
               </div>
-            ) : hourlyQuery.isError ? (
-              <ErrorState message={hourlyQuery.error.message} onRetry={() => hourlyQuery.refetch()} />
+            ) : usageQuery.isError ? (
+              <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
             ) : (
-              <BarChart data={hourlyData} height={220} formatValue={formatNumber} />
+              <BarChart data={chartData} height={220} formatValue={formatNumber} />
             )}
           </CardContent>
         </Card>
@@ -240,7 +221,7 @@ export default function DashboardPage() {
       </div>
 
       <p className={cn("mt-6 text-xs text-muted-foreground")}>
-        Details are grouped by day in your local timezone; request records are UTC.
+        Quick ranges are bucketed in your local timezone; request records are UTC.
       </p>
     </PageContainer>
   );

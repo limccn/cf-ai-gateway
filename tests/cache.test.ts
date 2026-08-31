@@ -1,7 +1,9 @@
 // M4 响应缓存单测（4.5）：命中直接返回、不转发、不扣费、明细记 cached。
+// R3：非流式响应 >5MB 跳过 KV 缓存（照常返回，避免 waitUntil 内 stringify 大响应的峰值）。
 import { env } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
-import { buildCacheKey, hashRequestBody } from "../src/lib/response-cache";
+import { exports } from "cloudflare:workers";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { buildCacheKey, buildCountKey, hashRequestBody } from "../src/lib/response-cache";
 import {
   applyMigrations,
   clearKv,
@@ -32,6 +34,45 @@ beforeAll(async () => {
   await applyMigrations();
   await clearKv();
 });
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+/** mock provider 的 baseUrl（setupProviderWithModel 固定值），stub 按此前缀回 canned 上游。 */
+const UPSTREAM_BASE = "http://127.0.0.1:1";
+
+/** 拦截 fetch：上游前缀 → canned 响应；其余 → 转发主 worker（网关路径）。 */
+function stubUpstream(upstreamHandler: () => Response): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith(UPSTREAM_BASE)) {
+        return upstreamHandler();
+      }
+      const app = exports.default as { fetch(request: Request): Promise<Response> };
+      return app.fetch(new Request(url, init));
+    }),
+  );
+}
+
+/** 上游非流式 chat.completion（内部形态）。 */
+function upstreamChat(id: string, content: string): Response {
+  return new Response(
+    JSON.stringify({
+      id,
+      object: "chat.completion",
+      created: 1_700_000_000,
+      model: "gpt-4o-mini",
+      choices: [
+        { index: 0, message: { role: "assistant", content }, finish_reason: "stop" },
+      ],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}
 
 describe("响应缓存", () => {
   it("开启缓存的 Key：预置缓存后命中 → 返回缓存体、余额不变、无 usage 流水、明细 cached", async () => {
@@ -127,5 +168,98 @@ describe("响应缓存", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as { id: string };
     expect(json["id"]).toBe("normalized-hit");
+  });
+
+  it("R2+R3：非流式响应 ≤5MB 写入缓存（第 1 次只计数、第 2 次写缓存并清计数、第 3 次命中不转发）", async () => {
+    const userId = await setupUser("cache-write@test.dev", 10);
+    const { keyId, plaintext } = await setupKey(userId, { cacheEnabled: true, cacheTtl: 3600 });
+    await setupProviderWithModel("gpt-4o-mini");
+    await setupPrice("gpt-4o-mini", 0.15, 0.15, 0.0375, 0.6, 0.6);
+
+    let upstreamCalls = 0;
+    stubUpstream(() => {
+      upstreamCalls += 1;
+      return upstreamChat("chatcmpl-fresh", "small reply");
+    });
+
+    const bodyHash = await hashRequestBody(BODY);
+    const cacheKey = buildCacheKey(keyId, "gpt-4o-mini", bodyHash);
+    const countKey = buildCountKey(keyId, "gpt-4o-mini", bodyHash);
+
+    // 第 1 次：仅计数（未达高频重传阈值 → 不写缓存）
+    const first = await postChat(plaintext);
+    expect(first.status).toBe(200);
+    expect(((await first.json()) as { id: string })["id"]).toBe("chatcmpl-fresh");
+    expect(await env.CACHE_KV.get(cacheKey)).toBeNull();
+    expect(await env.CACHE_KV.get(countKey)).toBe("1");
+
+    // 第 2 次：达到阈值 → waitUntil 异步写缓存并清零计数
+    const second = await postChat(plaintext);
+    expect(second.status).toBe(200);
+    expect(upstreamCalls).toBe(2);
+    await vi.waitFor(async () => {
+      expect(await env.CACHE_KV.get(cacheKey)).not.toBeNull();
+    });
+    expect(await env.CACHE_KV.get(countKey)).toBeNull();
+
+    // 第 3 次：命中缓存值（上游未被再次调用）
+    const third = await postChat(plaintext);
+    expect(third.status).toBe(200);
+    expect(((await third.json()) as { id: string })["id"]).toBe("chatcmpl-fresh");
+    expect(upstreamCalls).toBe(2);
+  });
+
+  it("R3：非流式响应 >5MB 跳过 KV 缓存（照常返回 200，不写缓存）", async () => {
+    const userId = await setupUser("cache-big@test.dev", 10);
+    const { keyId, plaintext } = await setupKey(userId, { cacheEnabled: true, cacheTtl: 3600 });
+    await setupProviderWithModel("gpt-4o-mini");
+    await setupPrice("gpt-4o-mini", 0.15, 0.15, 0.0375, 0.6, 0.6);
+
+    // 正文 6MB > 阈值 5MB（MAX_CACHE_RESPONSE_BYTES）
+    stubUpstream(() => upstreamChat("chatcmpl-big", "x".repeat(6 * 1024 * 1024)));
+
+    const res = await postChat(plaintext);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { id: string })["id"]).toBe("chatcmpl-big");
+
+    // 跳过是确定性的（写入前判断），无需等待
+    const bodyHash = await hashRequestBody(BODY);
+    const cacheKey = buildCacheKey(keyId, "gpt-4o-mini", bodyHash);
+    expect(await env.CACHE_KV.get(cacheKey)).toBeNull();
+  });
+
+  it("R2：请求体 >32KB 跳过整个缓存评估（不计数、不写缓存，照常转发两次）", async () => {
+    const userId = await setupUser("cache-bigbody@test.dev", 10);
+    const { keyId, plaintext } = await setupKey(userId, { cacheEnabled: true, cacheTtl: 3600 });
+    await setupProviderWithModel("gpt-4o-mini");
+    await setupPrice("gpt-4o-mini", 0.15, 0.15, 0.0375, 0.6, 0.6);
+
+    // 请求体（messages content）> 32KB（MAX_CACHE_BODY_BYTES）
+    const bigBody = {
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: "x".repeat(40 * 1024) }],
+    };
+    const bodyHash = await hashRequestBody(bigBody);
+    const cacheKey = buildCacheKey(keyId, "gpt-4o-mini", bodyHash);
+    const countKey = buildCountKey(keyId, "gpt-4o-mini", bodyHash);
+
+    let upstreamCalls = 0;
+    stubUpstream(() => {
+      upstreamCalls += 1;
+      return upstreamChat("chatcmpl-bigbody", "reply");
+    });
+
+    // 连发两次（同 body）：若无 R2 前置过滤将触发计数并写缓存 → 应无任何 KV 痕迹
+    for (let i = 0; i < 2; i++) {
+      const res = await selfFetch("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${plaintext}` },
+        body: JSON.stringify(bigBody),
+      });
+      expect(res.status).toBe(200);
+    }
+    expect(upstreamCalls).toBe(2);
+    expect(await env.CACHE_KV.get(countKey)).toBeNull();
+    expect(await env.CACHE_KV.get(cacheKey)).toBeNull();
   });
 });

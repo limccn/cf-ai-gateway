@@ -7,12 +7,21 @@ import type { ProxyEndpointOptions } from "../v1/proxy";
 import { AdapterError } from "../../providers/types";
 import {
   buildInternalFromAnthropic,
+  createStreamToAnthropicTransform,
   transformResponseToAnthropic,
-  transformStreamToAnthropic,
 } from "../../providers/anthropic-inbound";
 import { anthropicMessagesInputSchema } from "./types";
 
-function toInternalSafe(body: Record<string, unknown>): Record<string, unknown> {
+/** 入站 Anthropic → 内部形态（统一入口 /v1/messages 复用；/anthropic/* 同函数）。
+ * 统一 schema 不强制 max_tokens（两协议共有、不作检测信号），anthropic 分支在此补必填检查
+ * （400 语义与现状 zod 一致）；/anthropic/* 两端点 zod schema 已强制，此检查不重复生效（恒真）。 */
+export function toInternalSafe(body: Record<string, unknown>): Record<string, unknown> {
+  const maxTokens = body["max_tokens"];
+  if (typeof maxTokens !== "number" || !Number.isInteger(maxTokens) || maxTokens <= 0) {
+    throw new HTTPException(400, {
+      message: "max_tokens is required and must be a positive integer",
+    });
+  }
   try {
     return buildInternalFromAnthropic(body);
   } catch (error) {
@@ -28,7 +37,10 @@ export const anthropicProxyOptions: ProxyEndpointOptions = {
   inputSchema: anthropicMessagesInputSchema,
   toInternal: toInternalSafe,
   transformResponse: transformResponseToAnthropic,
-  transformStream: transformStreamToAnthropic,
+  // R2.4 帧级转换：OpenAI 上游时在结算管线上消费同一批帧（消除往返编解码）；
+  // anthropic 上游时协议短路（passthroughAnthropicStream），不经过本转换。
+  streamConsumer: createStreamToAnthropicTransform,
+  passthroughAnthropicStream: true,
   cachePrefix: "anthropic:",
   // 协议偏好：Anthropic 入站优先 type=anthropic 的 provider（上游原生 Anthropic 端点，
   // 如 DeepSeek /anthropic），仅配 openai provider 时回退转换转发（零回归）。

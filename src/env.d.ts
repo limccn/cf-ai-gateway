@@ -22,6 +22,8 @@ interface Env {
   GITHUB_ALLOWED_EMAILS: string;
   // request_logs 明细保留天数（M5 5.4；scheduled cron 清理用，缺省 30）
   REQUEST_LOG_RETENTION_DAYS?: string;
+  // 延迟计费队列名（[vars] 烘焙；queue() handler 按 batch.queue 分流用；缺失时回退 usage 聚合）
+  BILLING_QUEUE_NAME?: string;
   // 网关 API Key 明文前缀（缺省 "sk-"；空白视为未设置，回退默认。仅影响新生成 Key）
   API_KEY_PREFIX?: string;
   // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users

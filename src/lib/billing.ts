@@ -101,6 +101,8 @@ export function extractLooseUsage(body: unknown): TokenUsage | null {
 // ============ request_logs 明细 ============
 
 export interface RequestLogRecord {
+  /** 幂等键（请求路径统一生成的 UUID；成功路径由计费消费者落行，错误/缓存路径同步落行）。 */
+  requestId?: string | null;
   userId: number | null;
   keyId: number | null;
   providerId: number | null;
@@ -118,6 +120,7 @@ export async function recordRequestLog(db: Db, input: RequestLogRecord): Promise
   const [row] = await db
     .insert(requestLogs)
     .values({
+      requestId: input.requestId ?? null,
       userId: input.userId,
       keyId: input.keyId,
       providerId: input.providerId,
