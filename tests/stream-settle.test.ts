@@ -245,6 +245,65 @@ describe("createAnthropicUsageDetector", () => {
       }),
     ).toEqual({ promptTokens: 3, completionTokens: 7 });
   });
+  it("多块流（U1）：多次 message_delta 取最终累计 output_tokens", () => {
+    const detector = createAnthropicUsageDetector();
+    detector.feed({
+      event: "message_start",
+      data: { type: "message_start", message: { usage: { input_tokens: 200 } } },
+    });
+    // thinking 块停止 → delta 1（部分累计）
+    expect(
+      detector.feed({
+        event: "message_delta",
+        data: { type: "message_delta", usage: { output_tokens: 30 } },
+      }),
+    ).toEqual({ promptTokens: 200, completionTokens: 30 });
+    // 正文块停止 → delta 2（最终累计：只取第一个会少收 470 tokens）
+    expect(
+      detector.feed({
+        event: "message_delta",
+        data: { type: "message_delta", usage: { output_tokens: 500 } },
+      }),
+    ).toEqual({ promptTokens: 200, completionTokens: 500 });
+  });
+  it("cache_creation（H8）：cache_creation_input_tokens 与 cache_read 求和按缓存价", () => {
+    const detector = createAnthropicUsageDetector();
+    detector.feed({
+      event: "message_start",
+      data: {
+        type: "message_start",
+        message: {
+          usage: {
+            input_tokens: 1000,
+            cache_read_input_tokens: 300,
+            cache_creation_input_tokens: 200,
+          },
+        },
+      },
+    });
+    expect(
+      detector.feed({
+        event: "message_delta",
+        data: { type: "message_delta", usage: { output_tokens: 10 } },
+      }),
+    ).toEqual({ promptTokens: 1000, completionTokens: 10, cachedTokens: 500 });
+  });
+  it("snapshot（U2）：message_start 后即可快照（completionTokens 缺失 → 0，至少收 prompt 成本）", () => {
+    const detector = createAnthropicUsageDetector();
+    expect(detector.snapshot?.()).toBeNull();
+    detector.feed({
+      event: "message_start",
+      data: {
+        type: "message_start",
+        message: { usage: { input_tokens: 200, cache_read_input_tokens: 150 } },
+      },
+    });
+    expect(detector.snapshot?.()).toEqual({
+      promptTokens: 200,
+      completionTokens: 0,
+      cachedTokens: 150,
+    });
+  });
 });
 
 describe("wrapStreamWithSettlement", () => {
@@ -276,12 +335,13 @@ describe("wrapStreamWithSettlement", () => {
       },
     });
     await readAll(counted);
-    // 每帧恰好一次；usage 检测成功后停止后续 feed（首次非 null 生效，同旧语义）
-    expect(feeds).toHaveLength(2);
+    // U1：usage 检测后仍持续 feed（多块流 output_tokens 为累计值，持续取最新）→ 3 帧全喂
+    expect(feeds).toHaveLength(3);
     expect(feeds[0]).toMatchObject({
       choices: [{ delta: { content: "a" } }],
     });
     expect(feeds[1]).toMatchObject({ usage: { prompt_tokens: 100 } });
+    expect(feeds[2]).toBeNull(); // [DONE] 帧 data:null 也投喂（检测器跳过）
     expect(settle).toHaveBeenCalledWith({
       promptTokens: 100,
       completionTokens: 50,
@@ -354,6 +414,58 @@ describe("wrapStreamWithSettlement", () => {
     });
     expect(logger.warn).toHaveBeenCalledWith("stream_cancelled", {
       reason: "client gone",
+    });
+  });
+
+  it("cancel 部分计费（U2）：anthropic 流无 message_delta 时按 snapshot 结算（至少收 prompt 成本）", async () => {
+    const settle = vi.fn(async () => {});
+    const logger = mockLogger();
+    // 永不结束的上游：只有 message_start（无 message_delta → 无完整 usage 事件）
+    const neverEnding = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":200,"cache_read_input_tokens":150}}}\n\n`,
+          ),
+        );
+      },
+    });
+    const stream = wrapStreamWithSettlement(neverEnding, settle, logger, {
+      detector: createAnthropicUsageDetector(),
+    });
+    const reader = stream.getReader();
+    await reader.read();
+    await reader.cancel("client gone");
+    expect(settle).toHaveBeenCalledTimes(1);
+    // U2：detected=null（缺 output_tokens）→ snapshot 兜底：prompt 成本必收
+    expect(settle).toHaveBeenCalledWith({
+      promptTokens: 200,
+      completionTokens: 0,
+      cachedTokens: 150,
+    });
+  });
+
+  it("idle timeout（U7）：流中途停顿超时 → 报错结束，settle 仍按已观测 usage 结算", async () => {
+    const settle = vi.fn(async () => {});
+    const logger = mockLogger();
+    const slow = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode(`${USAGE_FRAME}\n\n`));
+        await new Promise((r) => setTimeout(r, 150));
+        controller.enqueue(encoder.encode(`${DONE}\n\n`));
+        controller.close();
+      },
+    });
+    const stream = wrapStreamWithSettlement(slow, settle, logger, {
+      idleTimeoutMs: 40,
+    });
+    const reader = stream.getReader();
+    await reader.read(); // 首 chunk 正常
+    await expect(reader.read()).rejects.toThrow(/idle timeout/);
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(settle).toHaveBeenCalledWith({
+      promptTokens: 100,
+      completionTokens: 50,
     });
   });
 

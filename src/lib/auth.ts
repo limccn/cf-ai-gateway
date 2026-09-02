@@ -13,7 +13,12 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { eq } from "drizzle-orm";
 import type { Db } from "../db";
 import * as schema from "../db/schema";
-import { consumeInviteCode } from "./invites";
+import { consumeInviteCode, validateInviteCode } from "./invites";
+import { logger } from "./logger";
+
+// F2（安全评审）：先消费后建号 —— create.before 钩子内消费邀请码（乐观锁条件 UPDATE），
+// 消费失败 return false 阻止建号，关闭「两并发同码注册都通过校验、一码两用」的重放窗口。
+// 权衡：before 消费后若 Better Auth 内部建号失败 → 码被烧（一次性码语义，管理员可补发）。
 import { isEmailAllowed } from "./github-whitelist";
 import { isSeedEmail, parseSeedUsers } from "./seed-users";
 
@@ -69,7 +74,8 @@ export function createAuth(env: Env, db: Db) {
           if (inviteCode === "") {
             return { error: INVITE_CODE_REQUIRED, errorDescription: "Invite code is required for email/password signup" };
           }
-          const ok = await consumeInviteCode(db, inviteCode);
+          // 只校验不消费（F2：一次性码在 create.before 钩子消费，见文件头权衡注释）
+          const ok = await validateInviteCode(db, inviteCode);
           if (!ok) {
             return { error: INVITE_CODE_INVALID, errorDescription: "Invalid, used or expired invite code" };
           }
@@ -99,9 +105,27 @@ export function createAuth(env: Env, db: Db) {
     databaseHooks: {
       user: {
         create: {
-          // 剥离 inviteCode：邀请码为一次性凭证，不随用户记录持久化
+          // F2：先消费后建号 —— 消费成功才放行建号（乐观锁保证并发下唯一赢家），
+          // 消费失败（无效/已用/过期/并发被抢先）return false 阻止建号，关闭重放窗口。
+          // 剥离 inviteCode：邀请码为一次性凭证，不随用户记录持久化。
           before: async (user) => {
             if ("inviteCode" in user) {
+              const code = String(user.inviteCode ?? "").trim();
+              if (code === "") {
+                // 空串 = 未提供：dev seed 路径（validateUserInfo 白名单放行，不消费）；
+                // 生产无 SEED_USERS 入口，普通注册已在 validateUserInfo 拦 INVITE_CODE_REQUIRED。
+                return { data: { inviteCode: undefined } };
+              }
+              const email = typeof user.email === "string" ? user.email.toLowerCase() : "";
+              if (email === "") {
+                return false;
+              }
+              const ok = await consumeInviteCode(db, code);
+              if (!ok) {
+                // 模块级 logger：钩子为非请求上下文（无 requestId）
+                logger.warn("invite_code_consume_failed", { email });
+                return false;
+              }
               return { data: { inviteCode: undefined } };
             }
             return undefined;

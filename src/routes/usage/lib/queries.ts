@@ -68,10 +68,15 @@ export function requestLogsWhere(filters: UsageFilters): SQL | undefined {
 
 // ============ 快捷窗口（08-31-usage-stats-dimensions） ============
 
-/** 本地日 0:00 的 UTC 时刻（tzOffsetMin = 客户端时区偏移分钟，UTC+8 → 480）。 */
-function localTodayStartUtc(nowMs: number, tzOffsetMin: number): number {
+/** N 个本地日前（今天=0）的本地日 0:00 的 UTC 时刻（tzOffsetMin = 客户端时区偏移分钟，UTC+8 → 480）。
+ * 本地日减法而非固定 24h 倍数：DST 切换日（23/25 小时）下仍对齐本地日界；
+ * 与前端 app/modules/usage/range.ts 的 dayStartUtcDaysAgo 同公式（跨端窗口必须重合）。 */
+function dayStartUtcDaysAgo(nowMs: number, tzOffsetMin: number, daysAgo: number): number {
   const offsetMs = tzOffsetMin * 60_000;
-  return Math.floor((nowMs + offsetMs) / 86_400_000) * 86_400_000 - offsetMs;
+  const local = new Date(nowMs + offsetMs);
+  return (
+    Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - daysAgo) - offsetMs
+  );
 }
 
 export interface RangeWindow {
@@ -93,27 +98,27 @@ export function resolveRangeWindow(
   tzOffsetMin: number,
   nowMs = Date.now(),
 ): RangeWindow {
-  const todayStart = localTodayStartUtc(nowMs, tzOffsetMin);
-  const day = 86_400_000;
+  const todayStart = dayStartUtcDaysAgo(nowMs, tzOffsetMin, 0);
+  const tomorrowStart = dayStartUtcDaysAgo(nowMs, tzOffsetMin, -1);
   switch (range) {
     case "today":
-      return { start: new Date(todayStart), end: new Date(todayStart + day), granularity: "hour" };
+      return { start: new Date(todayStart), end: new Date(tomorrowStart), granularity: "hour" };
     case "yesterday":
       return {
-        start: new Date(todayStart - day),
+        start: new Date(dayStartUtcDaysAgo(nowMs, tzOffsetMin, 1)),
         end: new Date(todayStart),
         granularity: "hour",
       };
     case "last14":
       return {
-        start: new Date(todayStart - 13 * day),
-        end: new Date(todayStart + day),
+        start: new Date(dayStartUtcDaysAgo(nowMs, tzOffsetMin, 13)),
+        end: new Date(tomorrowStart),
         granularity: "day",
       };
     case "last30":
       return {
-        start: new Date(todayStart - 29 * day),
-        end: new Date(todayStart + day),
+        start: new Date(dayStartUtcDaysAgo(nowMs, tzOffsetMin, 29)),
+        end: new Date(tomorrowStart),
         granularity: "day",
       };
   }

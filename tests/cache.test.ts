@@ -186,12 +186,14 @@ describe("响应缓存", () => {
     const cacheKey = buildCacheKey(keyId, "gpt-4o-mini", bodyHash);
     const countKey = buildCountKey(keyId, "gpt-4o-mini", bodyHash);
 
-    // 第 1 次：仅计数（未达高频重传阈值 → 不写缓存）
+    // 第 1 次：仅计数（未达高频重传阈值 → 不写缓存）；bump 在响应后 waitUntil 异步执行
     const first = await postChat(plaintext);
     expect(first.status).toBe(200);
     expect(((await first.json()) as { id: string })["id"]).toBe("chatcmpl-fresh");
     expect(await env.CACHE_KV.get(cacheKey)).toBeNull();
-    expect(await env.CACHE_KV.get(countKey)).toBe("1");
+    await vi.waitFor(async () => {
+      expect(await env.CACHE_KV.get(countKey)).toBe("1");
+    });
 
     // 第 2 次：达到阈值 → waitUntil 异步写缓存并清零计数
     const second = await postChat(plaintext);
@@ -207,6 +209,47 @@ describe("响应缓存", () => {
     expect(third.status).toBe(200);
     expect(((await third.json()) as { id: string })["id"]).toBe("chatcmpl-fresh");
     expect(upstreamCalls).toBe(2);
+  });
+
+  it("H11：失败请求不消耗计数（bump 只在成功路径；错误突发不饿死缓存）", async () => {
+    const userId = await setupUser("cache-h11-fail@test.dev", 10);
+    const { keyId, plaintext } = await setupKey(userId, { cacheEnabled: true, cacheTtl: 3600 });
+    await setupProviderWithModel("gpt-4o-mini");
+    await setupPrice("gpt-4o-mini", 0.15, 0.15, 0.0375, 0.6, 0.6);
+
+    const bodyHash = await hashRequestBody(BODY);
+    const cacheKey = buildCacheKey(keyId, "gpt-4o-mini", bodyHash);
+    const countKey = buildCountKey(keyId, "gpt-4o-mini", bodyHash);
+
+    // 第 1 次成功 → 计数 1
+    stubUpstream(() => upstreamChat("chatcmpl-h11-1", "ok"));
+    const first = await postChat(plaintext);
+    expect(first.status).toBe(200);
+    await vi.waitFor(async () => {
+      expect(await env.CACHE_KV.get(countKey)).toBe("1");
+    });
+
+    // 第 2 次失败（上游 5xx）→ 不消耗计数（计数键保持 "1"，未被 delete——旧逻辑会在
+    // bump 达到阈值时提前删键，错误突发把热度清零 → 上游恢复后需重新累积）
+    stubUpstream(() => new Response("boom", { status: 502 }));
+    const failed = await postChat(plaintext);
+    expect(failed.status).toBe(502);
+    expect(await env.CACHE_KV.get(countKey)).toBe("1");
+    expect(await env.CACHE_KV.get(cacheKey)).toBeNull();
+
+    // 第 3 次成功 → 计数 2 = 阈值 → 写缓存并清零
+    stubUpstream(() => upstreamChat("chatcmpl-h11-3", "ok"));
+    const third = await postChat(plaintext);
+    expect(third.status).toBe(200);
+    await vi.waitFor(async () => {
+      expect(await env.CACHE_KV.get(cacheKey)).not.toBeNull();
+    });
+    expect(await env.CACHE_KV.get(countKey)).toBeNull();
+  });
+
+  it("H11：count key 带协议前缀（协议分支计数隔离）", () => {
+    expect(buildCountKey(1, "m", "h")).toBe("cachecnt:1:m:h");
+    expect(buildCountKey(1, "m", "h", "anthropic:")).toBe("cachecnt:anthropic:1:m:h");
   });
 
   it("R3：非流式响应 >5MB 跳过 KV 缓存（照常返回 200，不写缓存）", async () => {

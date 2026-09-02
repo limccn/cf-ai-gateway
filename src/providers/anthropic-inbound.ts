@@ -4,7 +4,9 @@
 // - transformResponseToAnthropic：内部 chat 响应 → Anthropic message（AB §3.2）
 // - transformStreamToAnthropic：上游 OpenAI chat SSE → Anthropic SSE（AB §3.3，R2.4 走统一帧层）
 // 合成响应 id 统一用 msg_ 前缀（D11；流式/非流式共用同一生成器）。
-// 信息损失点（P5，丢弃 + 告警日志）：top_k / metadata / thinking / service_tier / output_config；
+// 信息损失点（P5，丢弃 + 告警日志）：top_k / metadata / service_tier；
+// thinking / output_config 自 2026-09-01 起改走 extractAnthropicExtras 专用透传通道（R1，
+// 09-01-thinking-passthrough）——由管道提取、anthropic 适配器逐字写回上游，不再在此丢弃；
 // image source.url → 400 invalid_request_error（零 SSRF 面）。
 import type { Logger } from "../lib/logger";
 import { logger as moduleLogger } from "../lib/logger";
@@ -99,14 +101,36 @@ export function buildInternalFromAnthropic(
     internal["stream"] = true;
   }
 
-  // 丢弃 + 告警日志（P5：首版不支持的 Anthropic 平台专属字段）
-  for (const field of ["top_k", "metadata", "thinking", "service_tier", "output_config"]) {
+  // 丢弃 + 告警日志（P5：首版不支持的 Anthropic 平台专属字段）。
+  // thinking / output_config 不在丢弃清单：R1 起由 extractAnthropicExtras 透传通道接管
+  // （anthropic 上游逐字写回；openai 上游仍不进内部 body，等效丢弃且无告警）。
+  for (const field of ["top_k", "metadata", "service_tier"]) {
     if (body[field] !== undefined) {
       logDropped(logger, field);
     }
   }
 
   return internal;
+}
+
+/**
+ * R1：提取 Anthropic 入站顶层透传字段（thinking / output_config，Claude Code 逐请求携带）。
+ * 逐字提取、不校验形态（畸形值逐字透传 → 上游 400 显式暴露，不静默）。
+ * 仅读顶层字段；无则 undefined。由 proxy 管道在 passthroughAnthropicExtras 开关下调用，
+ * 结果经 InternalRequest.anthropicExtras 传给 anthropic 适配器写回上游。
+ */
+export function extractAnthropicExtras(body: JsonObject): {
+  thinking?: unknown;
+  output_config?: unknown;
+} {
+  const extras: { thinking?: unknown; output_config?: unknown } = {};
+  if (body["thinking"] !== undefined) {
+    extras["thinking"] = body["thinking"];
+  }
+  if (body["output_config"] !== undefined) {
+    extras["output_config"] = body["output_config"];
+  }
+  return extras;
 }
 
 /** system 字段 → 纯文本列表（string 或 text block 数组；非 text block 丢弃）。 */

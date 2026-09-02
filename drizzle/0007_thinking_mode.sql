@@ -1,0 +1,1 @@
+ALTER TABLE `providers` ADD `thinking_mode` text;

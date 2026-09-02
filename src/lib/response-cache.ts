@@ -48,9 +48,19 @@ export function buildCacheKey(
   return `${CACHE_PREFIX}${prefix}${keyId}:${model}:${bodyHash}`;
 }
 
-/** 高频重传计数键（未命中路径）：keyId + model + bodyHash（与缓存键同粒度的热度指纹）。 */
-export function buildCountKey(keyId: number, model: string, bodyHash: string): string {
-  return `cachecnt:${keyId}:${model}:${bodyHash}`;
+/**
+ * 高频重传计数键（未命中路径）：keyId + model + bodyHash（与缓存键同粒度的热度指纹）。
+ * H11：prefix 参数与 buildCacheKey 同语义（协议分支隔离计数——不同协议的同一请求体
+ * 热度不得共享，否则一种协议的重传会触发另一种协议的缓存写）。prefix 为末尾可选，
+ * 向后兼容既有 3 参调用（现有端点键逐字节不变）。
+ */
+export function buildCountKey(
+  keyId: number,
+  model: string,
+  bodyHash: string,
+  prefix = "",
+): string {
+  return `cachecnt:${prefix}${keyId}:${model}:${bodyHash}`;
 }
 
 /**

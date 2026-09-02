@@ -231,7 +231,7 @@ describe("usage 缓存 token 提取", () => {
   });
 });
 
-describe("chargeUsage 原子扣费", () => {
+describe("chargeUsage 扣费（D2 债务模型）", () => {
   /** 建用户 + Key + Provider（request_logs 有外键约束，必须引用真实行）。 */
   async function setupBillingUser(
     email: string,
@@ -287,7 +287,7 @@ describe("chargeUsage 原子扣费", () => {
     expect(await latestLogStatus(userId)).toBe("success");
   });
 
-  it("余额不足不扣费：返回 charged=false，余额不变，无 usage 流水", async () => {
+  it("债务透支（D2）：余额不足 → 无条件扣费，余额可为负，流水照记", async () => {
     const db = createDb(env);
     const { userId, keyId, providerId } = await setupBillingUser("poor@test.dev", 0.5);
     const result = await chargeUsage(db, {
@@ -302,12 +302,12 @@ describe("chargeUsage 原子扣费", () => {
       upstreamLatencyMs: 3,
       status: "success",
     });
-    expect(result.charged).toBe(false);
-    expect(await getBalance(userId)).toBe(0.5);
-    expect(await countTxByType(userId, "usage")).toBe(0);
+    expect(result.charged).toBe(true);
+    expect(await getBalance(userId)).toBeCloseTo(0.5 - 10, 10);
+    expect(await countTxByType(userId, "usage")).toBe(1);
   });
 
-  it("并发扣费不超扣：50 并发 × cost=1，余额 10 → 恰好扣 10 次，最终余额 0", async () => {
+  it("并发扣费全部生效（债务模型）：50 并发 × cost=1，余额 10 → 余额 -40，50 条流水", async () => {
     const db = createDb(env);
     const { userId, keyId, providerId } = await setupBillingUser("concurrent@test.dev", 10);
     const attempts = Array.from({ length: 50 }, () =>
@@ -325,10 +325,9 @@ describe("chargeUsage 原子扣费", () => {
       }),
     );
     const results = await Promise.all(attempts);
-    const charged = results.filter((r) => r.charged).length;
-    expect(charged).toBe(10);
-    expect(await getBalance(userId)).toBe(0);
-    expect(await countTxByType(userId, "usage")).toBe(10);
+    expect(results.every((r) => r.charged)).toBe(true);
+    expect(await getBalance(userId)).toBeCloseTo(10 - 50, 10);
+    expect(await countTxByType(userId, "usage")).toBe(50);
   });
 });
 

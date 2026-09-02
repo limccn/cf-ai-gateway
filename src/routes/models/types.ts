@@ -5,6 +5,10 @@ import { z } from "zod";
 
 const priceField = z.number().min(0);
 
+/** 模型级输出上限（tokens，09-01-stg-glm-ccswitch-fix）：NULL ≡ 不限制。
+ * 请求 max_tokens 超上限时 proxy 层 clamp（防慢模型长生成撞上游超时）。 */
+export const maxOutputTokensSchema = z.number().int().positive().nullable();
+
 export const createModelInputSchema = z.object({
   model: z.string().min(1).max(200),
   inputPriceShort: priceField,
@@ -12,6 +16,7 @@ export const createModelInputSchema = z.object({
   inputPriceCached: priceField,
   outputPriceShort: priceField,
   outputPriceLong: priceField,
+  maxOutputTokens: maxOutputTokensSchema.optional(),
 });
 
 export const updateModelInputSchema = z
@@ -21,6 +26,8 @@ export const updateModelInputSchema = z
     inputPriceCached: priceField.optional(),
     outputPriceShort: priceField.optional(),
     outputPriceLong: priceField.optional(),
+    // 显式传 null = 重置为不限制（省略 = 不改动）
+    maxOutputTokens: maxOutputTokensSchema.optional(),
   })
   .refine(
     (v) =>
@@ -28,8 +35,9 @@ export const updateModelInputSchema = z
       v.inputPriceLong !== undefined ||
       v.inputPriceCached !== undefined ||
       v.outputPriceShort !== undefined ||
-      v.outputPriceLong !== undefined,
-    { message: "At least one price field is required" },
+      v.outputPriceLong !== undefined ||
+      v.maxOutputTokens !== undefined,
+    { message: "At least one field is required" },
   );
 
 export const modelIdParamSchema = z.object({
@@ -46,6 +54,8 @@ export const modelResponseSchema = z.object({
   inputPriceCached: z.number(),
   outputPriceShort: z.number(),
   outputPriceLong: z.number(),
+  // 模型级输出上限（null ≡ 不限制）
+  maxOutputTokens: z.number().int().positive().nullable(),
   createdAt: z.string(), // ISO
   updatedAt: z.string(), // ISO
 });

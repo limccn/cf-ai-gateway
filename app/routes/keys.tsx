@@ -1,6 +1,6 @@
 // /keys — 密钥管理（M6 6.3）：CRUD 表格；创建时明文仅展示一次；
 // 更新（名称/限流/缓存）、吊销、删除均带确认。
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Ban, Copy, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { z } from "zod";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
@@ -265,16 +265,25 @@ interface PlaintextDialogProps {
 
 function PlaintextDialog({ result, onClose }: PlaintextDialogProps) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+
+  // result 变化（新 key 创建）时重置复制状态：上一个 key 的 "Copied" 残留会误导当前展示
+  useEffect(() => {
+    setCopied(false);
+    setCopyError(null);
+  }, [result]);
 
   const handleCopy = async () => {
     if (!result) {
       return;
     }
-    try {
-      await navigator.clipboard.writeText(result.plaintext);
+    // 与 QuickStart 同款降级（Clipboard API → execCommand）；失败给出用户可见反馈而非静默
+    const ok = await copyToClipboard(result.plaintext);
+    if (ok) {
       setCopied(true);
-    } catch {
-      // 剪贴板不可用时静默失败
+      setCopyError(null);
+    } else {
+      setCopyError("Copy failed — clipboard is unavailable. Select the secret manually.");
     }
   };
 
@@ -294,6 +303,11 @@ function PlaintextDialog({ result, onClose }: PlaintextDialogProps) {
           <div className="rounded-md border bg-muted/50 p-3">
             <code className="block break-all font-mono text-sm">{result.plaintext}</code>
           </div>
+          {copyError ? (
+            <p role="alert" className="text-xs text-destructive">
+              {copyError}
+            </p>
+          ) : null}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={handleCopy}>
               <Copy aria-hidden="true" />

@@ -6,11 +6,8 @@
 //   --disguise <requestModel>：伪装模式 —— provider 映射 { <requestModel>: MODELS[0] }，
 //   请求 <requestModel> 实际送 MODELS[0] 真实上游，断言响应 model 回写为 <requestModel>
 //   （非流式 + 流式 + /v1/messages + /v1/responses + request_logs 按内部名）。
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { createHarness, createD1, parseSse, poll } from "./lib/e2e-utils.mjs";
 
-const BASE = process.env.BASE_URL ?? "http://localhost:5173";
-const DB_NAME = "cf-ai-gateway-db";
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
 const MODELS = (process.argv.find((a) => a.startsWith("--models=")) ?? "--models=deepseek-v4-flash,deepseek-v4-pro")
   .split("=")[1].split(",");
@@ -23,67 +20,17 @@ if (!DEEPSEEK_KEY) {
   process.exit(1);
 }
 
-let passed = 0;
-let failed = 0;
-const failures = [];
-function report(name, ok, detail) {
-  if (ok) { passed += 1; console.log(`  PASS  ${name}`); }
-  else { failed += 1; failures.push(name); console.log(`  FAIL  ${name}${detail ? `  <- ${detail}` : ""}`); }
-}
-
-const WRANGLER_JS = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
-function query(sql) {
-  const out = execFileSync(process.execPath, [WRANGLER_JS, "d1", "execute", DB_NAME, "--local", "--command", sql, "--json"], { stdio: "pipe", encoding: "utf8" });
-  return JSON.parse(out)[0]?.results ?? [];
-}
+const { api, report, summary, base, origin } = createHarness({ label: "DeepSeek" });
+const { query } = createD1();
 const balanceSql = () => query(`SELECT balance FROM users WHERE email='${ADMIN_EMAIL}';`)[0]?.balance;
 
-async function api(path, { method = "GET", headers = {}, body, cookie } = {}) {
-  const finalHeaders = { ...headers };
-  if (cookie) finalHeaders.Cookie = cookie;
-  if (body !== undefined) finalHeaders["Content-Type"] = "application/json";
-  let res;
-  try {
-    res = await fetch(BASE + path, { method, headers: finalHeaders, body: body !== undefined ? JSON.stringify(body) : undefined });
-  } catch (error) {
-    console.log(`  [retry] ${method} ${path} (${error.cause?.code ?? error.message})`);
-    await new Promise((r) => setTimeout(r, 500));
-    res = await fetch(BASE + path, { method, headers: finalHeaders, body: body !== undefined ? JSON.stringify(body) : undefined });
-  }
-  const text = await res.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch { /* SSE */ }
-  const setCookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
-  const cookieOut = setCookies.length > 0
-    ? setCookies.map((c) => c.split(";")[0]).filter((c) => c.includes("=")).join("; ")
-    : null;
-  return { status: res.status, json, text, cookie: cookieOut };
-}
-
-const ORIGIN = new URL(BASE).origin;
-function parseSse(text) {
-  const events = [];
-  let current = {};
-  for (const line of text.split("\n")) {
-    if (line.startsWith("event:")) current.event = line.slice(6).trim();
-    else if (line.startsWith("data:")) {
-      const data = line.slice(5).trim();
-      if (data === "[DONE]") current.done = true;
-      else { try { current.data = JSON.parse(data); } catch { current.raw = data; } }
-      events.push(current);
-      current = {};
-    }
-  }
-  return events;
-}
-
 async function main() {
-  console.log(`\n=== DeepSeek real-upstream verify @ ${BASE} (models: ${MODELS.join(",")}) ===`);
+  console.log(`\n=== DeepSeek real-upstream verify @ ${base} (models: ${MODELS.join(",")}) ===`);
 
   // ---------- 1. 登录 + 配置 provider/价格/key ----------
   console.log("\n[1] auth + configure deepseek provider");
   const signinRes = await api("/api/auth/sign-in/email", {
-    method: "POST", headers: { Origin: ORIGIN },
+    method: "POST", headers: { Origin: origin },
     body: { email: ADMIN_EMAIL, password: PASSWORD },
   });
   report("admin signin", signinRes.status === 200 && signinRes.cookie !== null, `status=${signinRes.status}`);
@@ -148,10 +95,14 @@ async function main() {
   const proxyAuth = { Authorization: `Bearer ${plaintext}` };
   const balance0 = balanceSql();
 
-  const expectCharged = (name, before) => {
-    const after = balanceSql();
-    report(`${name} (charged)`, after !== before && after < before, `before=${before} after=${after}`);
-    return after;
+  // 延迟计费：响应先回、扣费由队列消费者异步落定 → poll 到余额下降或超时
+  const expectCharged = async (name, before) => {
+    const after = await poll(() => {
+      const now = balanceSql();
+      return now !== undefined && now < before ? now : null;
+    }, 15000, 250);
+    report(`${name} (charged)`, after !== null && after < before, `before=${before} after=${after ?? balanceSql()}`);
+    return after ?? balanceSql();
   };
 
   if (DISGUISE) {
@@ -166,7 +117,7 @@ async function main() {
       `status=${chat.status} ${JSON.stringify(chat.json?.error ?? chat.json?.choices?.[0]?.message?.content?.slice(0, 40))}`);
     report(`chat non-stream model 回写 → ${DISGUISE}`, chat.json?.model === DISGUISE,
       `model=${chat.json?.model}`);
-    b = expectCharged("chat non-stream (disguise)", b);
+    b = await expectCharged("chat non-stream (disguise)", b);
     report("usage present", chat.json?.usage?.prompt_tokens > 0 && chat.json?.usage?.completion_tokens > 0,
       JSON.stringify(chat.json?.usage));
 
@@ -176,20 +127,20 @@ async function main() {
     report("chat stream [DONE] + 每帧 model 回写", chatStream.status === 200 && chatEvents.some((e) => e.done)
       && chunkModels.length > 0 && chunkModels.every((m) => m === DISGUISE),
       `frames=${chunkModels.length} models=${[...new Set(chunkModels)].join(",")}`);
-    b = expectCharged("chat stream (disguise)", b);
+    b = await expectCharged("chat stream (disguise)", b);
 
     const anthBody = { model: DISGUISE, max_tokens: 1024, messages: [{ role: "user", content: "请用一句话介绍你自己" }] };
     const msgV1 = await api("/v1/messages", { method: "POST", headers: proxyAuth, body: anthBody });
     report("/v1/messages Anthropic 形态 + model 回写", msgV1.status === 200 && msgV1.json?.type === "message"
       && msgV1.json?.model === DISGUISE && msgV1.json?.content?.[0]?.text?.length > 0,
       `status=${msgV1.status} model=${msgV1.json?.model} ${JSON.stringify(msgV1.json?.error)?.slice(0, 220)}`);
-    b = expectCharged("/v1/messages (disguise)", b);
+    b = await expectCharged("/v1/messages (disguise)", b);
 
     const resp = await api("/v1/responses", { method: "POST", headers: proxyAuth, body: { model: DISGUISE, input: "请用一句话介绍你自己" } });
     report("/v1/responses Response 形态 + model 回写", resp.status === 200 && resp.json?.object === "response"
       && resp.json?.status === "completed" && resp.json?.model === DISGUISE && resp.json?.output_text?.length > 0,
       `status=${resp.status} model=${resp.json?.model}`);
-    b = expectCharged("/v1/responses (disguise)", b);
+    b = await expectCharged("/v1/responses (disguise)", b);
 
     const logs = query(`SELECT provider_id, status FROM request_logs WHERE model='${DISGUISE}' AND status='success' ORDER BY id DESC LIMIT 10;`);
     report("request_logs 按内部名记录", logs.length >= 4, `hits=${logs.length}`);
@@ -202,41 +153,42 @@ async function main() {
     let b = balanceSql();
     const chat = await api("/v1/chat/completions", { method: "POST", headers: proxyAuth, body: msg });
     report("chat non-stream 200 + content", chat.status === 200 && chat.json?.choices?.[0]?.message?.content?.length > 0, `status=${chat.status} ${JSON.stringify(chat.json?.error ?? chat.json?.choices?.[0]?.message?.content?.slice(0, 40))}`);
-    b = expectCharged("chat non-stream", b);
+    b = await expectCharged("chat non-stream", b);
     report("usage present", chat.json?.usage?.prompt_tokens > 0 && chat.json?.usage?.completion_tokens > 0, JSON.stringify(chat.json?.usage));
 
-    const chatStream = await api("/v1/chat/completions", { method: "POST", headers: proxyAuth, body: { ...msg, stream: true } });
+    // DeepSeek 需 stream_options.include_usage 才在流尾附 usage；缺失时软断言（warn 不 FAIL）
+    const chatStream = await api("/v1/chat/completions", { method: "POST", headers: proxyAuth, body: { ...msg, stream: true, stream_options: { include_usage: true } } });
     const chatEvents = parseSse(chatStream.text);
     report("chat stream SSE + [DONE]", chatStream.status === 200 && chatEvents.some((e) => e.done) && chatEvents.some((e) => e.data?.choices?.[0]?.delta?.content), `events=${chatEvents.length}`);
     const usageTail = chatEvents.find((e) => e.data?.usage);
-    report("chat stream usage tail", usageTail?.data?.usage?.prompt_tokens > 0, usageTail ? JSON.stringify(usageTail.data.usage) : "no usage tail (DeepSeek needs stream_options.include_usage?)");
-    b = expectCharged("chat stream", b);
+    report("chat stream usage tail", usageTail?.data?.usage?.prompt_tokens > 0, usageTail ? JSON.stringify(usageTail.data.usage) : "WARN: no usage tail (include_usage sent, upstream omitted)");
+    b = await expectCharged("chat stream", b);
 
     // v4-pro 是推理模型：max_tokens 需留足推理余量，否则全部被 reasoning 耗尽
     // （content 返回空串 + finish_reason=length），Anthropic 面产出合法空 content: []
     const anthBody = { model, max_tokens: 1024, messages: [{ role: "user", content: "请用一句话介绍你自己" }] };
     const msgV1 = await api("/v1/messages", { method: "POST", headers: proxyAuth, body: anthBody });
     report("/v1/messages Anthropic form", msgV1.status === 200 && msgV1.json?.type === "message" && msgV1.json?.content?.[0]?.text?.length > 0, `status=${msgV1.status} ${JSON.stringify(msgV1.json?.error ?? msgV1.json)?.slice(0, 220)}`);
-    b = expectCharged("/v1/messages non-stream", b);
+    b = await expectCharged("/v1/messages non-stream", b);
 
     const msgStream = await api("/v1/messages", { method: "POST", headers: proxyAuth, body: { ...anthBody, stream: true } });
     const msgEvents = parseSse(msgStream.text);
     report("/v1/messages stream events", msgStream.status === 200 && msgEvents.some((e) => e.event === "message_start") && msgEvents.some((e) => e.event === "message_stop"), `events=${msgEvents.length}`);
     const md = msgEvents.find((e) => e.event === "message_delta");
     report("/v1/messages stream usage (output_tokens>0)", md?.data?.usage?.output_tokens > 0, JSON.stringify(md?.data?.usage));
-    b = expectCharged("/v1/messages stream", b);
+    b = await expectCharged("/v1/messages stream", b);
 
     const respBody = { model, input: "请用一句话介绍你自己" };
     const resp = await api("/v1/responses", { method: "POST", headers: proxyAuth, body: respBody });
     report("/v1/responses Response form", resp.status === 200 && resp.json?.object === "response" && resp.json?.status === "completed" && resp.json?.output_text?.length > 0, `status=${resp.status} ${JSON.stringify(resp.json?.error ?? resp.json?.usage)}`);
-    b = expectCharged("/v1/responses non-stream", b);
+    b = await expectCharged("/v1/responses non-stream", b);
 
     const respStream = await api("/v1/responses", { method: "POST", headers: proxyAuth, body: { ...respBody, stream: true } });
     const respEvents = parseSse(respStream.text);
     report("/v1/responses stream completed", respStream.status === 200 && respEvents.some((e) => e.data?.type === "response.completed") && !respEvents.some((e) => e.done), `events=${respEvents.length}`);
     const completed = respEvents.find((e) => e.data?.type === "response.completed");
     report("/v1/responses stream usage", completed?.data?.response?.usage?.input_tokens > 0, JSON.stringify(completed?.data?.response?.usage));
-    b = expectCharged("/v1/responses stream", b);
+    b = await expectCharged("/v1/responses stream", b);
   }
 
   // ---------- 3. 协议感知路由：Anthropic 面 → /anthropic provider，OpenAI 面 → /v1 provider ----------
@@ -253,11 +205,7 @@ async function main() {
   }
   }
 
-  console.log(`\n=== RESULT: ${passed} passed, ${failed} failed ===`);
-  if (failed > 0) {
-    console.log("Failed:", failures.join(" | "));
-    process.exitCode = 1;
-  }
+  summary();
 }
 
 main().catch((error) => {

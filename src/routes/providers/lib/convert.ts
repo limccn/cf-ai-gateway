@@ -3,7 +3,7 @@ import type { Provider } from "../../../db/schema";
 import { maskHeaderValue, maskSecret } from "../../../lib/mask";
 import { parseProviderModels } from "../../../lib/provider-models";
 import type { HttpOptions } from "../../../providers/types";
-import type { ProviderResponse, ProviderType } from "../types";
+import type { ProviderResponse, ProviderType, ThinkingMode } from "../types";
 
 /**
  * DB providers 行 → API 响应。
@@ -31,6 +31,12 @@ export function toProviderResponse(
     models,
     weight: typeof provider.weight === "number" ? provider.weight : 1,
     enabled: provider.enabled,
+    // R2：思考模式直通（NULL ≡ auto，响应显式返回 null）
+    thinkingMode: (provider.thinkingMode ?? null) as ThinkingMode,
+    // Workstream B：reasoning 回传直通（DB boolean 非空默认 false）
+    reasoningRoundtrip: provider.reasoningRoundtrip === true,
+    // 09-01-stg-glm-ccswitch-fix：上游超时直通（NULL ≡ 默认 60s，响应显式返回 null）
+    upstreamTimeoutMs: provider.upstreamTimeoutMs ?? null,
     httpOptions: {
       ...(httpOptions?.userAgent !== undefined ? { userAgent: httpOptions.userAgent } : {}),
       headers,

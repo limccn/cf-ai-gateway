@@ -3,8 +3,12 @@
 // 将 OpenAI 统一形态 `{error:{message}}`（含 @hono/zod-validator 400 形态）改写为
 // 入站协议错误形态（Anthropic：`{type:"error",error:{type,message}}`）。
 // 状态码与 message 原文不动；豁免 SSE（非 JSON）与已带协议错误标记（顶层 type:"error"）的响应。
+// 异常路径（09-01-review）：handler 抛 HTTPException 会绕过中间件 post-phase（Hono 沿栈
+// 传播到 app.onError，OpenAI 形态返回）→ 此处 try/catch next() 在中间件内改写后返回，
+// anthropic 客户端不再收到 OpenAI 形态错误体；非 HTTPException 继续抛出（onError 兜底）。
 import type { MiddlewareHandler } from "hono";
 import type { Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../types";
 import { toUnifiedErrorBody } from "./error-format";
@@ -64,7 +68,33 @@ export function createErrorAdaptMiddleware(
 ): MiddlewareHandler<AppEnv> {
   const { format, resolveFormat } = options;
   return async (c, next) => {
-    await next();
+    try {
+      await next();
+    } catch (error) {
+      // 异常路径：HTTPException 被 Hono 沿栈抛到 app.onError（OpenAI 统一形态），
+      // 中间件 post-phase 不会执行——在 catch 处按协议形态改写后短路返回
+      if (error instanceof HTTPException) {
+        const status = error.status;
+        const resolved = resolveFormat?.(c);
+        const activeFormat = resolved === undefined ? format : resolved;
+        if (activeFormat === "anthropic" && status >= 400 && status < 600) {
+          c.get("logger")?.warn("inbound_error_rewritten", {
+            path: c.req.path,
+            status,
+            format: activeFormat,
+            source: "exception",
+          });
+          return c.json(
+            {
+              type: "error",
+              error: { type: toAnthropicErrorType(status), message: error.message },
+            },
+            status as ContentfulStatusCode,
+          );
+        }
+      }
+      throw error;
+    }
     const res = c.res;
     // 动态格式（协议感知）：resolveFormat 返回 null → 不改写（OpenAI 形态原样返回）；
     // 返回 undefined（未提供）→ 缺省 format（现状行为）。注意不能用 `?? format`（会吞掉 null）。

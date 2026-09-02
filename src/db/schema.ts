@@ -204,6 +204,22 @@ export const providers = sqliteTable(
     httpOptionsEnc: text("http_options_enc"),
     // 负载均衡权重：多 provider 供同一模型时按 weight 比例分配（槽位法），默认 1 均分
     weight: integer("weight").notNull().default(1),
+    // 思考模式（R2，09-01-reasoning-effort-mapping）：NULL ≡ auto（自适应线优先）；
+    // 'adaptive' 强制自适应线（thinking:{type:"adaptive"}+output_config:{effort}）；
+    // 'budget' 旧模型线（thinking:{type:"enabled",budget_tokens}，仅服务 R1 逐字透传；
+    //   reasoning_effort 在此模式丢弃 + warn）；'off' 保持现状丢弃。
+    // H3：NULL ≡ 不映射（零变更契约）——未配置时不注入 thinking/删参数（此前 NULL≡auto
+    // 把未配置静默升格为强制 adaptive 线）；合法值由 providers 读写 zod enum（H6）约束。
+    thinkingMode: text("thinking_mode"),
+    // reasoning 输入项回传（Workstream B，09-01-codex-responses-lite-full）：false（默认）→
+    // openai 适配器剥离 assistant.reasoning_content（上游零变化）；true → 保留（deepseek
+    // 思考模式上游要求回传）。仅 openai 面生效；anthropic 适配器天然忽略。
+    reasoningRoundtrip: integer("reasoning_roundtrip", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    // 上游超时（毫秒，09-01-stg-glm-ccswitch-fix）：NULL ≡ 默认 60s（DEFAULT_UPSTREAM_TIMEOUT_MS）。
+    // 长生成模型（如 b.ai glm-5.3-flash）慢生成易撞默认超时 → 按 provider 调大。
+    upstreamTimeoutMs: integer("upstream_timeout_ms"),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
@@ -309,6 +325,9 @@ export const models = sqliteTable(
     inputPriceCached: real("input_price_cached").notNull(),
     outputPriceShort: real("output_price_short").notNull(),
     outputPriceLong: real("output_price_long").notNull(),
+    // 模型级输出上限（tokens，09-01-stg-glm-ccswitch-fix）：NULL ≡ 不限制。
+    // 请求 max_tokens 超过上限时 proxy 层 clamp（防慢模型长生成撞上游超时）。
+    maxOutputTokens: integer("max_output_tokens"),
     ...timestamps,
   },
   (table) => [index("models_model_idx").on(table.model)],

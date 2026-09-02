@@ -4,7 +4,6 @@
 // （缺数据补 0），label 直接取键的本地部分（键本身已是偏移后本地时间）。
 import type { UsageAggregate, UsageRange } from "./types";
 
-const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
 
 /** 浏览器时区偏移分钟（UTC+8 → +480；模块加载时快照一次，与后端 tzOffsetMin 同口径）。 */
@@ -12,41 +11,56 @@ export function getTzOffsetMin(): number {
   return -new Date().getTimezoneOffset();
 }
 
-/** 本地日 0:00 的 UTC 时刻（与后端 resolveRangeWindow 同公式）。 */
-function localTodayStartUtc(nowMs: number, tzOffsetMin: number): number {
-  const offsetMs = tzOffsetMin * 60_000;
-  return Math.floor((nowMs + offsetMs) / DAY_MS) * DAY_MS - offsetMs;
-}
-
 interface RangeShape {
-  startOffsetDays: number;
+  /** 窗口起点距今天的天数（today=0 / yesterday=1 / last14=13 / last30=29）。 */
+  daysAgo: number;
   count: number;
   granularity: "hour" | "day";
 }
 
 const RANGE_SHAPES: Record<UsageRange, RangeShape> = {
-  today: { startOffsetDays: 0, count: 24, granularity: "hour" },
-  yesterday: { startOffsetDays: -1, count: 24, granularity: "hour" },
-  last14: { startOffsetDays: -13, count: 14, granularity: "day" },
-  last30: { startOffsetDays: -29, count: 30, granularity: "day" },
+  today: { daysAgo: 0, count: 24, granularity: "hour" },
+  yesterday: { daysAgo: 1, count: 24, granularity: "hour" },
+  last14: { daysAgo: 13, count: 14, granularity: "day" },
+  last30: { daysAgo: 29, count: 30, granularity: "day" },
 };
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
+/** N 个本地日前（今天=0）的本地日 0:00 的 UTC 时刻。
+ * 本地日减法而非固定 24h 倍数：DST 切换日（23/25 小时）下仍对齐本地日界，
+ * 与后端 resolveRangeWindow 同公式（跨端窗口必须重合）。 */
+function dayStartUtcDaysAgo(nowMs: number, tzOffsetMin: number, daysAgo: number): number {
+  const offsetMs = tzOffsetMin * 60_000;
+  const local = new Date(nowMs + offsetMs);
+  return (
+    Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - daysAgo) - offsetMs
+  );
+}
+
+/** 本地日（startMs 所在日）+ i 天后的本地日 0:00 的 UTC 时刻（day 桶推进，DST 鲁棒）。 */
+function dayStartUtcPlusDays(startMs: number, tzOffsetMin: number, i: number): number {
+  const offsetMs = tzOffsetMin * 60_000;
+  const local = new Date(startMs + offsetMs);
+  return (
+    Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + i) - offsetMs
+  );
+}
+
 /** 窗口内第 i 个桶的键（本地时间以 UTC 字段表示，与后端 strftime 偏移输出一致）。
- * 桶起点已是本地对齐的 UTC 时刻，取字段前需再加偏移：否则 +8 时区下 day 桶会落到前一天、
- * hour 桶会偏移 -8 小时。 */
+ * hour 桶：本地对齐的 UTC 时刻 + 固定 1h 步进（DST 切换日的 23/25h 边界偏 1h，接受）；
+ * day 桶：本地日 + i 天（DST 鲁棒，与后端同公式）。 */
 function bucketKey(
   startMs: number,
   i: number,
   granularity: "hour" | "day",
   tzOffsetMin: number,
 ): string {
-  const ms = startMs + i * (granularity === "hour" ? HOUR_MS : DAY_MS) + tzOffsetMin * 60_000;
   if (granularity === "hour") {
+    const ms = startMs + i * HOUR_MS + tzOffsetMin * 60_000;
     return `${new Date(ms).toISOString().slice(0, 13)}:00:00Z`;
   }
-  const d = new Date(ms);
+  const d = new Date(dayStartUtcPlusDays(startMs, tzOffsetMin, i));
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
@@ -68,16 +82,18 @@ export const RANGE_OPTIONS: Array<{ value: UsageRange; label: string; title: str
 
 /**
  * 快捷维度系列：固定桶数（24/24/14/30），缺数据补 0。
- * 时间参数快照（nowMs/tzOffsetMin）需与发起查询时一致，保证桶边界与后端窗口重合。
+ * nowMs 必传：必须与发起查询时同源快照（组件 state），否则页面跨本地午夜后
+ * useMemo 重算会取新 Date.now() → 桶窗口整体偏移一天，与后端窗口错位。
+ * 调用方在 range 切换/筛选应用时刷新快照（usage.tsx switchRange/applyFilters）。
  */
 export function buildRangeSeries(
   aggregates: UsageAggregate[],
   range: UsageRange,
   tzOffsetMin: number,
-  nowMs = Date.now(),
+  nowMs: number,
 ): { label: string; value: number }[] {
   const shape = RANGE_SHAPES[range];
-  const startMs = localTodayStartUtc(nowMs, tzOffsetMin) + shape.startOffsetDays * DAY_MS;
+  const startMs = dayStartUtcDaysAgo(nowMs, tzOffsetMin, shape.daysAgo);
   const byKey = new Map<string, number>();
   for (const agg of aggregates) {
     if (agg.group !== null) {

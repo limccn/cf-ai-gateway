@@ -13,11 +13,8 @@
 //   - `node scripts/mock-upstream.mjs` 已启动（8788）
 //   - `npm run dev` 已启动（http://localhost:5173，可 BASE_URL 覆盖）
 // 用法：node scripts/verify-m4.mjs
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { createHarness, createD1, parseSse, poll, sleep } from "./lib/e2e-utils.mjs";
 
-const BASE = process.env.BASE_URL ?? "http://localhost:5173";
-const DB_NAME = "cf-ai-gateway-db";
 const ADMIN_EMAIL = "admin@example.com";
 const MEMBER_EMAIL = "member@example.com";
 const PASSWORD = "testpass123";
@@ -44,151 +41,11 @@ const OUTPUT_PRICE_SHORT = 0.6;
 const OUTPUT_PRICE_LONG = 0.6;
 const CHAT_COST = (10 * INPUT_PRICE_SHORT + 5 * OUTPUT_PRICE_SHORT) / 1_000_000;
 
-let passed = 0;
-let failed = 0;
-const lastFailures = [];
-
-function report(name, ok, detail) {
-  if (ok) {
-    passed += 1;
-    console.log(`  PASS  ${name}`);
-  } else {
-    failed += 1;
-    lastFailures.push(name);
-    console.log(`  FAIL  ${name}${detail ? `  <- ${detail}` : ""}`);
-  }
-}
-
-// Windows 下 spawnSync 无法直接解析 npx.cmd 等 shim，改用 node 直跑 wrangler 的 JS 入口
-const WRANGLER_JS = fileURLToPath(
-  new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url),
-);
-
-/** 写/清理 SQL（无需返回）。 */
-function runSql(sql) {
-  execFileSync(
-    process.execPath,
-    [WRANGLER_JS, "d1", "execute", DB_NAME, "--local", "--command", sql],
-    { stdio: "pipe", encoding: "utf8" },
-  );
-}
-
-/** 读 SQL（--json），返回 results 行数组。 */
-function query(sql) {
-  const out = execFileSync(
-    process.execPath,
-    [WRANGLER_JS, "d1", "execute", DB_NAME, "--local", "--command", sql, "--json"],
-    { stdio: "pipe", encoding: "utf8" },
-  );
-  const parsed = JSON.parse(out);
-  return parsed[0]?.results ?? [];
-}
-
-async function api(path, { method = "GET", headers = {}, body, cookie } = {}) {
-  const finalHeaders = { ...headers };
-  if (cookie) {
-    finalHeaders.Cookie = cookie;
-  }
-  if (body !== undefined) {
-    finalHeaders["Content-Type"] = "application/json";
-  }
-  // 连接级偶发错误（undici keep-alive 复用竞态 ECONNRESET）重试一次
-  let res;
-  try {
-    res = await fetch(BASE + path, {
-      method,
-      headers: finalHeaders,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  } catch (error) {
-    console.log(`  [retry] ${method} ${path} failed (${error.cause?.code ?? error.message}), retrying...`);
-    await sleep(500);
-    res = await fetch(BASE + path, {
-      method,
-      headers: finalHeaders,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  }
-  const text = await res.text();
-  let json = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    // 非 JSON（SSE 等）
-  }
-  let cookieOut = null;
-  const setCookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
-  if (setCookies.length > 0) {
-    cookieOut = setCookies
-      .map((c) => c.split(";")[0])
-      .filter((c) => c.includes("="))
-      .join("; ");
-  }
-  return { status: res.status, json, text, cookie: cookieOut };
-}
-
-function parseSse(text) {
-  const events = [];
-  for (const line of text.split("\n")) {
-    if (line.startsWith("data:")) {
-      const data = line.slice(5).trim();
-      if (data === "[DONE]") {
-        events.push({ done: true });
-      } else {
-        try {
-          events.push({ data: JSON.parse(data) });
-        } catch {
-          events.push({ raw: data });
-        }
-      }
-    }
-  }
-  return events;
-}
-
-// Better Auth 校验 Origin（CSRF 防护）：API 调用需带与 baseURL 同源的 Origin 头
-const ORIGIN = new URL(BASE).origin;
-
-async function signup(email, inviteCode) {
-  return api("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { Origin: ORIGIN },
-    body: { email, password: PASSWORD, name: email.split("@")[0], inviteCode },
-  });
-}
-
-async function signin(email) {
-  return api("/api/auth/sign-in/email", {
-    method: "POST",
-    headers: { Origin: ORIGIN },
-    body: { email, password: PASSWORD },
-  });
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * 轮询 D1 直到 fn() 返回真值或超时（延迟计费断言用：成功路径扣费由队列消费者异步落定，
- * 响应已先返回；本地 dev 队列投递+消费在毫秒~秒级，轮询 15s 覆盖冷启动队列）。
- */
-async function poll(fn, timeoutMs = 15000, intervalMs = 250) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = fn();
-    if (value) {
-      return value;
-    }
-    if (Date.now() > deadline) {
-      return null;
-    }
-    await sleep(intervalMs);
-  }
-}
+const { api, report, summary, signup, signin, base } = createHarness({ label: "M4" });
+const { run: runSql, query } = createD1();
 
 async function main() {
-  console.log(`\n=== M4 verify @ ${BASE} ===`);
+  console.log(`\n=== M4 verify @ ${base} ===`);
 
   // ---------- 0. 准备本地 D1（幂等可重跑） ----------
   console.log("\n[setup] prepare local D1");
@@ -218,15 +75,15 @@ async function main() {
 
   // ---------- 1. 注册 + 登录 ----------
   console.log("\n[1] auth (email/password + invite)");
-  const signupAdmin = await signup(ADMIN_EMAIL, INVITE_ADMIN);
+  const signupAdmin = await signup(ADMIN_EMAIL, PASSWORD, INVITE_ADMIN);
   report("admin signup", signupAdmin.status === 200 || signupAdmin.status === 201, `status=${signupAdmin.status}`);
   runSql(`UPDATE users SET role='admin', balance=0 WHERE email='${ADMIN_EMAIL}';`);
-  const signinAdmin = await signin(ADMIN_EMAIL);
+  const signinAdmin = await signin(ADMIN_EMAIL, PASSWORD);
   report("admin signin", signinAdmin.status === 200 && signinAdmin.cookie !== null, `status=${signinAdmin.status}`);
   const adminCookie = signinAdmin.cookie;
-  const signupMember = await signup(MEMBER_EMAIL, INVITE_MEMBER);
+  const signupMember = await signup(MEMBER_EMAIL, PASSWORD, INVITE_MEMBER);
   report("member signup", signupMember.status === 200 || signupMember.status === 201, `status=${signupMember.status}`);
-  const signinMember = await signin(MEMBER_EMAIL);
+  const signinMember = await signin(MEMBER_EMAIL, PASSWORD);
   const memberCookie = signinMember.cookie;
 
   const authApi = { cookie: adminCookie };
@@ -426,11 +283,7 @@ async function main() {
   report("3 calls with limit 2 → [200,200,429]", statuses[0] === 200 && statuses[1] === 200 && statuses[2] === 429, statuses.join(","));
 
   // ---------- 汇总 ----------
-  console.log(`\n=== RESULT: ${passed} passed, ${failed} failed ===`);
-  if (failed > 0) {
-    console.log("Failed:", lastFailures.join(" | "));
-    process.exitCode = 1;
-  }
+  summary();
 }
 
 main().catch((error) => {

@@ -14,8 +14,14 @@ import {
 } from "../providers/sse-pipe";
 
 export interface StreamUsageDetector {
-  /** 逐事件喂入；返回非 null 即检测到用量（首次非 null 生效）。 */
+  /** 逐事件喂入；返回非 null 即检测到完整用量（持续取最新——多块流 output_tokens 为累计值）。 */
   feed(event: SseEvent): TokenUsage | null;
+  /**
+   * 取消路径快照（U2）：流未完成（无完整 usage 事件）时按**已观测部分**返回——
+   * anthropic 路径 message_start 已知 input_tokens → 至少收 prompt 成本。
+   * 无任何观测返回 null。
+   */
+  snapshot?(): TokenUsage | null;
 }
 
 /** OpenAI 形态：事件 data 携带顶层 `usage`（透传路径尾包 / anthropic 合成 chunk；含 cached_tokens）。 */
@@ -46,12 +52,18 @@ export function createAnthropicUsageDetector(): StreamUsageDetector {
             if (typeof u["input_tokens"] === "number") {
               promptTokens = u["input_tokens"];
             }
+            // H8：cache_read 与 cache_creation 都按缓存价计（上游同价），求和
             if (typeof u["cache_read_input_tokens"] === "number") {
               cachedTokens = u["cache_read_input_tokens"];
+            }
+            if (typeof u["cache_creation_input_tokens"] === "number") {
+              cachedTokens += u["cache_creation_input_tokens"];
             }
           }
         }
       } else if (body["type"] === "message_delta") {
+        // U1：output_tokens 是**累计值**（多块流——thinking+text/工具调用——每块停止都发一个
+        // delta）；只取第一个会把计费定在首个块（如仅 thinking 部分）→ 持续取最新。
         const usage = body["usage"];
         if (usage !== null && typeof usage === "object") {
           const output = (usage as Record<string, unknown>)["output_tokens"];
@@ -69,6 +81,17 @@ export function createAnthropicUsageDetector(): StreamUsageDetector {
       }
       return null;
     },
+    // U2：cancel 时按已观测部分结算（message_start 已知 input_tokens → 至少收 prompt 成本）
+    snapshot(): TokenUsage | null {
+      if (promptTokens === null) {
+        return null;
+      }
+      return {
+        promptTokens,
+        completionTokens: completionTokens ?? 0,
+        ...(cachedTokens > 0 ? { cachedTokens } : {}),
+      };
+    },
   };
 }
 
@@ -77,6 +100,8 @@ export interface SettlementOptions {
   detector?: StreamUsageDetector;
   /** 事件消费转换（协议转换路径；缺省 = 原始字节透传）。 */
   transform?: SseFrameTransform;
+  /** 流空闲超时（ms，U7）：透传 SsePipe（每 chunk 重置；缺省 = 无超时）。 */
+  idleTimeoutMs?: number;
 }
 
 /**
@@ -100,7 +125,9 @@ export function wrapStreamWithSettlement(
     }
     settled = true;
     try {
-      await settle(detected);
+      // U2：无完整 usage 事件（cancel/中断）→ 检测器快照（已观测部分）兜底；
+      // 仍无观测 → null（免计，消费者按价格判定）
+      await settle(detected ?? detector.snapshot?.() ?? null);
     } catch (error) {
       if (error instanceof Error) {
         logger.error("stream_settle_failed", { error: error.message });
@@ -112,11 +139,11 @@ export function wrapStreamWithSettlement(
 
   return pipeSseStream(input, {
     onEvent: (event) => {
-      if (detected === null) {
-        detected = detector.feed(event);
-      }
+      // U1：持续取最新检测结果（多块流 output_tokens 为累计值，首个 delta 是部分块）
+      detected = detector.feed(event) ?? detected;
     },
     transform: options.transform,
+    idleTimeoutMs: options.idleTimeoutMs,
     onTerminate: async (kind, detail) => {
       await runSettle();
       if (kind === "cancel") {

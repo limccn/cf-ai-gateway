@@ -11,6 +11,7 @@ export function toModelResponse(model: Model): ModelResponse {
     inputPriceCached: model.inputPriceCached,
     outputPriceShort: model.outputPriceShort,
     outputPriceLong: model.outputPriceLong,
+    maxOutputTokens: model.maxOutputTokens ?? null,
     createdAt: model.createdAt.toISOString(),
     updatedAt: model.updatedAt.toISOString(),
   };

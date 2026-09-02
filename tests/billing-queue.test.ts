@@ -1,19 +1,20 @@
-// 延迟计费消费者单测（08-31-perf-v2）：consumeBillingBatch 批内语义。
+// 延迟计费消费者单测（08-31-perf-v2 + 09-01-review B1）：consumeBillingBatch 批内语义。
 // 请求路径成功时只发 BILLING_QUEUE 事件（0 同步 D1 写），本文件直接驱动消费者，
-// 验证：批内落账（明细带 requestId + 条件扣费 + usage 流水 + 聚合事件）、
-// 幂等（request_id 唯一约束重复投递跳过）、透支尽力扣费（余额不足不欠款）、
-// 免计（价格缺失 cost=0 只记明细）、缓存分层定价（cachedTokens 按缓存价）、
-// 结算时刻价格（事件发出后调价按新价扣费）、非法消息跳过不中断整批。
+// 验证：批内落账（明细带 requestId + 债务扣费 + usage 流水 + usage_daily 同批聚合 H9）、
+// 幂等（request_id 唯一约束重复投递跳过 → 不双扣不双计）、
+// 债务透支（D2：余额可负=债务，流水/聚合照记）、免计（价格缺失 cost=0 只记明细+零额聚合）、
+// 缓存分层定价（cachedTokens 按缓存价）、结算时刻价格（事件发出后调价按新价扣费）、
+// 单条失败容错（U4：批内一条抛错不拖垮其余）、非法消息跳过不中断整批。
 //
 // 隔离约定：每个用例用独立模型名（价格表/明细全局共享，同名模型会跨用例泄漏价格）。
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { createDb } from "../src/db";
-import { requestLogs } from "../src/db/schema";
+import { requestLogs, usageDaily } from "../src/db/schema";
 import { calcCost } from "../src/lib/billing";
 import { consumeBillingBatch, type BillingEvent } from "../src/lib/billing-queue";
-import { sendUsageEvent } from "../src/lib/usage-aggregation";
+import { toDateKey } from "../src/lib/usage-aggregation";
 import {
   applyMigrations,
   clearKv,
@@ -26,12 +27,6 @@ import {
   setupProviderWithModel,
   setupUser,
 } from "./helpers";
-
-// 拦截消费者发出的聚合事件（不真正投递 USAGE_QUEUE；断言事件载荷即可）
-vi.mock("../src/lib/usage-aggregation", async (importOriginal) => {
-  const mod = await importOriginal<typeof import("../src/lib/usage-aggregation")>();
-  return { ...mod, sendUsageEvent: vi.fn() };
-});
 
 /** 测试价格（与 proxy-pipeline.test.ts 同口径）：输入 0.15/M、输出 0.6/M、缓存输入 0.0375/M。 */
 const INPUT_PRICE_SHORT = 0.15;
@@ -74,7 +69,7 @@ function event(
   requestId: string,
   userId: number,
   keyId: number,
-  providerId: number,
+  providerId: number | null,
   model: string,
   promptTokens: number,
   completionTokens: number,
@@ -101,12 +96,15 @@ beforeAll(async () => {
   await clearKv();
 });
 
-afterEach(() => {
-  vi.mocked(sendUsageEvent).mockClear();
-});
+/** usage_daily 行断言（H9 后聚合与扣费同批原子写入，直接查表替代原 USAGE_QUEUE 事件断言）。 */
+async function dailyRow(model: string): Promise<typeof usageDaily.$inferSelect | undefined> {
+  const db = createDb(env);
+  const rows = await db.select().from(usageDaily).where(eq(usageDaily.model, model)).limit(1);
+  return rows[0];
+}
 
 describe("延迟计费消费者（consumeBillingBatch）", () => {
-  it("批内落账：明细(带 requestId) + 条件扣费 + usage 流水 + 聚合事件", async () => {
+  it("批内落账：明细(带 requestId) + 债务扣费 + usage 流水 + usage_daily 同批聚合", async () => {
     const model = "bq-ok-model";
     const { userId, keyId, providerId } = await prepare(model, 10);
     await registerPrice(model);
@@ -127,19 +125,18 @@ describe("延迟计费消费者（consumeBillingBatch）", () => {
     });
     expect(log).toEqual({ requestId: e.requestId, cost, model });
 
-    // 聚合事件从消费者发出（cost/日期口径 = 结算时刻 ts）
-    expect(sendUsageEvent).toHaveBeenCalledTimes(1);
-    expect(sendUsageEvent).toHaveBeenCalledWith(
-      env.USAGE_QUEUE,
+    // H9：聚合不再发 USAGE_QUEUE 事件——usage_daily 与扣费在同一 D1 batch 原子写入
+    const daily = await dailyRow(model);
+    expect(daily).toEqual(
       expect.objectContaining({
         userId,
         keyId,
         model,
-        promptTokens: 1000,
-        completionTokens: 500,
+        date: toDateKey(e.ts),
+        requests: 1,
+        tokensIn: 1000,
+        tokensOut: 500,
         cost,
-        status: "success",
-        ts: e.ts,
       }),
     );
   });
@@ -163,27 +160,40 @@ describe("延迟计费消费者（consumeBillingBatch）", () => {
       .from(requestLogs)
       .where(eq(requestLogs.requestId, e.requestId));
     expect(rows).toHaveLength(1);
-    expect(sendUsageEvent).toHaveBeenCalledTimes(1); // 重复消息不再发聚合事件
+    // H9：重复投递不双计 usage_daily（request_logs 冲突跳过 → 聚合批不执行）
+    const daily = await dailyRow(model);
+    expect(daily).toEqual(
+      expect.objectContaining({ requests: 1, tokensIn: 100, tokensOut: 50 }),
+    );
   });
 
-  it("透支：余额不足 → 尽力扣费失败：明细照记、余额不变（不欠款）、无 usage 流水", async () => {
+  it("债务透支（D2）：余额不足 → 无条件扣费（余额可为负=债务），流水与聚合照记", async () => {
     const model = "bq-poor-model";
     const { userId, keyId, providerId } = await prepare(model, 0.5);
     await registerPrice(model);
 
-    // 100 万输入 + 100 万输出 → cost = 0.15 + 0.6 = 0.75 > 余额 0.5
+    // 100 万输入 + 100 万输出 → long 档（>128k 阈值）cost = 0.2 + 0.9 = 1.1 > 余额 0.5
     const e = event(crypto.randomUUID(), userId, keyId, providerId, model, 1_000_000, 1_000_000);
     await consumeBillingBatch(makeBillingBatch([e]), env);
 
-    // 明细照记（cost 全价），余额不足 → 不扣款不欠款、无流水
-    const cost = costOf(1_000_000, 1_000_000);
-    expect(cost).toBeCloseTo(0.75, 12);
-    expect(cost).toBeGreaterThan(0.5);
-    expect(await getBalance(userId)).toBe(0.5);
-    expect(await countTxByType(userId, "usage")).toBe(0);
+    // 明细照记（cost 全价）；余额变负（0.5 - 1.1 = -0.6）、流水照记、
+    // 聚合照记（cost 与明细口径一致，报表 cost=实收）
+    const cost = calcCost(
+      { promptTokens: 1_000_000, completionTokens: 1_000_000 },
+      {
+        inputPriceShort: INPUT_PRICE_SHORT,
+        inputPriceLong: INPUT_PRICE_LONG,
+        inputPriceCached: INPUT_PRICE_CACHED,
+        outputPriceShort: OUTPUT_PRICE_SHORT,
+        outputPriceLong: OUTPUT_PRICE_LONG,
+      },
+    );
+    expect(cost).toBeCloseTo(1.1, 12);
+    expect(await getBalance(userId)).toBeCloseTo(0.5 - cost, 10);
+    expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");
-    // 聚合事件仍发出（按实际 cost 口径，报表与明细一致）
-    expect(sendUsageEvent).toHaveBeenCalledTimes(1);
+    const daily = await dailyRow(model);
+    expect(daily).toEqual(expect.objectContaining({ cost, requests: 1 }));
   });
 
   it("免计：价格缺失 → cost=0 只记明细，不扣费、无流水", async () => {
@@ -197,10 +207,9 @@ describe("延迟计费消费者（consumeBillingBatch）", () => {
     expect(await getBalance(userId)).toBe(10);
     expect(await countTxByType(userId, "usage")).toBe(0);
     expect(await latestLogStatus(userId)).toBe("success");
-    expect(sendUsageEvent).toHaveBeenCalledWith(
-      env.USAGE_QUEUE,
-      expect.objectContaining({ cost: 0, status: "success" }),
-    );
+    // cost=0 也聚合（零额用量可见，报表口径不变）
+    const daily = await dailyRow(model);
+    expect(daily).toEqual(expect.objectContaining({ cost: 0, requests: 1 }));
   });
 
   it("缓存分层定价：cachedTokens 按缓存价计费（calcCost 口径）", async () => {
@@ -274,5 +283,24 @@ describe("延迟计费消费者（consumeBillingBatch）", () => {
     expect(await getBalance(userId)).toBeCloseTo(10 - cost, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");
+  });
+
+  it("单条失败容错（U4）：批内一条抛错（用户不存在 → 外键违约）不中断其余结算", async () => {
+    const model = "bq-failover-model";
+    const { userId, keyId, providerId } = await prepare(model, 10);
+    await registerPrice(model);
+
+    const valid = event(crypto.randomUUID(), userId, keyId, providerId, model, 100, 50);
+    // 坏事件：userId 不存在 → users 0 行 + balance_tx 外键违约 → processBillingEvent 抛错
+    const broken = event(crypto.randomUUID(), 999_999_999, 999_999_999, null, model, 100, 50);
+    await consumeBillingBatch(makeBillingBatch([valid, broken]), env);
+
+    // valid 正常结算（余额扣费 + 流水 + 聚合）；broken 被逐条 catch（不整批重投/进 DLQ）
+    const cost = costOf(100, 50);
+    expect(await getBalance(userId)).toBeCloseTo(10 - cost, 10);
+    expect(await countTxByType(userId, "usage")).toBe(1);
+    expect(await latestLogStatus(userId)).toBe("success");
+    const daily = await dailyRow(model);
+    expect(daily).toEqual(expect.objectContaining({ requests: 1, cost }));
   });
 });

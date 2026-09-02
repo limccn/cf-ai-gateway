@@ -5,6 +5,8 @@
 // - transformStreamToResponses：上游 OpenAI chat SSE → Responses SSE（OR §1.3/§2.2 / design §3.4）
 // 合成 id 统一生成器：resp_（response）/ msg_（message item）/ call_（function_call item）（D8）。
 // 拒绝（400）：previous_response_id / conversation（D7：无状态会话，客户端须每轮自带完整 input items）。
+// additional_tools（Codex Responses Lite ≥0.149.0 / GPT-5.6 系）：工具 hoist 并入请求级 tools（Bifrost/headroom 同语义），
+// carrier item 不产生消息。
 // 降级（丢弃 + 告警日志）：store / include / metadata / 内置工具 / 非 function tool_choice 等（OR §4 风险 1）。
 import type { Logger } from "../lib/logger";
 import { logger as moduleLogger } from "../lib/logger";
@@ -32,9 +34,48 @@ function newFunctionCallId(): string {
   return `call_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
+/** 合成 reasoning item id（R4）：rs_ 前缀（贴近 OpenAI Responses 官方 rs_ 惯例）。 */
+function newReasoningItemId(): string {
+  return `rs_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
 /** 丢弃字段告警（structured logger，snake_case；不落任何 token 值）。 */
 function logDropped(logger: Logger, field: string): void {
   logger.warn("responses_field_dropped", { field });
+}
+
+/**
+ * reasoning item 回传状态（Codex Responses Lite / GPT-5.6 系多轮历史重放）：
+ * 提取的推理文本只挂给下一个 assistant 消息（OpenAI Responses 序列
+ * [reasoning, message/function_call] 语义对齐）；下一条非 assistant → 丢弃 + 告警。
+ */
+interface PendingReasoning {
+  /** 待挂载的推理文本（null = 无 pending）。 */
+  text: string | null;
+}
+
+/**
+ * include 白名单（R4）：仅放行 reasoning 可见性项，其余逐项丢弃 + 告警。
+ * 白名单命中 → 返回 true（调用方据此设内部保留键 / 出站合成 reasoning 事件）。
+ */
+export const INCLUDE_REASONING_ALLOWED = new Set([
+  "reasoning.summary_text",
+  "reasoning.raw",
+]);
+
+export function parseIncludeReasoning(body: JsonObject, logger: Logger): boolean {
+  const includes = Array.isArray(body["include"])
+    ? body["include"].filter((x): x is string => typeof x === "string")
+    : [];
+  let includeReasoning = false;
+  for (const item of includes) {
+    if (INCLUDE_REASONING_ALLOWED.has(item)) {
+      includeReasoning = true;
+    } else {
+      logDropped(logger, `include.${item}`);
+    }
+  }
+  return includeReasoning;
 }
 
 /** chat 侧消息 role（developer 归并为 system；OR：Responses developer 即 system 级指令）。 */
@@ -66,6 +107,11 @@ export function buildInternalFromResponses(
   }
 
   const messages: JsonObject[] = [];
+  // additional_tools items（Codex Responses Lite）携带的工具原始定义（hoist 到请求级 tools）
+  const extraTools: unknown[] = [];
+  // reasoning item 回传（Codex Responses Lite 多轮历史重放）：pendingReasoning 只挂给
+  // 下一个 assistant 消息；跨 instructions/input 两次 pushItems 共享同一状态
+  const pendingReasoning: PendingReasoning = { text: null };
   // instructions（string | items 数组）→ 顶部 system 消息（OR §2.1：与 input 组合为上下文）
   const instructions = body["instructions"];
   if (typeof instructions === "string") {
@@ -73,7 +119,7 @@ export function buildInternalFromResponses(
       messages.push({ role: "system", content: instructions });
     }
   } else if (Array.isArray(instructions)) {
-    pushItems(messages, instructions, logger);
+    pushItems(messages, instructions, extraTools, pendingReasoning, logger);
   }
 
   // input（string 简写 | items 数组）→ messages
@@ -83,10 +129,12 @@ export function buildInternalFromResponses(
       messages.push({ role: "user", content: input });
     }
   } else if (Array.isArray(input)) {
-    pushItems(messages, input, logger);
+    pushItems(messages, input, extraTools, pendingReasoning, logger);
   } else {
     throw new AdapterError("input must be a string or an array of input items");
   }
+  // 序列结束仍挂着的 pending（input 尾部 reasoning 后无 assistant 消息）→ 丢弃 + 告警
+  dropPendingReasoning(pendingReasoning, logger);
 
   const internal: JsonObject = { model: body["model"], messages };
   // max_output_tokens → max_completion_tokens（1:1；两者口径一致，都含 reasoning tokens，OR §2.1）
@@ -107,7 +155,7 @@ export function buildInternalFromResponses(
   if (body["parallel_tool_calls"] === true || body["parallel_tool_calls"] === false) {
     internal["parallel_tool_calls"] = body["parallel_tool_calls"];
   }
-  const tools = buildTools(body["tools"], logger);
+  const tools = buildTools(mergeTools(body["tools"], extraTools), logger);
   if (tools.length > 0) {
     internal["tools"] = tools;
   }
@@ -128,11 +176,15 @@ export function buildInternalFromResponses(
   if (body["stream"] === true) {
     internal["stream"] = true;
   }
+  // R4：include 白名单（reasoning.summary_text / reasoning.raw）→ 内部保留键信号
+  // （仅本地消费；openai 适配器剥离 `_gateway_` 前缀字段，不进上游）
+  if (parseIncludeReasoning(body, logger)) {
+    internal["_gateway_resp_include_reasoning"] = true;
+  }
 
   // 丢弃 + 告警日志（OR §4 风险 1：OpenAI 平台专属参数，网关不承担服务端能力）
   for (const field of [
     "store",
-    "include",
     "metadata",
     "prompt_cache_key",
     "prompt_cache_options",
@@ -146,6 +198,9 @@ export function buildInternalFromResponses(
     "safety_identifier",
     "user",
     "stream_options",
+    // client_metadata（Codex 恒发 x-codex-turn-metadata 对应的顶层字段）：纯 telemetry，
+    // 无功能语义 → 丢弃 + 告警（Codex Responses Lite 全量适配）
+    "client_metadata",
   ]) {
     if (body[field] !== undefined) {
       logDropped(logger, field);
@@ -155,10 +210,14 @@ export function buildInternalFromResponses(
   return internal;
 }
 
-/** input items 数组 → messages（逐条防御性转换；不识别 item 类型 → 400）。 */
+/** input items 数组 → messages（逐条防御性转换；不识别 item 类型 → 400）。
+ *  extraTools：additional_tools items（Codex Responses Lite）携带的工具原始定义收集处。
+ *  pendingReasoning：reasoning item 提取文本的挂载状态（只挂给下一个 assistant 消息）。 */
 function pushItems(
   messages: JsonObject[],
   items: unknown[],
+  extraTools: unknown[],
+  pendingReasoning: PendingReasoning,
   logger: Logger,
 ): void {
   for (const rawItem of items) {
@@ -168,14 +227,28 @@ function pushItems(
     const item = rawItem as JsonObject;
     const type = item["type"];
     if (type === undefined || type === "message") {
-      pushMessageItem(messages, item, logger);
+      pushMessageItem(messages, item, pendingReasoning, logger);
     } else if (type === "function_call") {
-      pushFunctionCallItem(messages, item);
+      pushFunctionCallItem(messages, item, pendingReasoning);
     } else if (type === "function_call_output") {
+      // 非 assistant item → 未消费的 pending 丢弃（reasoning 只挂 assistant 消息）
+      dropPendingReasoning(pendingReasoning, logger);
       pushFunctionCallOutputItem(messages, item);
     } else if (type === "reasoning") {
-      // 推理项仅 OpenAI 自有，Chat 上游无对应物（OR §2.3 损失点 2）→ 丢弃 + 告警
-      logDropped(logger, "reasoning_item");
+      // 推理项（Codex 多轮历史全量重放）：提取文本挂 pendingReasoning，由下一条
+      // assistant 消息回传为 reasoning_content（thinking round-trip，Workstream B）；
+      // summary/raw 皆缺 → 丢弃 + 告警（降级，语义与现一致）
+      collectReasoningText(pendingReasoning, item, logger);
+    } else if (type === "additional_tools") {
+      // Codex Responses Lite（Codex ≥0.149.0 / GPT-5.6 系）：工具随 input[0] 承载、
+      // 顶层 tools 置 null → hoist 到请求级工具列表（同 Bifrost/headroom），carrier 不产生消息
+      dropPendingReasoning(pendingReasoning, logger);
+      collectAdditionalTools(extraTools, item, logger);
+    } else if (type === "tool_search_call" || type === "tool_search_output") {
+      // tool_search 工具被网关丢弃 → 上游不产 call → 正常无回放；防御性降级（不再 400）：
+      // 历史重放若带此类项，识别 + 丢弃 + 告警（理由记录：丢弃后发现工具丢失可接受，路径不可达）
+      dropPendingReasoning(pendingReasoning, logger);
+      logDropped(logger, `${type}_item`);
     } else {
       // file_search_call / web_search_call / computer_call / code_interpreter / MCP 等：无法映射 → 400
       throw new AdapterError(
@@ -185,10 +258,172 @@ function pushItems(
   }
 }
 
+/**
+ * additional_tools item → 提取 tools 原始定义供请求级 hoist（Codex Responses Lite）。
+ * 无 tools 数组 → 丢弃 + 告警（无工具可提升）。
+ *
+ * Functions 命名空间平面化：lite 契约把全部 function/freeform 工具包装进
+ * `{type:"namespace", name:"functions", tools:[...]}`（子工具保持真实平名，
+ * responses_lite.rs 断言 `{type:"function", name:"exec"}`）——不平面化则 hoist 后
+ * 上游 tools 为空（= Codex #31894 症状在网关复现）。仅 functions 命名空间提取；
+ * web / tool_search / collaboration 等命名空间保持原样 → buildTools 白名单丢弃 + 告警
+ * （Codex 客户端执行语义 / 加密多智能体，chat 上游无对应物，Azure 剥离实践）。
+ */
+function collectAdditionalTools(
+  extraTools: unknown[],
+  item: JsonObject,
+  logger: Logger,
+): void {
+  const rawTools = item["tools"];
+  if (Array.isArray(rawTools)) {
+    for (const tool of rawTools) {
+      if (isFunctionsNamespace(tool)) {
+        flattenFunctionsNamespace(extraTools, tool as JsonObject, logger);
+      } else {
+        extraTools.push(tool);
+      }
+    }
+  } else {
+    logDropped(logger, "additional_tools.tools");
+  }
+}
+
+/** `{type:"namespace", name:"functions"}` 判定（lite 契约的可调工具包装容器）。 */
+function isFunctionsNamespace(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object") {
+    return false;
+  }
+  const t = raw as JsonObject;
+  return t["type"] === "namespace" && t["name"] === "functions";
+}
+
+/**
+ * functions 命名空间 → 递归提取 `type:"function"` 叶子进 extraTools（平名直用，
+ * 不包装不回填；重名由 mergeTools 既有按名去重处理）。子 namespace 递归（防御性，
+ * lite 契约实际扁平）；其余类型（web/tool_search 等）→ 丢弃 + 告警。
+ */
+function flattenFunctionsNamespace(
+  extraTools: unknown[],
+  ns: JsonObject,
+  logger: Logger,
+): void {
+  const sub = ns["tools"];
+  if (!Array.isArray(sub)) {
+    logDropped(logger, "additional_tools.namespace.tools");
+    return;
+  }
+  let extracted = 0;
+  for (const leaf of sub) {
+    if (!leaf || typeof leaf !== "object") {
+      continue;
+    }
+    const l = leaf as JsonObject;
+    if (l["type"] === "function") {
+      extraTools.push(leaf);
+      extracted += 1;
+    } else if (l["type"] === "namespace") {
+      flattenFunctionsNamespace(extraTools, l, logger);
+    } else {
+      logDropped(
+        logger,
+        `additional_tools.namespace.${String(l["type"] ?? "unknown")}`,
+      );
+    }
+  }
+  if (extracted === 0) {
+    logDropped(logger, "additional_tools.namespace.functions_empty");
+  }
+}
+
+/**
+ * reasoning item → 提取推理文本挂 pending（summary 数组取首个非空 summary_text.text——
+ * 网关 R4 出站生成形态，Codex 原样回放；raw string 兜底）。皆缺 → 丢弃 + 告警。
+ */
+function collectReasoningText(
+  pending: PendingReasoning,
+  item: JsonObject,
+  logger: Logger,
+): void {
+  const summary = item["summary"];
+  if (Array.isArray(summary)) {
+    for (const s of summary) {
+      if (s && typeof s === "object") {
+        const block = s as JsonObject;
+        if (
+          block["type"] === "summary_text" &&
+          typeof block["text"] === "string" &&
+          block["text"].length > 0
+        ) {
+          pending.text = block["text"];
+          return;
+        }
+      }
+    }
+  }
+  const raw = item["raw"];
+  if (typeof raw === "string" && raw.length > 0) {
+    pending.text = raw;
+    return;
+  }
+  logDropped(logger, "reasoning_item (no summary/raw text)");
+}
+
+/** 未消费的 pending（下一条非 assistant 消息 / 序列结束）→ 丢弃 + 告警。 */
+function dropPendingReasoning(pending: PendingReasoning, logger: Logger): void {
+  if (pending.text !== null) {
+    logDropped(logger, "reasoning_item (no following assistant message)");
+    pending.text = null;
+  }
+}
+
+/** assistant 消息挂载点：pending 非空 → 附 reasoning_content 并清空（只挂一次）。 */
+function attachReasoningText(
+  msg: JsonObject,
+  pending: PendingReasoning,
+): void {
+  if (pending.text === null) {
+    return;
+  }
+  msg["reasoning_content"] = pending.text;
+  pending.text = null;
+}
+
+/**
+ * 顶层 tools 与 additional_tools items 携带的工具合并（按函数名去重，顶层优先）。
+ * Codex #31894 修复后存在顶层 + additional_tools 双写场景；去重防上游重复工具定义。
+ */
+function mergeTools(toolsRaw: unknown, extraTools: unknown[]): unknown[] {
+  const result: unknown[] = [];
+  const seen = new Set<string>();
+  const push = (raw: unknown): void => {
+    if (!raw || typeof raw !== "object") {
+      return;
+    }
+    const tool = raw as JsonObject;
+    if (tool["type"] === "function" && typeof tool["name"] === "string") {
+      if (seen.has(tool["name"])) {
+        return;
+      }
+      seen.add(tool["name"]);
+    }
+    result.push(raw);
+  };
+  if (Array.isArray(toolsRaw)) {
+    for (const tool of toolsRaw) {
+      push(tool);
+    }
+  }
+  for (const tool of extraTools) {
+    push(tool);
+  }
+  return result;
+}
+
 /** message item（role user/assistant/system/developer + content）→ 对应 role 消息。 */
 function pushMessageItem(
   messages: JsonObject[],
   item: JsonObject,
+  pendingReasoning: PendingReasoning,
   logger: Logger,
 ): void {
   const role = item["role"];
@@ -203,7 +438,9 @@ function pushMessageItem(
   const chatRole = toChatRole(role);
   const content = item["content"];
   if (typeof content === "string") {
-    messages.push({ role: chatRole, content });
+    const msg: JsonObject = { role: chatRole, content };
+    finalizeMessage(msg, chatRole, pendingReasoning, logger);
+    messages.push(msg);
     return;
   }
   if (Array.isArray(content)) {
@@ -235,17 +472,21 @@ function pushMessageItem(
       }
     }
     if (textParts.length === 0 && parts.length === 0) {
-      return; // 全丢弃 → 不产生消息
+      return; // 全丢弃 → 不产生消息（pending 保留：未消费，语义无漂移）
     }
     if (hasImage) {
       // 含图片 → parts 数组（text 块前置；与 anthropic 正向适配器内容块语义一致）
       if (textParts.length > 0) {
         parts.unshift(...textParts.map((text) => ({ type: "text", text })));
       }
-      messages.push({ role: chatRole, content: parts });
+      const msg: JsonObject = { role: chatRole, content: parts };
+      finalizeMessage(msg, chatRole, pendingReasoning, logger);
+      messages.push(msg);
     } else {
       // 纯文本：input_text 多块拼接为单条字符串（OR §2.1：Chat choices 无法表达多块）
-      messages.push({ role: chatRole, content: textParts.join("") });
+      const msg: JsonObject = { role: chatRole, content: textParts.join("") };
+      finalizeMessage(msg, chatRole, pendingReasoning, logger);
+      messages.push(msg);
     }
     return;
   }
@@ -253,6 +494,23 @@ function pushMessageItem(
     throw new AdapterError(
       "Message item content must be a string or an array of content blocks",
     );
+  }
+}
+
+/**
+ * 消息入队前的 reasoning 挂载/清理：assistant → 附 pending（只挂一次）；非 assistant
+ * （user/system/developer）→ pending 丢弃 + 告警（reasoning 序列后跟非 assistant 消息）。
+ */
+function finalizeMessage(
+  msg: JsonObject,
+  chatRole: string,
+  pendingReasoning: PendingReasoning,
+  logger: Logger,
+): void {
+  if (chatRole === "assistant") {
+    attachReasoningText(msg, pendingReasoning);
+  } else {
+    dropPendingReasoning(pendingReasoning, logger);
   }
 }
 
@@ -275,6 +533,7 @@ function inputImageToImageUrl(block: JsonObject, logger: Logger): unknown | null
 function pushFunctionCallItem(
   messages: JsonObject[],
   item: JsonObject,
+  pendingReasoning: PendingReasoning,
 ): void {
   const name = item["name"];
   if (typeof name !== "string" || name.length === 0) {
@@ -295,10 +554,14 @@ function pushFunctionCallItem(
     last["content"] === null &&
     Array.isArray(last["tool_calls"])
   ) {
+    // 合并进既有 assistant 消息：首个 function_call 已消费 pending（幂等 no-op）
+    attachReasoningText(last, pendingReasoning);
     (last["tool_calls"] as unknown[]).push(toolCall);
     return;
   }
-  messages.push({ role: "assistant", content: null, tool_calls: [toolCall] });
+  const msg: JsonObject = { role: "assistant", content: null, tool_calls: [toolCall] };
+  attachReasoningText(msg, pendingReasoning);
+  messages.push(msg);
 }
 
 /** function_call_output item → tool 消息（output 数组 → JSON.stringify，OR §2.1）。 */
@@ -532,8 +795,14 @@ export function toResponsesUsage(usage: JsonObject): JsonObject | null {
 /**
  * 内部/上游 OpenAI chat.completion 响应 → Responses response（OR §2.2 / design §3.3）。
  * 仅取首 choice；model 优先用入站内部模型名（D2；路由层从原始 body 提取后传入，缺失时回退上游 model）。
+ * includeReasoning（R4）：入站 include 命中白名单时，上游 message.reasoning_content →
+ * reasoning item（放 message 之前——上游 reasoning 先于 content 生成，贴近真实顺序）。
  */
-export function transformResponseToResponses(data: unknown, model = ""): unknown {
+export function transformResponseToResponses(
+  data: unknown,
+  model = "",
+  includeReasoning = false,
+): unknown {
   if (!data || typeof data !== "object") {
     return data;
   }
@@ -548,6 +817,23 @@ export function transformResponseToResponses(data: unknown, model = ""): unknown
   const finishReason = choice?.["finish_reason"];
   const status = mapToResponsesStatus(finishReason);
 
+  const output: JsonObject[] = [];
+  // R4：reasoning item（仅 include 请求 + 上游带 reasoning_content；summary_text 取原文，
+  // raw 与 summary_text 同内容——网关上游无 summary/raw 区分，取同一文本）
+  const reasoningText = m?.["reasoning_content"];
+  if (
+    includeReasoning &&
+    typeof reasoningText === "string" &&
+    reasoningText.length > 0
+  ) {
+    output.push({
+      type: "reasoning",
+      id: newReasoningItemId(),
+      summary: [{ type: "summary_text", text: reasoningText }],
+      status: "completed",
+    });
+  }
+
   // message item（恒定存在，content 数组恒定非空语义 —— D8：SDK 断言 content 数组结构）
   const content: JsonObject[] = [];
   const text = m?.["content"];
@@ -561,15 +847,13 @@ export function transformResponseToResponses(data: unknown, model = ""): unknown
   // item 级 status 与 response 级同步（OR §1.2：message item 可为 completed/incomplete）：
   // 截断（length/content_filter）→ incomplete，其余 → completed
   const itemStatus = status === "completed" ? "completed" : "incomplete";
-  const output: JsonObject[] = [
-    {
-      type: "message",
-      id: newMessageItemId(),
-      status: itemStatus,
-      role: "assistant",
-      content,
-    },
-  ];
+  output.push({
+    type: "message",
+    id: newMessageItemId(),
+    status: itemStatus,
+    role: "assistant",
+    content,
+  });
 
   // tool_calls → function_call items（每条 tool_call 一个 item；id/call_id 同源，OR §1.2 两字段都收）
   const toolCalls = m?.["tool_calls"];
@@ -651,6 +935,12 @@ interface ToolItemState {
   arguments: string;
 }
 
+interface ReasoningItemState {
+  id: string;
+  outputIndex: number;
+  text: string;
+}
+
 /**
  * 上游 OpenAI chat.completion.chunk SSE 事件 → Responses SSE 帧转换（OR §1.3/§2.2 /
  * design §3.4 状态机；R2.4 统一 SsePipe 帧层，消除转换器自有 decode/parse）。
@@ -665,8 +955,13 @@ interface ToolItemState {
  * 上游 error data 块 → error 事件（SDK 收到即抛，流终止）。
  * 每次调用创建独立状态机；consume 返回 false 后 pump 继续排空上游（结算由 pump 拥有，
  * 响应不早于结算关闭——旧实现用注释规避的 settle 竞态由此从构造上消除）。
+ * includeReasoning（R4）：true 时上游 delta.reasoning_content → reasoning 输出项事件序列
+ * （output_item.added → reasoning_summary_text.delta×N → done → output_item.done）；
+ * false（缺省）→ 零回归，reasoning_content 不产生任何事件。
  */
-export function createStreamToResponsesTransform(): SseFrameTransform {
+export function createStreamToResponsesTransform(
+  includeReasoning = false,
+): SseFrameTransform {
   const encoder = new TextEncoder();
   const responseId = newResponseId();
   const createdAt = Math.floor(Date.now() / 1000);
@@ -678,6 +973,7 @@ export function createStreamToResponsesTransform(): SseFrameTransform {
   let usageData: JsonObject | null = null;
   let messageItem: MessageItemState | null = null;
   const toolItems = new Map<number, ToolItemState>();
+  let reasoningItem: ReasoningItemState | null = null;
   let nextOutputIndex = 0;
   const output: JsonObject[] = [];
   let itemsClosed = false;
@@ -721,6 +1017,26 @@ export function createStreamToResponsesTransform(): SseFrameTransform {
       return;
     }
     itemsClosed = true;
+    // R4：reasoning item 最先关闭（outputIndex 最先分配——上游 reasoning 先于 content）
+    if (reasoningItem !== null) {
+      const { id, outputIndex, text } = reasoningItem;
+      enqueue(controller, "response.reasoning_summary_text.done", {
+        item_id: id,
+        output_index: outputIndex,
+        text,
+      });
+      const reasoningDone: JsonObject = {
+        type: "reasoning",
+        id,
+        summary: text.length > 0 ? [{ type: "summary_text", text }] : [],
+        status: "completed",
+      };
+      enqueue(controller, "response.output_item.done", {
+        item: reasoningDone,
+        output_index: outputIndex,
+      });
+      output.push(reasoningDone);
+    }
     if (messageItem !== null) {
       const { id, outputIndex, contentIndex, text } = messageItem;
       enqueue(controller, "response.output_text.done", {
@@ -864,6 +1180,35 @@ export function createStreamToResponsesTransform(): SseFrameTransform {
     });
   }
 
+  /** R4：reasoning_content 段 → reasoning 输出项事件（首次建项 + added，逐段 delta）。 */
+  function pushReasoning(
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    text: string,
+  ): void {
+    if (reasoningItem === null) {
+      reasoningItem = {
+        id: newReasoningItemId(),
+        outputIndex: nextOutputIndex++,
+        text: "",
+      };
+      enqueue(controller, "response.output_item.added", {
+        item: {
+          type: "reasoning",
+          id: reasoningItem.id,
+          summary: [],
+          status: "in_progress",
+        },
+        output_index: reasoningItem.outputIndex,
+      });
+    }
+    reasoningItem.text += text;
+    enqueue(controller, "response.reasoning_summary_text.delta", {
+      item_id: reasoningItem.id,
+      output_index: reasoningItem.outputIndex,
+      delta: text,
+    });
+  }
+
   function pushToolCall(
     controller: ReadableStreamDefaultController<Uint8Array>,
     rawCall: JsonObject,
@@ -964,6 +1309,11 @@ export function createStreamToResponsesTransform(): SseFrameTransform {
       const content = d["content"];
       if (typeof content === "string" && content.length > 0) {
         pushText(controller, content);
+      }
+      // R4：上游 delta.reasoning_content → reasoning 事件（仅 include 请求）
+      const reasoning = d["reasoning_content"];
+      if (includeReasoning && typeof reasoning === "string" && reasoning.length > 0) {
+        pushReasoning(controller, reasoning);
       }
       const toolCallsRaw = d["tool_calls"];
       if (Array.isArray(toolCallsRaw)) {

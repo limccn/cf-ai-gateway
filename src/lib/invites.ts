@@ -19,9 +19,30 @@ export function generateInviteCode(length = 10): string {
   );
 }
 
+/** 校验码（存在/未用/未过期），不置位 —— 注册准入检查用（建号前不消费，避免建号失败烧码）。 */
+export async function validateInviteCode(db: Db, code: string): Promise<boolean> {
+  const normalized = code.trim().toUpperCase();
+  if (normalized.length === 0) {
+    return false;
+  }
+  const record = await db.query.inviteCodes.findFirst({
+    where: eq(inviteCodes.code, normalized),
+  });
+  if (!record) {
+    return false;
+  }
+  if (record.usedAt !== null) {
+    return false;
+  }
+  if (record.expiresAt.getTime() < Date.now()) {
+    return false;
+  }
+  return true;
+}
+
 /**
- * 校验并消费邀请码（原子：条件 UPDATE 防并发重复使用）。
- * 注意：在 validateUserInfo 中调用时新用户 id 尚未生成，故只记录 usedAt。
+ * 消费邀请码（原子：条件 UPDATE 防并发重复使用）。仅在用户建号成功后调用；
+ * 消费失败（并发竞态下码已被他人使用）不抛出 —— 调用方记日志即可。
  * @returns 消费成功返回 true；不存在/已使用/已过期返回 false。
  */
 export async function consumeInviteCode(

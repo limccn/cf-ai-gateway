@@ -65,6 +65,9 @@ export default function UsagePage() {
   const [range, setRange] = useState<UsageRange | "custom">("last30");
   // 时区快照与查询参数同源（模块加载时计算一次；窗口边界与桶构建共用）
   const tzOffsetMin = useMemo(() => getTzOffsetMin(), []);
+  // 桶窗口时刻快照：与发起查询同时刻；切换 range/应用筛选时刷新（否则跨本地午夜
+  // 后 useMemo 重算取新 Date.now() → 桶窗口偏移一天，与后端窗口错位）
+  const [nowMs, setNowMs] = useState(() => Date.now());
   // 明细状态筛选：仅过滤 request_logs（明细 + hour/status 聚合）；date/model 聚合不受影响
   const [status, setStatus] = useState<"all" | "success" | "error" | "cached" | "rejected">("all");
 
@@ -116,6 +119,7 @@ export default function UsagePage() {
       model: modelDraft || undefined,
       userId: userIdDraft ? Number(userIdDraft) : undefined,
     });
+    setNowMs(Date.now());
     setOffset(0);
   };
 
@@ -129,6 +133,7 @@ export default function UsagePage() {
     setRange("last30");
     setStatus("all");
     setFilters({ from: daysAgoParam(30), to: toDateParam(new Date()), keyId: undefined, model: undefined, userId: undefined });
+    setNowMs(Date.now());
     setOffset(0);
   };
 
@@ -139,6 +144,8 @@ export default function UsagePage() {
 
   const switchRange = (next: UsageRange | "custom") => {
     setRange(next);
+    // 切换窗口 = 新查询时刻：同步刷新桶窗口快照（跨午夜不错位）
+    setNowMs(Date.now());
     setOffset(0);
   };
 
@@ -150,7 +157,7 @@ export default function UsagePage() {
   const chartData = useMemo(() => {
     if (isRangeMode) {
       // 快捷维度：固定桶（24/24/14/30），缺数据补 0；color 供 BarChart/DonutChart 统一类型
-      return buildRangeSeries(aggregates, range, tzOffsetMin).map((point, index) => ({
+      return buildRangeSeries(aggregates, range, tzOffsetMin, nowMs).map((point, index) => ({
         ...point,
         color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
       }));
@@ -180,7 +187,7 @@ export default function UsagePage() {
         value: agg.requests,
         color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
       }));
-  }, [aggregates, groupBy, isRangeMode, range, tzOffsetMin]);
+  }, [aggregates, groupBy, isRangeMode, nowMs, range, tzOffsetMin]);
 
   const rangeMeta = isRangeMode ? RANGE_OPTIONS.find((o) => o.value === range) : undefined;
   const chartTitle = isRangeMode
@@ -344,7 +351,7 @@ export default function UsagePage() {
             </div>
           </CardHeader>
           <CardContent>
-            {aggregates.length === 0 ? (
+            {!isRangeMode && aggregates.length === 0 ? (
               <EmptyState title="No usage in this period" description="Try widening the date range or clearing filters." />
             ) : isRangeMode || groupBy === "date" ? (
               <BarChart data={chartData} height={240} formatValue={formatNumber} />

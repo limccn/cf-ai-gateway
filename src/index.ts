@@ -149,7 +149,11 @@ export async function queue(
   _ctx: ExecutionContext,
 ): Promise<void> {
   // 按队列名分流：BILLING_QUEUE → 延迟计费消费者；其余（USAGE_QUEUE）→ 用量聚合消费者。
-  // 队列名来自 [vars]（render 烘焙）；未知队列名回退 usage 聚合（非法消息会校验失败跳过并记日志）。
+  // 队列名来自 [vars]（render 烘焙）。BILLING_QUEUE_NAME 缺键时若静默走 usage 分支，
+  // 计费消息会被丢弃（校验失败）且不扣费 —— fail-fast：抛错让批次重试，直到配置修复。
+  if (!env.BILLING_QUEUE_NAME) {
+    throw new Error("BILLING_QUEUE_NAME is not configured — billing events would be lost; fix [vars] before deploying");
+  }
   if (batch.queue === env.BILLING_QUEUE_NAME) {
     await consumeBillingBatch(batch, env);
   } else {

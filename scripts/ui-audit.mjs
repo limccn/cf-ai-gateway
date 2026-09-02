@@ -2,6 +2,7 @@
 //   1) 截取 10 个页面的 PC/平板/手机 截图到 scripts/ui-audit/shots/
 //   2) 检测横向溢出（scrollWidth > clientWidth）与越界元素
 //   3) 采集表格列数/宽度、侧边栏、卡片等布局指标
+// 本机专用脚本：依赖 playwright（未声明为 devDeps，需 `npm i -D playwright && npx playwright install chromium`）
 // 前置：npm run dev 已启动；本地测试用户已 seed（POST /api/seed/users）
 // 用法：node scripts/ui-audit.mjs
 import { chromium } from "playwright";

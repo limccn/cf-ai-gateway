@@ -9,6 +9,7 @@ import { env } from "cloudflare:test";
 import { AdapterError } from "../src/providers/types";
 import {
   buildInternalFromAnthropic,
+  extractAnthropicExtras,
   transformResponseToAnthropic,
   transformStreamToAnthropic,
 } from "../src/providers/anthropic-inbound";
@@ -394,7 +395,7 @@ describe("buildInternalFromAnthropic（入站映射）", () => {
     expect(result["stream"]).toBe(true);
   });
 
-  it("平台专属字段（top_k/metadata/service_tier/output_config）丢弃，不进内部形态", () => {
+  it("平台专属字段（top_k/metadata/service_tier）丢弃；thinking/output_config 不进内部形态（R1 透传通道接管，经 extractAnthropicExtras）", () => {
     const result = buildInternalFromAnthropic({
       model: MODEL,
       max_tokens: 10,
@@ -402,12 +403,36 @@ describe("buildInternalFromAnthropic（入站映射）", () => {
       top_k: 5,
       metadata: { user_id: "u1" },
       service_tier: "standard",
+      thinking: { type: "adaptive" },
       output_config: { effort: "low" },
     });
     expect(result["top_k"]).toBeUndefined();
     expect(result["metadata"]).toBeUndefined();
     expect(result["service_tier"]).toBeUndefined();
+    // R1：顶层 thinking/output_config 不再走丢弃清单（也不进内部 body）——由
+    // extractAnthropicExtras 提取 → InternalRequest.anthropicExtras → anthropic 适配器写回
+    expect(result["thinking"]).toBeUndefined();
     expect(result["output_config"]).toBeUndefined();
+  });
+
+  it("extractAnthropicExtras：逐字提取 thinking/output_config（畸形形态原样），无则 undefined", () => {
+    expect(extractAnthropicExtras({
+      model: MODEL,
+      max_tokens: 10,
+      messages: [{ role: "user", content: "hi" }],
+      thinking: { type: "adaptive", display: "summarized" },
+      output_config: { effort: "high" },
+    })).toEqual({
+      thinking: { type: "adaptive", display: "summarized" },
+      output_config: { effort: "high" },
+    });
+    // 单出现 + 畸形形态（string 而非 object）→ 逐字，不校验
+    expect(extractAnthropicExtras({
+      messages: [],
+      output_config: "malformed",
+    })).toEqual({ output_config: "malformed" });
+    // 无任一字段 → 空对象
+    expect(extractAnthropicExtras({ messages: [] })).toEqual({});
   });
 
   it("未知消息 role → AdapterError", () => {
@@ -785,8 +810,8 @@ describe("端到端：鉴权（x-api-key / Bearer）与错误重写", () => {
     expect(await latestLogStatus(userId)).toBe("rejected");
   });
 
-  it("402 余额不足 → Anthropic permission_error（保留 402 状态码）", async () => {
-    const userId = await setupUser("anthro-402@test.dev", 0);
+  it("402 余额为负（D2 债务）→ Anthropic permission_error（保留 402 状态码）", async () => {
+    const userId = await setupUser("anthro-402@test.dev", -1);
     const { plaintext } = await setupKey(userId);
     await setupProviderWithModel(MODEL);
     const res = await postAnthropic("/anthropic/v1/messages", plaintext);

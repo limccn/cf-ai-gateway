@@ -13,6 +13,13 @@ export interface InternalRequest {
   /** 内部模型名（路由映射的 key） */
   model: string;
   stream: boolean;
+  /**
+   * Anthropic 入站原始透传字段（R1，仅 anthropic 协议入口填充）：
+   * Claude Code 逐请求携带的 thinking / output_config 顶层参数，经此专用通道
+   * 绕开内部 OpenAI 形态，由 anthropic 适配器逐字写回上游（不校验形态——
+   * 畸形值由上游 400 显式暴露）；openai 适配器不感知（零泄漏）。
+   */
+  anthropicExtras?: { thinking?: unknown; output_config?: unknown };
 }
 
 /**
@@ -38,6 +45,26 @@ export interface ProviderConfig {
   models: Record<string, string>;
   /** 高级 HTTP 选项（未配置为空对象，行为与现状一致）。 */
   httpOptions?: HttpOptions;
+  /**
+   * 思考模式（R2，providers.thinking_mode 列）：缺省 undefined ≡ auto（自适应线优先）。
+   * adaptive → reasoning_effort 映射 output_config:{effort}+thinking:{type:"adaptive"}；
+   * budget → reasoning_effort 丢弃 + warn（budget 线仅服务 R1 逐字透传）；
+   * off → 保持现状（丢弃）。
+   */
+  /** thinking_mode（R2 + H3/H6）："adaptive" | "budget" | "off" | null（DB NULL ≡ 不映射）；非法值 → AdapterError。 */
+  thinkingMode?: string | null;
+  /**
+   * reasoning 输入项回传（Workstream B，providers.reasoning_roundtrip 列）：
+   * true → 保留 assistant 消息的 reasoning_content（deepseek 思考模式上游要求回传）；
+   * false/undefined（默认）→ openai 适配器剥离（上游零变化，现状语义）。
+   * 仅 openai 适配器生效；anthropic 适配器白名单构造天然忽略该字段。
+   */
+  reasoningRoundtrip?: boolean;
+  /**
+   * 上游超时（毫秒，09-01-stg-glm-ccswitch-fix，providers.upstream_timeout_ms 列）：
+   * undefined ≡ 默认 60s（DEFAULT_UPSTREAM_TIMEOUT_MS）。慢模型长生成按 provider 调大。
+   */
+  upstreamTimeoutMs?: number;
 }
 
 export interface UpstreamRequest {

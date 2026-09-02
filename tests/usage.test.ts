@@ -6,7 +6,7 @@ import { env } from "cloudflare:test";
 import { and, asc, eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../src/db";
-import { requestLogs, usageDaily } from "../src/db/schema";
+import { balanceTx, requestLogs, usageDaily } from "../src/db/schema";
 import type { UsageEvent } from "../src/lib/usage-aggregation";
 import { consumeUsageBatch } from "../src/lib/usage-aggregation";
 import { parseRetentionDays, runRequestLogCleanup } from "../src/lib/cleanup";
@@ -725,5 +725,49 @@ describe("保留期清理（5.4）", () => {
       .from(requestLogs)
       .where(eq(requestLogs.userId, userId));
     expect(remaining).toHaveLength(1);
+  });
+
+  it("FK 引用：被 balance_tx.ref_request_id 引用的超期明细可删（指针置 NULL，流水保留）", async () => {
+    // D1 PRAGMA foreign_keys=1：直接删被引用行整批撞 FK；cleanup 应先置空追溯指针。
+    const userId = await setupUser("cleanup-fk@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const db = createDb(env);
+    const inserted = await db
+      .insert(requestLogs)
+      .values({
+        userId,
+        keyId,
+        model: "gpt-4o",
+        promptTokens: 1,
+        completionTokens: 1,
+        cost: 0,
+        status: "success",
+        createdAt: new Date(Date.now() - 40 * 24 * 3600 * 1000),
+      })
+      .returning({ id: requestLogs.id });
+    const logId = inserted[0]?.id;
+    expect(logId).toBeDefined();
+    await db.insert(balanceTx).values({
+      userId,
+      amount: -0.001,
+      type: "usage",
+      refRequestId: logId,
+    });
+
+    const silentLogger = { info: () => {}, warn: () => {}, error: () => {} };
+    const result = await runRequestLogCleanup(db, 30, silentLogger);
+    expect(result.deleted).toBeGreaterThanOrEqual(1);
+
+    const logRows = await db
+      .select({ id: requestLogs.id })
+      .from(requestLogs)
+      .where(eq(requestLogs.id, logId ?? -1));
+    expect(logRows).toHaveLength(0);
+    const txRows = await db
+      .select({ refRequestId: balanceTx.refRequestId })
+      .from(balanceTx)
+      .where(eq(balanceTx.userId, userId));
+    expect(txRows).toHaveLength(1);
+    expect(txRows[0]?.refRequestId).toBeNull();
   });
 });

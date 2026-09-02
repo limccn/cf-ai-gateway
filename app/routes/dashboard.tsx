@@ -59,6 +59,9 @@ export default function DashboardPage() {
   const [range, setRange] = useState<UsageRange>("last30");
   // 时区快照与查询参数同源（模块加载时计算一次；窗口边界与桶构建共用）
   const tzOffsetMin = useMemo(() => getTzOffsetMin(), []);
+  // 桶窗口时刻快照：与发起查询同时刻，且 range 切换时刷新（否则跨本地午夜后
+  // useMemo 重算会取新 Date.now() → 桶窗口偏移一天，与后端窗口错位）
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const usageQuery = useUsage({ range, tzOffsetMin, limit: 7 });
   const keysQuery = useKeys();
 
@@ -78,8 +81,8 @@ export default function DashboardPage() {
   }, [aggregates]);
 
   const chartData = useMemo(
-    () => buildRangeSeries(aggregates, range, tzOffsetMin),
-    [aggregates, range, tzOffsetMin],
+    () => buildRangeSeries(aggregates, range, tzOffsetMin, nowMs),
+    [aggregates, range, tzOffsetMin, nowMs],
   );
 
   // find 必中（range 来自 RANGE_OPTIONS 枚举）；noUncheckedIndexedAccess 下数组索引可能 undefined，用 as 收敛
@@ -87,7 +90,8 @@ export default function DashboardPage() {
     RANGE_OPTIONS.find((o) => o.value === range) ?? (RANGE_OPTIONS[3] as (typeof RANGE_OPTIONS)[number]);
 
   const balance = user?.balance;
-  const keysCount = keysQuery.data?.items.length;
+  // 用 total 而非 items.length：useKeys 默认 limit=50，Key 多时长度会截断
+  const keysCount = keysQuery.data?.total;
 
   return (
     <PageContainer>
@@ -115,7 +119,7 @@ export default function DashboardPage() {
           icon={<KeyRound className="size-4" />}
         />
         <StatCard
-          label="Requests (30 days)"
+          label={`Requests — ${rangeMeta.label}`}
           value={usageQuery.isLoading ? "…" : formatNumber(totals.requests)}
           hint={totals.days > 0 ? `Across ${totals.days} active days` : "No activity yet"}
           icon={<Zap className="size-4" />}
@@ -141,7 +145,11 @@ export default function DashboardPage() {
                   key={option.value}
                   variant={range === option.value ? "default" : "outline"}
                   size="sm"
-                  onClick={() => setRange(option.value)}
+                  onClick={() => {
+                    setRange(option.value);
+                    // 切换窗口 = 新查询时刻：同步刷新桶窗口快照（跨午夜不错位）
+                    setNowMs(Date.now());
+                  }}
                 >
                   {option.label}
                 </Button>
@@ -155,6 +163,13 @@ export default function DashboardPage() {
               </div>
             ) : usageQuery.isError ? (
               <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
+            ) : totals.requests === 0 ? (
+              <div className="flex h-40 items-center justify-center">
+                <EmptyState
+                  title="No usage in this period"
+                  description="Requests will appear here as traffic flows through the gateway."
+                />
+              </div>
             ) : (
               <BarChart data={chartData} height={220} formatValue={formatNumber} />
             )}

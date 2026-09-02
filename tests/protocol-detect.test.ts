@@ -90,13 +90,31 @@ describe("openai 硬信号", () => {
     })).toBe("openai");
   });
 
-  it("tool_choice 字符串 → openai", () => {
-    expect(detectProtocol({ model: "m", tool_choice: "auto", messages: [] })).toBe("openai");
+  it("tool_choice 对象 type: function / 含 function 键 → 中性（H1：交模型名兜底）", () => {
+    // H1：字符串/type:"auto"/type:"function" 均非判别信号（值集合两协议重叠）——
+    // 无其他信号时由模型名兜底（gpt-* → openai，其余 → anthropic）
+    expect(detectProtocol({ model: "gpt-4o", tool_choice: { type: "function", function: { name: "f" } }, messages: [] })).toBe("openai");
+    expect(detectProtocol({ model: "gpt-4o", tool_choice: { function: { name: "f" } }, messages: [] })).toBe("openai");
+  });
+});
+
+describe("tool_choice 字符串中性（H1）", () => {
+  it("字符串 + gpt-* 模型 → openai（兜底）", () => {
+    expect(detectProtocol({ model: "gpt-4o", tool_choice: "auto", messages: [] })).toBe("openai");
+    expect(detectProtocol({ model: "gpt-4o", tool_choice: "required", messages: [] })).toBe("openai");
+    expect(detectProtocol({ model: "gpt-4o", tool_choice: "none", messages: [] })).toBe("openai");
   });
 
-  it("tool_choice 对象 type: function / 含 function 键 → openai", () => {
-    expect(detectProtocol({ model: "m", tool_choice: { type: "function", function: { name: "f" } } })).toBe("openai");
-    expect(detectProtocol({ model: "m", tool_choice: { function: { name: "f" } } })).toBe("openai");
+  it("字符串 + claude-* 模型 → anthropic（兜底；此前误判 openai 导致合法 Anthropic 请求被 400）", () => {
+    expect(detectProtocol({ model: "claude-sonnet-4", tool_choice: "auto", messages: [] })).toBe("anthropic");
+  });
+
+  it("字符串 + tool input_schema → anthropic（字符串不再构成 openai 冲突信号）", () => {
+    expect(detectProtocol({
+      model: "m",
+      tools: [{ name: "f", input_schema: { type: "object" } }],
+      tool_choice: "auto",
+    })).toBe("anthropic");
   });
 });
 
@@ -112,18 +130,22 @@ describe("双向冲突（R2.3）", () => {
     )).toThrow(/mixes OpenAI and Anthropic/);
   });
 
-  it("tool input_schema + tool_choice 字符串 → ProtocolDetectionError", () => {
+  it("tool input_schema + 其他 openai 硬信号（n）→ ProtocolDetectionError", () => {
     expect(() => detectProtocol({
       model: "m",
       tools: [{ name: "f", input_schema: { type: "object" } }],
-      tool_choice: "auto",
+      n: 2,
     })).toThrow(ProtocolDetectionError);
   });
 });
 
 describe("tool_choice type: auto 不算信号（防误判）", () => {
-  it("auto + 无其他信号 + 模型缺省 → openai（兜底）", () => {
+  it("auto + 无其他信号 + 非 gpt/claude 模型名 → openai（08-31 契约：OpenAI 兼容系模型名）", () => {
     expect(detectProtocol({ model: "unknown-model", tool_choice: { type: "auto" } })).toBe("openai");
+  });
+
+  it("auto + gpt-* 模型 → openai（模型名兜底优先）", () => {
+    expect(detectProtocol({ model: "gpt-4o", tool_choice: { type: "auto" } })).toBe("openai");
   });
 
   it("auto + claude-* 模型 → anthropic（兜底优先）", () => {
@@ -148,16 +170,38 @@ describe("无信号模型名兜底（fallbackByModel）", () => {
     expect(detectProtocol({ model: "CLAUDE-3-5-SONNET", messages: [] })).toBe("anthropic");
   });
 
-  it("其他模型名 → openai（默认）", () => {
+  it("其他模型名（OpenAI 兼容系）→ openai（08-31 契约：qwen/deepseek/glm openai body 无 max_tokens → 200）", () => {
     expect(detectProtocol({ model: "deepseek-v4-flash", max_tokens: 10, messages: [] })).toBe("openai");
     expect(detectProtocol({ model: "qwen3.8-flash", messages: [] })).toBe("openai");
+    expect(detectProtocol({ model: "glm-5.3-flash", stream: true, messages: [] })).toBe("openai");
   });
 
-  it("model 非字符串 / 缺失 → openai（防御）", () => {
-    expect(fallbackByModel(123)).toBe("openai");
-    expect(fallbackByModel(undefined)).toBe("openai");
-    expect(fallbackByModel("")).toBe("openai");
-    expect(detectProtocol({ max_tokens: 10, messages: [] })).toBe("openai");
+  it("H2 核心场景：anthropic 内容块（tool_result/tool_use/image）+ OpenAI 系模型名 → anthropic（内容块优先，防送错上游 400）", () => {
+    expect(
+      detectProtocol({
+        model: "qwen3.8-flash",
+        messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }] }],
+      }),
+    ).toBe("anthropic");
+    expect(
+      detectProtocol({
+        model: "deepseek-v4-flash",
+        messages: [{ role: "assistant", content: [{ type: "tool_use", id: "x", name: "f", input: {} }] }],
+      }),
+    ).toBe("anthropic");
+    expect(
+      detectProtocol({
+        model: "glm-5.3-flash",
+        messages: [{ role: "user", content: [{ type: "image", source: { type: "base64" } }] }],
+      }),
+    ).toBe("anthropic");
+  });
+
+  it("model 非字符串 / 缺失 → anthropic（防御；无信息时按协议原生入口）", () => {
+    expect(fallbackByModel(123)).toBe("anthropic");
+    expect(fallbackByModel(undefined)).toBe("anthropic");
+    expect(fallbackByModel("")).toBe("anthropic");
+    expect(detectProtocol({ max_tokens: 10, messages: [] })).toBe("anthropic");
   });
 
   it("排除项（max_tokens/temperature/top_p/stream/messages/model）不产生信号", () => {

@@ -18,10 +18,11 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ZodType } from "zod";
 import type { AppEnv } from "../../types";
 import type { Db } from "../../db";
-import { providers } from "../../db/schema";
+import { models, providers } from "../../db/schema";
 import { createDb } from "../../db";
 import { getAdapter } from "../../providers";
 import { AdapterError } from "../../providers/types";
+import { extractAnthropicExtras } from "../../providers/anthropic-inbound";
 import type {
   EndpointKind,
   InternalRequest,
@@ -52,6 +53,7 @@ import {
   logUpstreamError,
   UpstreamTimeoutError,
 } from "../../lib/upstream";
+import { clampMaxTokens } from "../../lib/max-tokens";
 import {
   chatCompletionsInputSchema,
   completionsInputSchema,
@@ -79,11 +81,52 @@ import {
 } from "../../lib/stream-settle";
 import type { SseFrameTransform } from "../../providers/sse-pipe";
 
+// U7：非流式上游 body 读取的空闲超时（TTFB 超时只保护响应头前；body 中途停顿由
+// 本 helper 兜底）。逐 chunk 重置计时，超时 → 取消上游读并抛错（调用方按上游错误处理）。
+async function readJsonBodyWithIdleTimeout(
+  resp: Response,
+  timeoutMs: number | undefined,
+): Promise<unknown> {
+  if (timeoutMs === undefined || resp.body === null) {
+    return resp.json();
+  }
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const timer = setTimeout(() => {
+      void reader.cancel(new Error("idle timeout")).catch(() => {});
+    }, timeoutMs);
+    let result: ReadableStreamReadResult<Uint8Array>;
+    try {
+      result = await reader.read();
+    } finally {
+      clearTimeout(timer);
+    }
+    if (result.done) {
+      break;
+    }
+    chunks.push(result.value);
+    total += result.value.length;
+  }
+  const buffer = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return JSON.parse(new TextDecoder().decode(buffer));
+}
+
 const PATH_BY_KIND: Record<EndpointKind, string> = {
   chat: "/chat/completions",
   completions: "/completions",
   embeddings: "/embeddings",
 };
+
+/** max_output_tokens cap 查询的 KV TTL 缓存（秒）：热路径免每请求同步 D1 读；
+ * TTL 语义 = cap 配置变更最多 60s 生效（配置延迟可接受）。 */
+const MODEL_CAP_CACHE_TTL_SECONDS = 60;
 
 /**
  * 协议端点注入点（P1）：新协议入口（/anthropic、/v1/messages、/v1/responses）
@@ -103,11 +146,17 @@ export interface ProxyEndpointOptions<B = Record<string, unknown>> {
    * 主路径用 streamConsumer（帧级，结算管线消费同一批帧）。 */
   transformStream?: (stream: ReadableStream<Uint8Array>) => ReadableStream<Uint8Array>;
   /** 流式出站帧级事件转换工厂（R2.4；每次调用创建独立状态机；OpenAI 上游主路径）。
-   * 缺省 = 原始字节透传（P1）。 */
-  streamConsumer?: () => SseFrameTransform;
+   * 缺省 = 原始字节透传（P1）。R4：工厂可接入站 rawBody（含 include 等本地信号；
+   * 参数可选，既有无参实现零改动兼容）。 */
+  streamConsumer?: (body?: Record<string, unknown>) => SseFrameTransform;
   /** anthropic 上游 + anthropic 原生入站 → 协议短路（P2a）：字节原样透传，
    * settle 用 Anthropic 提取器，不经过转换器。 */
   passthroughAnthropicStream?: boolean;
+  /** R1：Anthropic 入站顶层 thinking/output_config 透传开关（缺省 false）。
+   * 开启时 proxy 从 rawBody 提取 extras → InternalRequest.anthropicExtras →
+   * anthropic 适配器逐字写回上游；openai 适配器不感知。仅 /anthropic/* 与
+   * /v1/messages 的 anthropic 分支置 true。 */
+  passthroughAnthropicExtras?: boolean;
   /** 缓存键协议命名空间前缀（协议间隔离，如 "anthropic:"）；默认 ""（现有端点键不变）。 */
   cachePrefix?: string;
   /** 入站协议偏好的 provider 类型：模型路由优先匹配同类型 provider（如 Anthropic 协议
@@ -127,6 +176,7 @@ export interface ProxyEndpointOptions<B = Record<string, unknown>> {
       | "transformStream"
       | "streamConsumer"
       | "passthroughAnthropicStream"
+      | "passthroughAnthropicExtras"
       | "cachePrefix"
       | "providerType"
     >
@@ -143,6 +193,12 @@ interface ResolvedProvider {
   models: Record<string, string>;
   /** 负载均衡权重（DB 列；缺失按 1 兜底）。 */
   weight: number;
+  /** 思考模式（R2，NULL ≡ auto）。 */
+  thinkingMode: string | null;
+  /** reasoning 输入项回传（Workstream B，NULL ≡ false）。 */
+  reasoningRoundtrip: boolean | null;
+  /** 上游超时（毫秒，09-01-stg-glm-ccswitch-fix；NULL ≡ 默认 60s）。 */
+  upstreamTimeoutMs: number | null;
 }
 
 /**
@@ -178,6 +234,9 @@ async function resolveCandidates(
           httpOptionsEnc: row.httpOptionsEnc,
           models,
           weight: typeof row.weight === "number" && row.weight >= 1 ? row.weight : 1,
+          thinkingMode: row.thinkingMode ?? null,
+          reasoningRoundtrip: row.reasoningRoundtrip ?? null,
+          upstreamTimeoutMs: row.upstreamTimeoutMs ?? null,
         });
       }
     }
@@ -243,6 +302,7 @@ export function proxyRouteWithOptions(
         transformStream,
         streamConsumer,
         passthroughAnthropicStream,
+        passthroughAnthropicExtras,
         cachePrefix = "",
         providerType,
       } = eff;
@@ -260,16 +320,19 @@ export function proxyRouteWithOptions(
       const requestId = c.req.header("cf-ray") ?? crypto.randomUUID();
       // R2.1 体树早释放（关键）：waitUntil 延迟路径（计费事件/缓存写）只引用提前解构的
       // 局部常量（不捕获 c）——handler 返回后请求体对象树随 c 回收，不随旁路任务常驻 isolate。
+      const ENV = c.env;
       const BILLING_QUEUE = c.env.BILLING_QUEUE;
       const CACHE_KV = c.env.CACHE_KV;
       const executionCtx = c.executionCtx;
 
       // 5. 缓存（仅非流式 && key.cacheEnabled）→ 命中直接返回（不转发、不扣费）
       // R2 触发收窄：请求体 > MAX_CACHE_BODY_BYTES → 跳过整个缓存评估（不 hash、不读 KV、不计数、不写）；
-      // 小请求未命中 → 计数（第 1 次只计数；10min 窗口 ≥2 次 → cacheWriteKey，响应成功后写缓存）。
+      // 小请求未命中 → 记录热度指纹（cacheState），bump 计数与写缓存决策整体在成功路径 waitUntil 执行：
+      //   - 请求路径 0 次计数 KV 读写（原 get+put/delete 两次同步 KV 挪出关键路径）；
+      //   - 失败请求不消耗热度（H11：错误突发不再删计数键"饿死"缓存）；
+      //   - KV get→put 非原子（并发计数丢失）由窗口滚动兜底，阈值语义不依赖精确计数。
       const cacheable = !stream && auth.key.cacheEnabled;
-      let cacheKey: string | null = null;
-      let cacheWriteKey: string | null = null;
+      let cacheState: { cacheKey: string; countKey: string } | null = null;
       if (cacheable) {
         const bodyBytes = JSON.stringify(rawBody).length;
         if (bodyBytes > MAX_CACHE_BODY_BYTES) {
@@ -283,7 +346,7 @@ export function proxyRouteWithOptions(
           const bodyHash = await hashRequestBody(
             model !== "" ? { ...rawBody, model: billingModel } : rawBody,
           );
-          cacheKey = buildCacheKey(auth.key.id, billingModel, bodyHash, cachePrefix);
+          const cacheKey = buildCacheKey(auth.key.id, billingModel, bodyHash, cachePrefix);
           const cached = await getCachedResponse(CACHE_KV, cacheKey);
           if (cached !== null) {
             logger.info("cache_hit", { keyId: auth.key.id, model: billingModel });
@@ -300,15 +363,11 @@ export function proxyRouteWithOptions(
             enqueueUsage(c, cachedLog);
             return c.json(cached);
           }
-          // 未命中：高频重传计数（同键窗口内第 2+ 次出现 → 本次成功后写缓存）
-          if (
-            await bumpCacheMissCount(
-              CACHE_KV,
-              buildCountKey(auth.key.id, billingModel, bodyHash),
-            )
-          ) {
-            cacheWriteKey = cacheKey;
-          }
+          // 未命中：记录热度指纹（同缓存键同前缀；bump/写决策在成功路径 waitUntil）
+          cacheState = {
+            cacheKey,
+            countKey: buildCountKey(auth.key.id, billingModel, bodyHash, cachePrefix),
+          };
         }
       }
 
@@ -338,14 +397,97 @@ export function proxyRouteWithOptions(
       }
 
       // 内部请求形态恒为 OpenAI Chat Completions 兼容（P1）；每轮尝试重建上游请求，天然可重试
-      const internalReq: InternalRequest = { kind, body, model, stream };
+      // R1：anthropic 入站顶层 thinking/output_config 经专用通道透传（不污染 OpenAI 形态 body，
+      // openai 适配器不感知；缓存键已哈希 rawBody 天然覆盖，无需额外处理）
+      const internalReq: InternalRequest = {
+        kind,
+        body,
+        model,
+        stream,
+        anthropicExtras: passthroughAnthropicExtras
+          ? extractAnthropicExtras(rawBody)
+          : undefined,
+      };
       const multiCandidate = candidates.length > 1;
+
+      // 09-01-stg-glm-ccswitch-fix + U6：模型级 max_tokens 上限（models.max_output_tokens，
+      // NULL ≡ 不限）。一次查询、失败尝试共享；**查询失败 → 拒绝**（fail-closed——
+      // 不知道 cap 就放行会让 09-01 事故形态复活；D1 抖动瞬时，请求可重试）。
+      // 效率项（09-01-review）：KV TTL 缓存（MODEL_CAP_CACHE_TTL_SECONDS）免每请求同步 D1 读——
+      // 缓存命中直接取；KV 读失败 → 降级 D1 权威查询（KV 抖动不 fail-closed）；D1 失败才拒绝。
+      // clamp 在 buildRequest 前统一执行（全部 adapter/协议生效，含 Responses 的
+      // max_completion_tokens 与 anthropic 转换后的 max_tokens）。
+      let maxOutputTokens: number | undefined;
+      try {
+        const capCacheKey = `modelcap:${billingModel}`;
+        let cachedCap: string | null = null;
+        try {
+          cachedCap = await CACHE_KV.get(capCacheKey);
+        } catch {
+          // KV 抖动 → 降级 D1（缓存只是加速层，D1 是权威）
+        }
+        if (cachedCap !== null) {
+          maxOutputTokens = cachedCap === "null" ? undefined : Number(cachedCap);
+          if (cachedCap !== "null" && !Number.isFinite(maxOutputTokens)) {
+            // 损坏值（非我方写入格式）→ 按 miss 处理：走 D1 覆盖
+            cachedCap = null;
+          }
+        }
+        if (cachedCap === null) {
+          const modelRow = await db
+            .select({ cap: models.maxOutputTokens })
+            .from(models)
+            .where(eq(models.model, billingModel))
+            .limit(1);
+          const cap = modelRow[0]?.cap ?? null;
+          maxOutputTokens = cap ?? undefined;
+          // 写回缓存（含 null=不限，避免每请求确认"不限"）；失败仅影响加速层
+          executionCtx.waitUntil(
+            CACHE_KV.put(capCacheKey, cap === null ? "null" : String(cap), {
+              expirationTtl: MODEL_CAP_CACHE_TTL_SECONDS,
+            }).catch(() => {}),
+          );
+        }
+      } catch (error) {
+        logger.error("model_cap_query_failed", {
+          model: billingModel,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        const capFailLog: RequestLogRecord = {
+          requestId,
+          userId: auth.user.id,
+          keyId: auth.key.id,
+          providerId: null,
+          model: billingModel,
+          status: "error",
+          latencyMs: Date.now() - startTime,
+        };
+        await recordRequestLog(db, capFailLog);
+        return c.json(
+          { error: { message: "Model configuration temporarily unavailable. Please retry." } },
+          500,
+        );
+      }
+      if (maxOutputTokens !== undefined) {
+        const clamped = clampMaxTokens(internalReq.body, maxOutputTokens);
+        if (clamped.clamped || clamped.defaulted) {
+          logger.warn(clamped.clamped ? "max_tokens_clamped" : "max_tokens_defaulted", {
+            model: billingModel,
+            ...(clamped.from !== undefined ? { from: clamped.from } : {}),
+            to: clamped.to,
+          });
+          internalReq.body = clamped.body;
+        }
+      }
 
       // 尝试列表（转移上限 1 次 → 总尝试 ≤ 2）：
       //   单候选 → 恒为现状路径（零回归：无 hash、无 KV、无重试）；
       //   多候选 → 首选 = keyId 哈希落点（粘性，断路跳过），其后按 id 升序补一个未断路候选。
       const attempts: ResolvedProvider[] = [];
       let allCircuitsOpen = false;
+      // U7：成功候选的 per-provider upstreamTimeoutMs（cfg 声明在候选循环内，循环外不可达；
+      // 流空闲超时 / 非流式 body 读取复用此值）
+      let providerTimeoutMs: number | undefined;
       if (!multiCandidate) {
         // candidates.length >= 1（上面已处理 0 候选，越界为不可达防御）
         attempts.push(atOrThrow(candidates, 0, "resolveCandidates"));
@@ -491,6 +633,15 @@ export function proxyRouteWithOptions(
           apiKey: upstreamKey,
           models: cand.models,
           ...(httpOptions !== undefined ? { httpOptions } : {}),
+          // R2：思考模式（NULL ≡ auto；undefined 语义同 auto，不传避免 cfg 携 null）
+          ...(cand.thinkingMode !== null ? { thinkingMode: cand.thinkingMode } : {}),
+          // Workstream B：reasoning 回传（NULL ≡ false；undefined 语义同 false，不传避免 cfg 携 null）
+          ...(cand.reasoningRoundtrip === true ? { reasoningRoundtrip: true } : {}),
+          // 09-01-stg-glm-ccswitch-fix：上游超时（NULL ≡ 默认 60s；undefined 语义同默认，
+          // 不传避免 cfg 携 null）
+          ...(cand.upstreamTimeoutMs !== null
+            ? { upstreamTimeoutMs: cand.upstreamTimeoutMs }
+            : {}),
         };
         let upstreamReq: UpstreamRequest;
         try {
@@ -507,9 +658,13 @@ export function proxyRouteWithOptions(
           throw error;
         }
 
-        // 6. 转发（含超时）
+        // 6. 转发（含超时；09-01-stg-glm-ccswitch-fix：provider 级 upstream_timeout_ms 透传）
         try {
-          upstreamResp = await fetchUpstream(upstreamReq.url, upstreamReq.init);
+          upstreamResp = await fetchUpstream(
+            upstreamReq.url,
+            upstreamReq.init,
+            cfg.upstreamTimeoutMs,
+          );
         } catch (error) {
           // 4.3 失败语义：上游网络错误/超时 → 不扣费，明细记 error
           const upstreamLatencyMs = Date.now() - startTime;
@@ -605,6 +760,8 @@ export function proxyRouteWithOptions(
         // 成功：锁定本次执行的 provider，退出尝试循环
         resolvedProviderId = cand.providerId;
         resolvedModels = cand.models;
+        // U7：捕获成功候选的超时配置（流/body 空闲超时复用；loop 外 cfg 不可达）
+        providerTimeoutMs = cfg.upstreamTimeoutMs;
         // 清除转移前记录的最后失败（转移后第二候选成功时不得回退到失败语义）
         lastError = null;
         break;
@@ -670,6 +827,7 @@ export function proxyRouteWithOptions(
           }
           // 延迟计费：settle 回调只发事件（不 await D1，0 同步读写）；
           // 扣费 + 明细 + 流水由消费者批内执行（结算时刻价格，request_id 幂等）。
+          // U5：send 失败 → 降级同步扣费（sendBillingEvent 内部，需 ENV 建 D1）。
           executionCtx.waitUntil(
             sendBillingEvent(
               BILLING_QUEUE,
@@ -684,6 +842,7 @@ export function proxyRouteWithOptions(
                 upstreamLatencyMs,
                 ts: Date.now(),
               }),
+              ENV,
             ),
           );
         };
@@ -698,6 +857,8 @@ export function proxyRouteWithOptions(
         if (upstreamAnthropic && passthroughAnthropicStream === true) {
           outboundStream = wrapStreamWithSettlement(upstreamResp.body, settleCb, logger, {
             detector: createAnthropicUsageDetector(),
+            // U7：流空闲超时（每 chunk 重置；复用成功候选的 per-provider 配置）
+            idleTimeoutMs: providerTimeoutMs,
           });
         } else if (upstreamAnthropic && transformStream !== undefined) {
           outboundStream = transformStream(
@@ -705,16 +866,20 @@ export function proxyRouteWithOptions(
               adapter.transformStreamToOpenAI(upstreamResp.body),
               settleCb,
               logger,
+              { idleTimeoutMs: providerTimeoutMs },
             ),
           );
         } else if (upstreamAnthropic) {
           outboundStream = wrapStreamWithSettlement(upstreamResp.body, settleCb, logger, {
             detector: createAnthropicUsageDetector(),
             transform: adapter.createStreamToOpenAI?.(),
+            idleTimeoutMs: providerTimeoutMs,
           });
         } else {
           outboundStream = wrapStreamWithSettlement(upstreamResp.body, settleCb, logger, {
-            transform: streamConsumer?.(),
+            // R4：工厂接入站 rawBody（Responses include 信号；无参实现忽略参数，零改动兼容）
+            transform: streamConsumer?.(rawBody),
+            idleTimeoutMs: providerTimeoutMs,
           });
         }
         logger.info("proxy_stream_started", {
@@ -722,13 +887,19 @@ export function proxyRouteWithOptions(
           model: billingModel,
           keyId: auth.key.id,
         });
-        // 伪装在最终出站形态上（恒等映射时整链字节透传，零开销）
+        // 伪装在最终出站形态上（恒等映射时整链字节透传，零开销）。
+        // 非恒等映射（上游名 ≠ 请求名）时对 sse-pipe 输出做二次 decode/parse——
+        // 有意保留：mask 是独立字节层（保真重写 data: 行），与 sse-pipe 事件层职责分离；
+        // 恒等是常见配置（直连 claude 上游），此路径 0 解析。LOW 效率项评估后接受。
         const maskedStream = maskModelInStream(
           outboundStream,
           model,
           resolvedModels[model] ?? model,
         );
-        return new Response(maskedStream, {
+        // F4（安全评审）：c.body 而非 new Response —— 中间件 c.header() 写入的
+        // #preparedHeaders 只在 #newResponse（c.json/c.body 同路径）merge；直接
+        // new Response 绕过 merge 导致成功路径 X-RateLimit-* 头丢失。
+        return c.body(maskedStream, {
           headers: {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
@@ -741,7 +912,8 @@ export function proxyRouteWithOptions(
       // 非流式：OpenAI 透传 / Anthropic 格式转换
       let data: unknown;
       try {
-        data = await upstreamResp.json();
+        // U7：非流式 body 读取空闲超时（复用成功候选的 per-provider 配置）
+        data = await readJsonBodyWithIdleTimeout(upstreamResp, providerTimeoutMs);
       } catch {
         logger.error("upstream_non_json_response", {
           providerId: resolvedProviderId,
@@ -798,25 +970,36 @@ export function proxyRouteWithOptions(
             upstreamLatencyMs,
             ts: Date.now(),
           }),
+          ENV,
         ),
       );
 
-      // 8. 缓存写（非阻塞，不拖慢响应）；仅当 R2 触发条件成立（小上下文 ∧ 高频重传）。
-      // 缓存内容 = 伪装后的协议出站形态（P3）。R3：stringify 一次 → 体积复用；>5MB 跳过缓存（照常返回）
-      if (cacheWriteKey !== null) {
+      // 8. 缓存写（非阻塞，不拖慢响应）；H11：bump 计数 + 写缓存决策整体在 waitUntil——
+      // 只有成功请求消耗热度（失败请求不再提前删计数键，错误突发不饿死缓存）。
+      // 缓存内容 = 伪装后的协议出站形态（P3）。R3：序列化一次 → 响应与缓存共用同一串
+      // （消除 c.json 二次 stringify 的瞬时峰值）；>5MB 跳过缓存（照常返回）。
+      let serializedOutbound: string | null = null;
+      if (cacheState !== null) {
         const serialized = JSON.stringify(maskedOutbound);
-        if (
-          typeof serialized === "string" &&
-          serialized.length > MAX_CACHE_RESPONSE_BYTES
-        ) {
+        if (typeof serialized === "string" && serialized.length > MAX_CACHE_RESPONSE_BYTES) {
           logger.info("cache_skip_large_response", {
             bytes: serialized.length,
             keyId: auth.key.id,
             model: billingModel,
           });
-        } else {
+        } else if (typeof serialized === "string") {
+          serializedOutbound = serialized;
           executionCtx.waitUntil(
-            setCachedResponse(CACHE_KV, cacheWriteKey, serialized, auth.key.cacheTtl),
+            (async () => {
+              if (await bumpCacheMissCount(CACHE_KV, cacheState.countKey)) {
+                await setCachedResponse(
+                  CACHE_KV,
+                  cacheState.cacheKey,
+                  serialized,
+                  auth.key.cacheTtl,
+                );
+              }
+            })(),
           );
         }
       }
@@ -826,7 +1009,12 @@ export function proxyRouteWithOptions(
         model: billingModel,
         keyId: auth.key.id,
       });
-      return c.json(maskedOutbound);
+      // F4：c.body 同 c.json merge 语义（成功路径限流头保留），见流式分支注释
+      return serializedOutbound !== null
+        ? c.body(serializedOutbound, {
+            headers: { "Content-Type": "application/json" },
+          })
+        : c.json(maskedOutbound);
     },
   );
 }

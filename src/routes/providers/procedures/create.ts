@@ -36,6 +36,9 @@ export function createProviderRoute(app: Hono<AppEnv>): void {
         enabled: body.enabled,
         weight: body.weight,
         httpOptionsEnc,
+        thinkingMode: body.thinkingMode ?? null,
+        reasoningRoundtrip: body.reasoningRoundtrip ?? false,
+        upstreamTimeoutMs: body.upstreamTimeoutMs ?? null,
       })
       .returning();
     if (!provider) {

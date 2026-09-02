@@ -28,21 +28,38 @@ export const gatewayRateLimit = (): MiddlewareHandler<AppEnv> => {
     const parsed = currentRaw ? parseInt(currentRaw, 10) : 0;
     const current = Number.isFinite(parsed) ? parsed : 0;
 
+    // 标准限流头（窗口语义：limit=每分钟上限，reset=窗口结束 unix 秒）
+    const windowEnd = windowStart + WINDOW_SECONDS;
+    const rateLimitHeaders = {
+      "X-RateLimit-Limit": String(limit),
+      "X-RateLimit-Reset": String(windowEnd),
+      "X-RateLimit-Remaining": String(Math.max(0, limit - current - 1)),
+    };
+    // next() 前设置成功头（SSE 流式响应头部先于流体发出，next 后设置无效）
+    for (const [name, value] of Object.entries(rateLimitHeaders)) {
+      c.header(name, value);
+    }
+
     if (current >= limit) {
       logger.warn("rate_limit_exceeded", {
         keyId: auth.key.id,
         limit,
         windowStart,
       });
+      c.header("Retry-After", String(Math.max(1, windowEnd - Math.floor(Date.now() / 1000))));
       return c.json(
         { error: { message: "Rate limit exceeded. Please slow down and try again later." } },
         429,
       );
     }
 
-    await c.env.CACHE_KV.put(kvKey, String(current + 1), {
-      expirationTtl: COUNTER_TTL_SECONDS,
-    });
+    // 计数后移：请求成功处理（next 返回）后才消耗配额 —— 5xx 上游失败不惩罚重试；
+    // 4xx（402 余额不足/400 校验失败等）仍计数（客户端问题，防滥用）。
     await next();
+    if (c.res.status < 500) {
+      await c.env.CACHE_KV.put(kvKey, String(current + 1), {
+        expirationTtl: COUNTER_TTL_SECONDS,
+      });
+    }
   };
 };

@@ -39,6 +39,11 @@ const createModelSchema = z.object({
   inputPriceCached: priceField,
   outputPriceShort: priceField,
   outputPriceLong: priceField,
+  // 09-01-stg-glm-ccswitch-fix：模型级输出上限（null/空 ≡ 不限制）
+  maxOutputTokens: z.preprocess(
+    (v) => (v === "" || v === null || v === undefined ? null : v),
+    z.coerce.number().int("Must be a whole number").min(1, "Min 1 token").nullable(),
+  ),
 });
 
 const updateModelSchema = z
@@ -48,6 +53,11 @@ const updateModelSchema = z
     inputPriceCached: priceField.optional(),
     outputPriceShort: priceField.optional(),
     outputPriceLong: priceField.optional(),
+    // 显式 null = 重置为不限制（与后端 API 语义一致）；省略 = 不改动
+    maxOutputTokens: z.preprocess(
+      (v) => (v === "" || v === null || v === undefined ? null : v),
+      z.coerce.number().int("Must be a whole number").min(1, "Min 1 token").nullable(),
+    ),
   })
   .refine(
     (v) =>
@@ -55,7 +65,8 @@ const updateModelSchema = z
       v.inputPriceLong !== undefined ||
       v.inputPriceCached !== undefined ||
       v.outputPriceShort !== undefined ||
-      v.outputPriceLong !== undefined,
+      v.outputPriceLong !== undefined ||
+      v.maxOutputTokens !== null,
     { message: "Change at least one price" },
   );
 
@@ -77,6 +88,7 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
   const [inputPriceCached, setInputPriceCached] = useState("");
   const [outputPriceShort, setOutputPriceShort] = useState("");
   const [outputPriceLong, setOutputPriceLong] = useState("");
+  const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
 
   const [lastOpen, setLastOpen] = useState(false);
@@ -89,6 +101,7 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
       setInputPriceCached(editing ? String(editing.inputPriceCached) : "");
       setOutputPriceShort(editing ? String(editing.outputPriceShort) : "");
       setOutputPriceLong(editing ? String(editing.outputPriceLong) : "");
+      setMaxOutputTokens(editing?.maxOutputTokens?.toString() ?? "");
       setErrors({});
     }
   }
@@ -106,6 +119,8 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
       inputPriceCached: inputPriceCached.length > 0 ? inputPriceCached : undefined,
       outputPriceShort: outputPriceShort.length > 0 ? outputPriceShort : undefined,
       outputPriceLong: outputPriceLong.length > 0 ? outputPriceLong : undefined,
+      // 空 → null = 不限制（create 亦可）；编辑时显式 null = 清除已设上限
+      maxOutputTokens: maxOutputTokens.length > 0 ? maxOutputTokens : null,
     };
     if (editing) {
       const parsed = updateModelSchema.safeParse(prices);
@@ -250,6 +265,27 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
             </div>
           </div>
         </div>
+        <div className="space-y-2">
+          <Label htmlFor="model-max-output">Max output (tokens)</Label>
+          <Input
+            id="model-max-output"
+            type="number"
+            min={1}
+            step={1000}
+            placeholder="16000 — empty = unlimited"
+            value={maxOutputTokens}
+            onChange={(e) => setMaxOutputTokens(e.target.value)}
+            aria-invalid={errors.maxOutputTokens !== undefined}
+          />
+          <p className="text-xs text-muted-foreground">
+            Hard cap on requested <code>max_tokens</code>. Slow long-generation models (e.g. b.ai
+            glm-5.3-flash with Claude Code's 64K default) should set this below the upstream timeout
+            budget. Empty = unlimited.
+          </p>
+          {errors.maxOutputTokens ? (
+            <p className="text-xs text-destructive">{errors.maxOutputTokens}</p>
+          ) : null}
+        </div>
         {errors.root ? <p className="text-xs text-destructive">{errors.root}</p> : null}
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isBusy}>
@@ -348,6 +384,7 @@ export default function ModelsPage() {
                   <TableHead className="text-right">Input / 1M</TableHead>
                   <TableHead className="hidden text-right sm:table-cell">Input cached / 1M</TableHead>
                   <TableHead className="text-right">Output / 1M</TableHead>
+                  <TableHead className="hidden text-right lg:table-cell">Max output</TableHead>
                   <TableHead className="hidden md:table-cell">Updated</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -364,6 +401,9 @@ export default function ModelsPage() {
                     </TableCell>
                     <TableCell className="text-right whitespace-nowrap">
                       {formatUsd(item.outputPriceShort)} → {formatUsd(item.outputPriceLong)}
+                    </TableCell>
+                    <TableCell className="hidden text-right lg:table-cell">
+                      {item.maxOutputTokens ? item.maxOutputTokens.toLocaleString() : "∞"}
                     </TableCell>
                     <TableCell className="hidden text-muted-foreground md:table-cell">
                       {formatDateTime(item.updatedAt)}

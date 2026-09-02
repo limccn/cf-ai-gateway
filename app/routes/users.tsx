@@ -1,5 +1,5 @@
 // /users — 用户管理（M6 6.3，admin）：列表搜索/过滤、角色与状态操作、邀请码管理。
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { ArrowDown, ArrowUp, Copy, Power, Search, ShieldPlus } from "lucide-react";
 import { z } from "zod";
 import { useSession } from "@/hooks/use-session";
@@ -41,10 +41,17 @@ export default function UsersPage() {
   const [statusDraft, setStatusDraft] = useState("");
   const [filters, setFilters] = useState<{ search?: string; role?: "admin" | "member"; status?: "active" | "disabled" }>({});
 
-  const usersQuery = useUsers({ ...filters, limit: 50 });
+  // 用户列表分页：limit=50（后端上限），超过 50 人时更多用户不可达 → 加分页
+  const [offset, setOffset] = useState(0);
+  const usersQuery = useUsers({ ...filters, limit: 50, offset });
   const invitesQuery = useInvites();
   const updateUser = useUpdateUser();
   const createInvite = useCreateInvite();
+
+  const totalUsers = usersQuery.data?.total ?? 0;
+  const [updateErrorDismissed, setUpdateErrorDismissed] = useState(false);
+  // 新错误出现时重置 dismiss 状态；操作成功或用户手动关闭后不显示
+  useEffect(() => setUpdateErrorDismissed(false), [updateUser.error]);
 
   // ===== 邀请码创建 =====
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -62,6 +69,7 @@ export default function UsersPage() {
       role: roleDraft === "" ? undefined : (roleDraft as "admin" | "member"),
       status: statusDraft === "" ? undefined : (statusDraft as "active" | "disabled"),
     });
+    setOffset(0);
   };
 
   const items = usersQuery.data?.items ?? [];
@@ -156,6 +164,18 @@ export default function UsersPage() {
         </p>
       ) : null}
 
+      {updateUser.error && !updateErrorDismissed ? (
+        <p
+          role="alert"
+          className="mb-6 flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          <span>{updateUser.error.message}</span>
+          <Button variant="ghost" size="sm" onClick={() => setUpdateErrorDismissed(true)}>
+            Dismiss
+          </Button>
+        </p>
+      ) : null}
+
       {/* 用户列表 */}
       <Card className="mb-6">
         <CardHeader>
@@ -247,7 +267,7 @@ export default function UsersPage() {
                             <Button
                               variant="ghost"
                               size="icon"
-                              disabled={isBusy}
+                              disabled={isBusy || isSelf}
                               onClick={() =>
                                 updateUser.mutate({
                                   id: item.id,
@@ -255,9 +275,11 @@ export default function UsersPage() {
                                 })
                               }
                               aria-label={
-                                item.role === "admin"
-                                  ? `Demote ${item.name} to member`
-                                  : `Promote ${item.name} to admin`
+                                isSelf
+                                  ? "You cannot change your own role"
+                                  : item.role === "admin"
+                                    ? `Demote ${item.name} to member`
+                                    : `Promote ${item.name} to admin`
                               }
                               title={isSelf ? "You cannot change your own role" : item.role === "admin" ? "Demote to member" : "Promote to admin"}
                             >
@@ -296,6 +318,32 @@ export default function UsersPage() {
               </Table>
             </div>
           )}
+
+          {items.length > 0 ? (
+            <div className="mt-4 flex items-center justify-between gap-2">
+              <span className="text-sm text-muted-foreground">
+                Showing {offset + 1}–{offset + items.length} of {totalUsers}
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={offset === 0}
+                  onClick={() => setOffset(Math.max(0, offset - 50))}
+                >
+                  Prev
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={offset + 50 >= totalUsers}
+                  onClick={() => setOffset(offset + 50)}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 

@@ -13,6 +13,24 @@ export const modelsMapSchema = z
 /** 负载均衡权重：多 provider 供同一模型时按比例分配（1-1000，默认 1 均分）。 */
 export const providerWeightSchema = z.number().int().min(1).max(1000);
 
+/** 思考模式（R2 + H3/H6）：NULL ≡ 不映射（零变更契约，未配置不注入 thinking）；枚举校验拦非法值。 */
+export const thinkingModeSchema = z
+  .enum(["adaptive", "budget", "off"])
+  .nullable();
+
+/** reasoning 回传（Workstream B）：true → 保留 assistant.reasoning_content 给上游
+ * （deepseek 思考模式要求回传）；false/省略 → 剥离（默认，上游零变化）。 */
+export const reasoningRoundtripSchema = z.boolean();
+
+/** 上游超时（毫秒，09-01-stg-glm-ccswitch-fix）：NULL ≡ 默认 60s。
+ * 慢模型长生成（如 b.ai glm-5.3-flash）按 provider 调大，防 60s 默认超时切断。 */
+export const upstreamTimeoutMsSchema = z
+  .number()
+  .int()
+  .min(1_000)
+  .max(600_000)
+  .nullable();
+
 /** Header 名：RFC 7230 token 字符集（防注入）。 */
 const httpHeaderNameSchema = z
   .string()
@@ -49,7 +67,11 @@ export const createProviderInputSchema = z.object({
   enabled: z.boolean().default(true),
   weight: providerWeightSchema.default(1),
   httpOptions: httpOptionsSchema.optional(),
+  thinkingMode: thinkingModeSchema.optional(),
+  reasoningRoundtrip: reasoningRoundtripSchema.optional(),
+  upstreamTimeoutMs: upstreamTimeoutMsSchema.optional(),
 });
+
 
 export const updateProviderInputSchema = z
   .object({
@@ -63,6 +85,12 @@ export const updateProviderInputSchema = z
     weight: providerWeightSchema.optional(),
     // 更新时整体替换（省略保持原密文，与 apiKey 语义一致）
     httpOptions: httpOptionsSchema.optional(),
+    // 显式传 null = 重置为不映射（H3；省略 = 不改动）
+    thinkingMode: thinkingModeSchema.optional(),
+    // 显式传 false = 关闭回传（省略 = 不改动）
+    reasoningRoundtrip: reasoningRoundtripSchema.optional(),
+    // 显式传 null = 重置为默认 60s（省略 = 不改动）
+    upstreamTimeoutMs: upstreamTimeoutMsSchema.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, {
     message: "At least one field is required",
@@ -90,6 +118,12 @@ export const providerResponseSchema = z.object({
   models: z.record(z.string(), z.string()),
   weight: z.number().int().min(1).max(1000),
   enabled: z.boolean(),
+  // 思考模式（R2）：null ≡ auto（adaptive 线优先）
+  thinkingMode: z.enum(["adaptive", "budget", "off"]).nullable(),
+  // reasoning 回传（Workstream B）：openai 面上游是否接收 assistant.reasoning_content
+  reasoningRoundtrip: z.boolean(),
+  // 上游超时（毫秒；null ≡ 默认 60s）
+  upstreamTimeoutMs: z.number().int().min(1_000).max(600_000).nullable(),
   // 高级 HTTP 选项（headers 值掩码；未配置为空对象）
   httpOptions: httpOptionsResponseSchema,
   // 断路器状态（仅 list 返回）：provider 当前是否处于断路窗口（TTL 内跳过分配）
@@ -120,6 +154,7 @@ export const deleteProviderOutputSchema = z.object({
 // ============= 类型导出 =============
 
 export type ProviderType = z.infer<typeof providerTypeSchema>;
+export type ThinkingMode = z.infer<typeof thinkingModeSchema>;
 export type CreateProviderInput = z.infer<typeof createProviderInputSchema>;
 export type UpdateProviderInput = z.infer<typeof updateProviderInputSchema>;
 export type ProviderResponse = z.infer<typeof providerResponseSchema>;

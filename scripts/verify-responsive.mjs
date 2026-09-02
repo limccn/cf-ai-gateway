@@ -4,6 +4,7 @@
 //   3) 图表 SVG 宽度 = 卡片内容宽（无 FALLBACK 640 残留）
 //   4) billing 手机过滤/翻页控件完整可见
 //   5) providers/keys/models 手机 Actions 列 sticky right-0 + 藏列生效
+// 本机专用脚本：依赖 playwright（未声明为 devDeps，需 `npm i -D playwright && npx playwright install chromium`）
 // 前置：npm run dev + seed users（同 scripts/ui-audit.mjs）
 // 用法：node scripts/verify-responsive.mjs
 import { chromium } from "playwright";

@@ -15,6 +15,13 @@ const PORT = Number(process.env.MOCK_PORT ?? 8788);
 const OPENAI_KEY = "sk-mock-openai";
 const ANTHROPIC_KEY = "sk-mock-anthropic";
 
+// 最近收到的请求记录（E2E 断言上游 body 用；GET /__requests 可查询，cap 30 条）
+const recentRequests = [];
+function record(req, body) {
+  recentRequests.push({ at: Date.now(), path: req.url, method: req.method, body });
+  if (recentRequests.length > 30) recentRequests.shift();
+}
+
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -96,6 +103,11 @@ const server = createServer(async (req, res) => {
   const path = url.pathname;
 
   try {
+    // ---------- 请求记录查询（E2E 断言上游收到体，无鉴权，仅本地 mock） ----------
+    if (method === "GET" && path === "/__requests") {
+      return sendJson(res, 200, { requests: recentRequests });
+    }
+
     // ---------- OpenAI 兼容面 ----------
     if (path.startsWith("/openai/v1/")) {
       const auth = req.headers.authorization ?? "";
@@ -104,6 +116,7 @@ const server = createServer(async (req, res) => {
       }
       if (method === "POST" && path === "/openai/v1/chat/completions") {
         const body = await readJson(req);
+        record(req, body);
         const model = body?.model ?? "gpt-4o-mini";
         if (model === "error-500") {
           return sendJson(res, 500, { error: { message: "Mock upstream simulated failure" } });
@@ -117,17 +130,26 @@ const server = createServer(async (req, res) => {
             choices,
             ...extra,
           });
-          return sendSse(
-            res,
-            [
-              ["message", chunk([{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }], {})],
-              ["message", chunk([{ index: 0, delta: { content: "Hello from OpenAI mock" }, finish_reason: null }], {})],
-              ["message", chunk([{ index: 0, delta: {}, finish_reason: "stop" }], {})],
-              ["message", chunk([], { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })],
-              ["message", null], // data: [DONE]
-            ],
-            20,
+          // 思考流样例（09-01 R4 E2E）：模型名含 "reasoning"（openai 入站 + openai 上游，
+          // 验证 Responses include 后 reasoning 事件合成）→ 发 reasoning_content 段
+          const withReasoning =
+            model.includes("reasoning") || body?.reasoning_effort !== undefined;
+          const frames = [
+            ["message", chunk([{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }], {})],
+          ];
+          if (withReasoning) {
+            frames.push(
+              ["message", chunk([{ index: 0, delta: { reasoning_content: "Let me reason" }, finish_reason: null }], {})],
+              ["message", chunk([{ index: 0, delta: { reasoning_content: " about the plan" }, finish_reason: null }], {})],
+            );
+          }
+          frames.push(
+            ["message", chunk([{ index: 0, delta: { content: "Hello from OpenAI mock" }, finish_reason: null }], {})],
+            ["message", chunk([{ index: 0, delta: {}, finish_reason: "stop" }], {})],
+            ["message", chunk([], { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })],
+            ["message", null], // data: [DONE]
           );
+          return sendSse(res, frames, 20);
         }
         return sendJson(res, 200, openaiChatResponse(body, model));
       }
@@ -182,6 +204,7 @@ const server = createServer(async (req, res) => {
       }
       if (method === "POST" && path === "/anthropic/v1/messages") {
         const body = await readJson(req);
+        record(req, body);
         const model = body?.model ?? "claude-sonnet-4-20250514";
         const stream = body?.stream === true;
         const system = typeof body?.system === "string" ? body.system : "";
@@ -220,6 +243,29 @@ const server = createServer(async (req, res) => {
             usage: { input_tokens: 25, output_tokens: 1 },
           },
         };
+        // 思考流样例（09-01 R1/R3a E2E）：请求带 thinking 参数（anthropic 入站，验证 P2a
+        // 字节透传）或模型名含 "thinking"（openai 入站 + anthropic 上游，验证 thinking_delta
+        // → reasoning_content 转换）→ 发 thinking 事件序列（thinking 块 + signature + text 块）
+        if (body?.thinking !== undefined || model.includes("thinking")) {
+          return sendSse(
+            res,
+            [
+              ["message_start", startEvent],
+              ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }],
+              ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Let me reason" } }],
+              ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: " about the plan" } }],
+              ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig_mock_01" } }],
+              ["content_block_stop", { type: "content_block_stop", index: 0 }],
+              ["content_block_start", { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } }],
+              ["content_block_delta", { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Hello with thinking" } }],
+              ["content_block_delta", { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: " (streamed)" } }],
+              ["content_block_stop", { type: "content_block_stop", index: 1 }],
+              ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 15 } }],
+              ["message_stop", { type: "message_stop" }],
+            ],
+            25,
+          );
+        }
         if (hasTools) {
           return sendSse(
             res,

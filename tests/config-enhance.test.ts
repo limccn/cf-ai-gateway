@@ -8,7 +8,7 @@ import { env } from "cloudflare:test";
 import { desc, eq } from "drizzle-orm";
 import { createDb } from "../src/db";
 import { providers, requestLogs } from "../src/db/schema";
-import { encryptSecret } from "../src/lib/security";
+import { decryptSecret, encryptSecret } from "../src/lib/security";
 import { buildCacheKey, hashRequestBody } from "../src/lib/response-cache";
 import type { HttpOptions } from "../src/providers/types";
 import {
@@ -395,6 +395,51 @@ describe("R2：providers 管理 API（加密落库 + 掩码回显 + 校验）", 
     };
     expect(replaceBody.provider.httpOptions.headers["X-New"]).toBe("****alue");
     expect(replaceBody.provider.httpOptions.headers["X-Original"]).toBeUndefined();
+  });
+
+  it("H5 掩码哨兵：PATCH 提交掩码 header 值 → 保留旧值；无旧值的掩码条目丢弃（掩码字面量不落库）", async () => {
+    const cookie = await adminCookie("r2-admin-h5@test.dev");
+    const created = await createProvider(cookie, {
+      name: "r2-h5-provider",
+      type: "openai",
+      baseUrl: "http://127.0.0.1:1/v1",
+      apiKey: "sk-test-key",
+      models: { [MODEL]: MODEL },
+      httpOptions: { headers: { "X-Auth": "sk-real-secret-1234" } },
+    });
+    const providerId = (created.json["provider"] as { id?: number })?.id;
+    expect(providerId).toBeTruthy();
+
+    // 模拟前端编辑回填：掩码值原样提交（掩码 = maskHeaderValue 输出的 `****1234`）
+    const patch = await selfFetch(`http://localhost/api/providers/${providerId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        httpOptions: {
+          headers: { "X-Auth": "****1234", "X-New": "fresh-value", "X-Ghost": "****ghost" },
+        },
+      }),
+    });
+    expect(patch.status).toBe(200);
+
+    // DB 解密：X-Auth 保留旧明文（掩码哨兵）；X-New 新值生效；X-Ghost（掩码且无旧值）丢弃
+    const db = createDb(env);
+    const row = await db.query.providers.findFirst({
+      where: eq(providers.name, "r2-h5-provider"),
+    });
+    const stored = JSON.parse(
+      await decryptSecret(row?.httpOptionsEnc ?? "", env.GATEWAY_SECRET_KEY),
+    ) as { headers: Record<string, string> };
+    expect(stored.headers["X-Auth"]).toBe("sk-real-secret-1234");
+    expect(stored.headers["X-New"]).toBe("fresh-value");
+    expect(stored.headers["X-Ghost"]).toBeUndefined();
+    // 掩码字面量绝不落库
+    expect(row?.httpOptionsEnc).not.toContain("****1234");
+    // 响应掩码回显一致（旧值保留 → 掩码不变）
+    const patchBody = (await patch.json()) as {
+      provider: { httpOptions: { headers: Record<string, string> } };
+    };
+    expect(patchBody.provider.httpOptions.headers["X-Auth"]).toBe("****1234");
   });
 
   it("非法 httpOptions → 400（header 名 token 字符集、值禁 CR/LF、未知字段 strict、body 非对象）", async () => {

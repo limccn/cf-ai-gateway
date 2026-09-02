@@ -147,6 +147,22 @@ const providerFormSchema = z.object({
   apiKey: z.string().min(1, "API key is required").max(1000),
   models: modelsMapTextSchema,
   weight: z.coerce.number().int("Must be a whole number").min(1, "Min 1").max(1000, "Max 1000"),
+  // R2 思考模式（null ≡ auto）；仅 anthropic 上游有意义，UI 下拉选择
+  thinkingMode: z.enum(["adaptive", "budget", "off"]).nullable().optional(),
+  // Workstream B：reasoning 回传（仅 openai 上游有意义，UI checkbox）
+  reasoningRoundtrip: z.boolean().optional(),
+  // 09-01-stg-glm-ccswitch-fix：上游超时（ms；null ≡ 默认 60s；UI 空输入 = null）
+  upstreamTimeoutMs: z.preprocess(
+    (v) => (v === "" || v === null || v === undefined ? null : v),
+    z
+      .coerce
+      .number()
+      .int("Must be a whole number")
+      .min(1000, "Min 1000 ms")
+      .max(600000, "Max 600000 ms")
+      .nullable()
+      .optional(),
+  ),
 });
 
 const updateProviderFormSchema = providerFormSchema
@@ -172,6 +188,9 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
   const [modelsText, setModelsText] = useState("");
   const [httpOptionsText, setHttpOptionsText] = useState("");
   const [weight, setWeight] = useState(1);
+  const [thinkingMode, setThinkingMode] = useState<"adaptive" | "budget" | "off" | null>(null);
+  const [reasoningRoundtrip, setReasoningRoundtrip] = useState(false);
+  const [upstreamTimeoutMs, setUpstreamTimeoutMs] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
 
@@ -186,6 +205,9 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       setModelsText(editing ? modelsToText(editing.models) : "");
       setHttpOptionsText(editing ? httpOptionsToText(editing.httpOptions) : "");
       setWeight(editing?.weight ?? 1);
+      setThinkingMode(editing?.thinkingMode ?? null);
+      setReasoningRoundtrip(editing?.reasoningRoundtrip ?? false);
+      setUpstreamTimeoutMs(editing?.upstreamTimeoutMs?.toString() ?? "");
       // 编辑已有高级配置时默认展开，避免用户看不到已配置项
       setAdvancedOpen(editing ? hasHttpOptions(editing.httpOptions) : false);
       setErrors({});
@@ -211,6 +233,12 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
       apiKey,
       models: modelsText,
       weight,
+      // R2：思考模式（null ≡ auto；编辑时显式传 null = 重置）
+      thinkingMode,
+      // Workstream B：reasoning 回传（false = 剥离；编辑时显式传 false = 关闭）
+      reasoningRoundtrip,
+      // 09-01：上游超时（空 = null ≡ 默认 60s；编辑时显式传 null = 重置默认）
+      upstreamTimeoutMs: upstreamTimeoutMs === "" ? null : Number(upstreamTimeoutMs),
     };
     if (editing) {
       // 编辑模式：空 apiKey 表示不更换密钥（omit）；空 httpOptions 表示保持原配置
@@ -341,6 +369,10 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
             aria-invalid={errors.models !== undefined}
           />
           {errors.models ? <p className="text-xs text-destructive">{errors.models}</p> : null}
+          <p className="text-xs text-muted-foreground">
+            Editing: leave empty to keep the current mapping (there is no way to clear all
+            mappings — set them individually or recreate the provider).
+          </p>
         </div>
         <Collapsible title="Advanced options" open={advancedOpen} onOpenChange={setAdvancedOpen}>
           <div className="space-y-2">
@@ -380,6 +412,68 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
               Requests are split across providers sharing a model proportionally to weight (1-1000).
             </p>
             {errors.weight ? <p className="text-xs text-destructive">{errors.weight}</p> : null}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="provider-thinking-mode">Thinking mode (anthropic upstream)</Label>
+            <Select
+              id="provider-thinking-mode"
+              value={thinkingMode ?? "auto"}
+              onChange={(e) => {
+                const v = e.target.value;
+                setThinkingMode(v === "auto" ? null : (v as "adaptive" | "budget" | "off"));
+              }}
+            >
+              <option value="auto">auto — adaptive line (default)</option>
+              <option value="adaptive">adaptive — force adaptive thinking</option>
+              <option value="budget">budget — legacy fixed-budget models</option>
+              <option value="off">off — drop reasoning_effort</option>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Maps inbound <code>reasoning_effort</code> (Codex / OpenAI clients) to Anthropic{" "}
+              <code>output_config.effort</code>. auto prefers the adaptive line; budget is for old
+              models that only accept <code>thinking.budget_tokens</code> (passthrough only, effort
+              mapping is skipped).
+            </p>
+          </div>
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+              <input
+                type="checkbox"
+                id="provider-reasoning-roundtrip"
+                checked={reasoningRoundtrip}
+                onChange={(e) => setReasoningRoundtrip(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                Reasoning round-trip <span className="text-muted-foreground">(openai upstream)</span>
+              </span>
+            </label>
+            <p className="text-xs text-muted-foreground">
+              Keep assistant <code>reasoning_content</code> when forwarding to the upstream (required
+              by deepseek thinking-mode models). Off by default — upstreams receive no{" "}
+              <code>reasoning_content</code>.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="provider-upstream-timeout">Upstream timeout (ms)</Label>
+            <Input
+              id="provider-upstream-timeout"
+              type="number"
+              min={1000}
+              max={600000}
+              step={1000}
+              placeholder="60000 (default)"
+              value={upstreamTimeoutMs}
+              onChange={(e) => setUpstreamTimeoutMs(e.target.value)}
+              aria-invalid={errors.upstreamTimeoutMs !== undefined}
+            />
+            <p className="text-xs text-muted-foreground">
+              Timeout for upstream responses. Slow long-generation models (e.g. b.ai glm-5.3-flash)
+              may need 120000+. Leave empty for the 60s default.
+            </p>
+            {errors.upstreamTimeoutMs ? (
+              <p className="text-xs text-destructive">{errors.upstreamTimeoutMs}</p>
+            ) : null}
           </div>
         </Collapsible>
         {errors.root ? <p className="text-xs text-destructive">{errors.root}</p> : null}

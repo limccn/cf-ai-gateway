@@ -10,13 +10,10 @@
 //   - `node scripts/mock-upstream.mjs` 已启动（8788，openai + anthropic 双面）
 //   - `npm run dev` 已启动（http://localhost:5173，可 BASE_URL 覆盖）
 // 用法：node scripts/verify-protocols.mjs
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { createHarness, createD1, parseSse } from "./lib/e2e-utils.mjs";
 
-const BASE = process.env.BASE_URL ?? "http://localhost:5173";
-const DB_NAME = "cf-ai-gateway-db";
 const ADMIN_EMAIL = "proto-admin@example.com";
 const PASSWORD = "testpass123";
 const INVITE_ADMIN = "PROTOVERIFY01";
@@ -41,124 +38,11 @@ const OUTPUT_PRICE = 0.6;
 const GPT_COST = (10 * INPUT_PRICE + 5 * OUTPUT_PRICE) / 1_000_000;
 const CLAUDE_COST = (25 * INPUT_PRICE + 15 * OUTPUT_PRICE) / 1_000_000;
 
-let passed = 0;
-let failed = 0;
-const lastFailures = [];
-
-function report(name, ok, detail) {
-  if (ok) {
-    passed += 1;
-    console.log(`  PASS  ${name}`);
-  } else {
-    failed += 1;
-    lastFailures.push(name);
-    console.log(`  FAIL  ${name}${detail ? `  <- ${detail}` : ""}`);
-  }
-}
-
-const WRANGLER_JS = fileURLToPath(
-  new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url),
-);
-
-function runSql(sql) {
-  execFileSync(
-    process.execPath,
-    [WRANGLER_JS, "d1", "execute", DB_NAME, "--local", "--command", sql],
-    { stdio: "pipe", encoding: "utf8" },
-  );
-}
-
-function query(sql) {
-  const out = execFileSync(
-    process.execPath,
-    [WRANGLER_JS, "d1", "execute", DB_NAME, "--local", "--command", sql, "--json"],
-    { stdio: "pipe", encoding: "utf8" },
-  );
-  return JSON.parse(out)[0]?.results ?? [];
-}
-
-async function api(path, { method = "GET", headers = {}, body, cookie } = {}) {
-  const finalHeaders = { ...headers };
-  if (cookie) finalHeaders.Cookie = cookie;
-  if (body !== undefined) finalHeaders["Content-Type"] = "application/json";
-  let res;
-  try {
-    res = await fetch(BASE + path, {
-      method,
-      headers: finalHeaders,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  } catch (error) {
-    console.log(`  [retry] ${method} ${path} failed (${error.cause?.code ?? error.message}), retrying...`);
-    await sleep(500);
-    res = await fetch(BASE + path, {
-      method,
-      headers: finalHeaders,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-  }
-  const text = await res.text();
-  let json = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    // SSE 等
-  }
-  const setCookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
-  const cookieOut = setCookies.length > 0
-    ? setCookies.map((c) => c.split(";")[0]).filter((c) => c.includes("=")).join("; ")
-    : null;
-  return { status: res.status, json, text, cookie: cookieOut };
-}
-
-/** 合并同一帧的 event: 行与 data: 行（Anthropic SSE 为 event+data 两行一帧）。 */
-function parseSse(text) {
-  const events = [];
-  let current = {};
-  for (const line of text.split("\n")) {
-    if (line.startsWith("event:")) {
-      current.event = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      const data = line.slice(5).trim();
-      if (data === "[DONE]") current.done = true;
-      else {
-        try {
-          current.data = JSON.parse(data);
-        } catch {
-          current.raw = data;
-        }
-      }
-      events.push(current);
-      current = {};
-    }
-  }
-  return events;
-}
-
-const ORIGIN = new URL(BASE).origin;
-
-async function signup(email, inviteCode) {
-  return api("/api/auth/sign-up/email", {
-    method: "POST",
-    headers: { Origin: ORIGIN },
-    body: { email, password: PASSWORD, name: email.split("@")[0], inviteCode },
-  });
-}
-
-async function signin(email) {
-  return api("/api/auth/sign-in/email", {
-    method: "POST",
-    headers: { Origin: ORIGIN },
-    body: { email, password: PASSWORD },
-  });
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const { api, report, summary, signup, signin, base } = createHarness({ label: "Multi-protocol" });
+const { run: runSql, query } = createD1();
 
 async function main() {
-  console.log(`\n=== Multi-protocol verify @ ${BASE} ===`);
+  console.log(`\n=== Multi-protocol verify @ ${base} ===`);
 
   // ---------- 0. 准备本地 D1（幂等可重跑） ----------
   console.log("\n[setup] prepare local D1");
@@ -186,10 +70,10 @@ async function main() {
 
   // ---------- 1. 认证 + 配置（provider / price / key / balance） ----------
   console.log("\n[1] auth + config");
-  const signupRes = await signup(ADMIN_EMAIL, INVITE_ADMIN);
+  const signupRes = await signup(ADMIN_EMAIL, PASSWORD, INVITE_ADMIN);
   report("admin signup", signupRes.status === 200 || signupRes.status === 201, `status=${signupRes.status}`);
   runSql(`UPDATE users SET role='admin' WHERE email='${ADMIN_EMAIL}';`);
-  const signinRes = await signin(ADMIN_EMAIL);
+  const signinRes = await signin(ADMIN_EMAIL, PASSWORD);
   report("admin signin", signinRes.status === 200 && signinRes.cookie !== null, `status=${signinRes.status}`);
   const authApi = { cookie: signinRes.cookie };
 
@@ -430,11 +314,7 @@ async function main() {
   report("OpenAI SDK chat.completions (regression)", sdkChat.choices[0]?.message?.content?.includes("Hello from OpenAI mock"), `id=${sdkChat.id}`);
 
   // ---------- 汇总 ----------
-  console.log(`\n=== RESULT: ${passed} passed, ${failed} failed ===`);
-  if (failed > 0) {
-    console.log("Failed:", lastFailures.join(" | "));
-    process.exitCode = 1;
-  }
+  summary();
 }
 
 main().catch((error) => {

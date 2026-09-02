@@ -294,6 +294,311 @@ describe("buildInternalFromResponses（入站映射）", () => {
     ).toThrow(AdapterError);
   });
 
+  // ===== Workstream A：Responses Lite 输入项面（namespace 平面化 / tool_search 降级 / client_metadata） =====
+
+  it("additional_tools functions 命名空间 → 平面化提取 function 叶子进 tools（carrier 不产生消息）", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [
+            {
+              type: "namespace",
+              name: "functions",
+              tools: [
+                {
+                  type: "function",
+                  name: "exec",
+                  description: "run code",
+                  parameters: { type: "object", properties: {} },
+                },
+                {
+                  type: "function",
+                  name: "lookup",
+                  description: "lookup",
+                  parameters: { type: "object", properties: {} },
+                },
+              ],
+            },
+          ],
+        },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(result["messages"]).toEqual([{ role: "user", content: "hi" }]);
+    const tools = result["tools"] as Array<{ type: string; function: { name: string } }>;
+    expect(tools.map((t) => t["function"]["name"])).toEqual(["exec", "lookup"]);
+  });
+
+  it("非 functions 命名空间（web / tool_search / collaboration）→ 原样传递 → buildTools 丢弃、tools 不输出", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [
+            { type: "namespace", name: "web", tools: [{ type: "web_search", name: "web" }] },
+            { type: "namespace", name: "tool_search", tools: [{ type: "tool_search", name: "search" }] },
+            { type: "namespace", name: "collaboration", tools: [{ type: "function", name: "slack_post" }] },
+          ],
+        },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(result["messages"]).toEqual([{ role: "user", content: "hi" }]);
+    expect(result["tools"]).toBeUndefined();
+  });
+
+  it("functions 命名空间递归嵌套 → 提取最深层 function 叶子", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [
+            {
+              type: "namespace",
+              name: "functions",
+              tools: [
+                {
+                  type: "namespace",
+                  name: "inner",
+                  tools: [
+                    { type: "function", name: "deep_fn", parameters: { type: "object", properties: {} } },
+                  ],
+                },
+                { type: "function", name: "top_fn", parameters: { type: "object", properties: {} } },
+              ],
+            },
+          ],
+        },
+        { role: "user", content: "hi" },
+      ],
+    });
+    const tools = result["tools"] as Array<{ function: { name: string } }>;
+    expect(tools.map((t) => t["function"]["name"])).toEqual(["deep_fn", "top_fn"]);
+  });
+
+  it("functions 命名空间叶子与顶层 tools 重名 → 顶层优先（按名去重）", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [
+            {
+              type: "namespace",
+              name: "functions",
+              tools: [
+                {
+                  type: "function",
+                  name: "get_weather",
+                  description: "from namespace",
+                  parameters: { type: "object", properties: {} },
+                },
+              ],
+            },
+          ],
+        },
+        { role: "user", content: "hi" },
+      ],
+      tools: [
+        {
+          type: "function",
+          name: "get_weather",
+          description: "from top-level",
+          parameters: { type: "object", properties: {} },
+        },
+      ],
+    });
+    const tools = result["tools"] as Array<{ function: { name: string; description?: string } }>;
+    expect(tools.map((t) => t["function"]["name"])).toEqual(["get_weather"]);
+    expect(tools[0]?.["function"]["description"]).toBe("from top-level");
+  });
+
+  it("tool_search_call / tool_search_output 输入项 → 识别 + 丢弃（不再 400）", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        { type: "tool_search_call", id: "tsc_1", name: "search", arguments: { query: "x" } },
+        { type: "tool_search_output", id: "tso_1", tools: [{ type: "function", name: "found" }] },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(result["messages"]).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("client_metadata 顶层字段 → 丢弃（不进内部形态）", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: "hi",
+      client_metadata: { turn_id: "turn_1" },
+    });
+    expect(result["client_metadata"]).toBeUndefined();
+  });
+
+  // ===== Workstream B：reasoning 输入项回传（thinking round-trip） =====
+
+  it("reasoning + 下一条 assistant message → 消息附 reasoning_content（summary_text 提取）", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "thinking out loud" }] },
+        { role: "assistant", content: "answer" },
+      ],
+    });
+    expect(result["messages"]).toEqual([
+      { role: "assistant", content: "answer", reasoning_content: "thinking out loud" },
+    ]);
+  });
+
+  it("reasoning + function_call → tool_calls 消息附 reasoning_content；连续 function_call 合并幂等", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "planning" }] },
+        { type: "function_call", call_id: "call_1", name: "get_weather", arguments: "{}" },
+        { type: "function_call", call_id: "call_2", name: "get_time", arguments: "{}" },
+      ],
+    });
+    expect(result["messages"]).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "planning",
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "get_weather", arguments: "{}" } },
+          { id: "call_2", type: "function", function: { name: "get_time", arguments: "{}" } },
+        ],
+      },
+    ]);
+  });
+
+  it("reasoning raw string 兜底（无 summary）", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        { type: "reasoning", id: "rs_1", raw: "raw thinking" },
+        { role: "assistant", content: "answer" },
+      ],
+    });
+    expect(result["messages"]).toEqual([
+      { role: "assistant", content: "answer", reasoning_content: "raw thinking" },
+    ]);
+  });
+
+  it("reasoning 后跟 user 消息 → pending 丢弃（user 消息无 reasoning_content）", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "thinking" }] },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(result["messages"]).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("reasoning 位于 input 尾部（无下一条 assistant）→ 丢弃", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [{ type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "orphan" }] }],
+    });
+    expect(result["messages"]).toEqual([]);
+  });
+
+  it("reasoning summary 无文本 → 丢弃 + 不挂载", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        { type: "reasoning", id: "rs_1", summary: [] },
+        { role: "assistant", content: "answer" },
+      ],
+    });
+    expect(result["messages"]).toEqual([{ role: "assistant", content: "answer" }]);
+  });
+
+  it("additional_tools item（Codex Responses Lite）→ 工具 hoist 进 tools，carrier 不产生消息", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        {
+          type: "additional_tools",
+          id: "at_1",
+          role: "developer",
+          tools: [
+            {
+              type: "function",
+              name: "get_weather",
+              description: "weather lookup",
+              parameters: { type: "object", properties: { city: { type: "string" } } },
+              strict: true,
+            },
+          ],
+        },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(result["messages"]).toEqual([{ role: "user", content: "hi" }]);
+    expect(result["tools"]).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "weather lookup",
+          parameters: { type: "object", properties: { city: { type: "string" } } },
+          strict: true,
+        },
+      },
+    ]);
+  });
+
+  it("additional_tools 与顶层 tools 并存 → 按函数名去重（顶层优先）", () => {
+    const result = buildInternalFromResponses({
+      model: MODEL,
+      input: [
+        {
+          type: "additional_tools",
+          role: "developer",
+          tools: [
+            {
+              type: "function",
+              name: "get_weather",
+              description: "from additional_tools",
+              parameters: { type: "object", properties: {} },
+            },
+            {
+              type: "function",
+              name: "get_time",
+              description: "from additional_tools",
+              parameters: { type: "object", properties: {} },
+            },
+          ],
+        },
+        { role: "user", content: "hi" },
+      ],
+      tools: [
+        {
+          type: "function",
+          name: "get_weather",
+          description: "from top-level",
+          parameters: { type: "object", properties: {} },
+        },
+      ],
+    });
+    const tools = result["tools"] as Array<{
+      type: string;
+      function: { name: string; description?: string; parameters: object };
+    }>;
+    expect(tools.map((t) => t["function"]["name"])).toEqual(["get_weather", "get_time"]);
+    expect(tools[0]?.["function"]["description"]).toBe("from top-level");
+    expect(tools[1]?.["function"]["description"]).toBe("from additional_tools");
+  });
+
   it("instructions → 顶部 system 消息", () => {
     const result = buildInternalFromResponses({
       model: MODEL,
@@ -874,6 +1179,64 @@ describe("端到端：非流式（openai 上游）", () => {
     expect(await countTxByType(userId, "usage")).toBe(1);
     expect(await latestLogStatus(userId)).toBe("success");
   });
+
+  it("additional_tools 输入项（Codex Responses Lite）→ hoist 到上游 tools 且不产生消息", async () => {
+    const userId = await setupUser("resp-atools@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    await setupProviderWithModel(MODEL);
+    await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+
+    let capturedBody = "";
+    stubUpstreamFetch((_url, init) => {
+      capturedBody = String(init.body ?? "");
+      return new Response(JSON.stringify(CHAT_RESPONSE), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const res = await postResponses(
+      plaintext,
+      JSON.stringify({
+        model: MODEL,
+        input: [
+          {
+            type: "additional_tools",
+            role: "developer",
+            tools: [
+              {
+                type: "function",
+                name: "get_weather",
+                description: "weather lookup",
+                parameters: { type: "object", properties: { city: { type: "string" } } },
+              },
+            ],
+          },
+          { role: "user", content: "what's the weather?" },
+        ],
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    // 上游 chat 请求：无 carrier 消息；工具已 hoist 进请求级 tools
+    const upstreamBody = JSON.parse(capturedBody) as {
+      messages: Array<{ role: string; content: string }>;
+      tools: Array<{ type: string; function: { name: string } }>;
+    };
+    expect(upstreamBody["messages"]).toEqual([
+      { role: "user", content: "what's the weather?" },
+    ]);
+    expect(upstreamBody["tools"]).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "weather lookup",
+          parameters: { type: "object", properties: { city: { type: "string" } } },
+        },
+      },
+    ]);
+  });
 });
 
 describe("端到端：非流式（anthropic 上游自洽闭环）", () => {
@@ -1041,8 +1404,8 @@ describe("端到端：错误码（OpenAI 形态错误体）", () => {
     expect(await latestLogStatus(userId)).toBe("rejected");
   });
 
-  it("402 余额不足", async () => {
-    const userId = await setupUser("resp-402@test.dev", 0);
+  it("402 余额为负（D2 债务）", async () => {
+    const userId = await setupUser("resp-402@test.dev", -1);
     const { plaintext } = await setupKey(userId);
     await setupProviderWithModel(MODEL);
     const res = await postResponses(plaintext);
@@ -1113,6 +1476,119 @@ describe("端到端：错误码（OpenAI 形态错误体）", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { message: string } };
     expect(body["error"]?.["message"]).toContain("input");
+  });
+});
+
+describe("端到端：Codex Responses Lite 全量适配（namespace 平面化 + reasoning 回传）", () => {
+  /** 模拟 Codex ≥0.149.0 / GPT-5.6 lite 请求：additional_tools[functions namespace] +
+   *  tool_search/web 命名空间（应丢弃）+ reasoning 回放 + function_call 往返 + 40k 上下文。 */
+  function codexLiteBody(): string {
+    const bigContext = "x".repeat(40_000);
+    return JSON.stringify({
+      model: MODEL,
+      instructions: [
+        { type: "message", role: "developer", content: "You are a coding agent." },
+      ],
+      input: [
+        {
+          type: "additional_tools",
+          id: "at_1",
+          role: "developer",
+          tools: [
+            {
+              type: "namespace",
+              name: "functions",
+              tools: [
+                {
+                  type: "function",
+                  name: "exec",
+                  description: "run a command",
+                  parameters: { type: "object", properties: { cmd: { type: "string" } } },
+                },
+                {
+                  type: "function",
+                  name: "lookup",
+                  description: "look up info",
+                  parameters: { type: "object", properties: {} },
+                },
+              ],
+            },
+            { type: "namespace", name: "tool_search", tools: [{ type: "tool_search", name: "tool_search" }] },
+            { type: "namespace", name: "web", tools: [{ type: "web_search", name: "web" }] },
+          ],
+        },
+        {
+          type: "reasoning",
+          id: "rs_1",
+          summary: [{ type: "summary_text", text: "previous round thinking" }],
+        },
+        { role: "assistant", content: "I checked the code." },
+        { type: "function_call", call_id: "call_1", name: "exec", arguments: '{"cmd":"ls"}' },
+        { type: "function_call_output", call_id: "call_1", output: "src/" },
+        { role: "user", content: bigContext },
+      ],
+    });
+  }
+
+  it("lite 请求 → 200；上游收到扁平 function tools；reasoning 默认剥离（flag off）", async () => {
+    const userId = await setupUser("resp-lite-off@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    await setupProviderWithModel(MODEL);
+    await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+
+    let capturedBody = "";
+    stubUpstreamFetch((_url, init) => {
+      capturedBody = String(init.body ?? "");
+      return new Response(JSON.stringify(CHAT_RESPONSE), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const res = await postResponses(plaintext, codexLiteBody());
+    expect(res.status).toBe(200);
+
+    const upstreamBody = JSON.parse(capturedBody) as {
+      messages: Array<Record<string, unknown>>;
+      tools: Array<{ function: { name: string } }>;
+    };
+    // namespace 平面化：仅 functions 提取；web/tool_search 命名空间被 buildTools 丢弃
+    expect(upstreamBody["tools"]?.map((t) => t["function"]["name"])).toEqual(["exec", "lookup"]);
+    // flag off（默认）：上游 messages 无 reasoning_content（openai 适配器剥离）
+    const assistantMsg = upstreamBody["messages"].find((m) => m["role"] === "assistant");
+    expect(assistantMsg?.["reasoning_content"]).toBeUndefined();
+  });
+
+  it("reasoning_roundtrip=true → 上游收到 assistant.reasoning_content", async () => {
+    const userId = await setupUser("resp-lite-on@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(MODEL);
+    // 打开回传开关（openai 面生效）
+    const db = createDb(env);
+    await db
+      .update(providers)
+      .set({ reasoningRoundtrip: true })
+      .where(eq(providers.id, providerId));
+    await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+
+    let capturedBody = "";
+    stubUpstreamFetch((_url, init) => {
+      capturedBody = String(init.body ?? "");
+      return new Response(JSON.stringify(CHAT_RESPONSE), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const res = await postResponses(plaintext, codexLiteBody());
+    expect(res.status).toBe(200);
+
+    const upstreamBody = JSON.parse(capturedBody) as {
+      messages: Array<Record<string, unknown>>;
+    };
+    // 挂载位置：reasoning 之后第一条 assistant 消息（function_call 前的 assistant message）
+    const assistantMsg = upstreamBody["messages"].find((m) => m["role"] === "assistant");
+    expect(assistantMsg?.["reasoning_content"]).toBe("previous round thinking");
   });
 });
 

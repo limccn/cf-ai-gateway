@@ -1,7 +1,10 @@
 // 深度 DOM 审计：定位溢出元素文本、表格列宽、移动导航栏结构
+// 本机专用脚本：依赖 playwright（未声明为 devDeps，需 `npm i -D playwright && npx playwright install chromium`）
+// 前置：npm run dev + seed users（同 scripts/ui-audit.mjs）
+// 用法：node scripts/ui-audit-detail.mjs
 import { chromium } from "playwright";
 
-const BASE = "http://localhost:5173";
+const BASE = process.env.BASE_URL ?? "http://localhost:5173";
 const STATE = new URL("./ui-audit/state.json", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const VIEWPORTS = [
   { name: "pc", width: 1440, height: 900 },

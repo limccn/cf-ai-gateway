@@ -13,6 +13,11 @@ import { detectProtocol, ProtocolDetectionError } from "../lib/protocol-detect";
 
 export function protocolDetectMiddleware(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
+    // 未认证短路（LOW perf）：无凭据请求必被 gatewayAuth 401，无需 parse body 判定协议；
+    // 免去攻击/扫描流量全量 JSON 解析。带凭据但失败仍由 gatewayAuth 兜底 401。
+    if (c.req.header("authorization") === null) {
+      return next();
+    }
     const body: unknown = await c.req.json().catch(() => null);
     if (body === null) {
       return next();

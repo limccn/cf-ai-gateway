@@ -71,6 +71,28 @@ describe("maskModelInData", () => {
       `up ${REQUEST} down`,
     );
   });
+  it("Responses 帧：response.model 嵌套回写（H4）", () => {
+    const out = maskModelInData(
+      { type: "response.created", response: { id: "resp_1", model: "deepseek-chat", status: "in_progress" } },
+      REQUEST,
+      UPSTREAM,
+    );
+    const resp = (out as { response: { id: string; model: string } }).response;
+    expect(resp.model).toBe(REQUEST);
+    expect(resp.id).toBe("resp_1"); // 其余字段不受影响
+    expect(out).not.toBe(null);
+  });
+  it("response.completed 同样回写；非 response.* 帧含 response 键不伪造", () => {
+    const out = maskModelInData(
+      { type: "response.completed", response: { model: "deepseek-chat" } },
+      REQUEST,
+      UPSTREAM,
+    );
+    expect((out as { response: { model: string } }).response.model).toBe(REQUEST);
+    // 普通帧（chat completion chunk）带 response 键是异常形态 → 不伪造（保持原引用）
+    const src = { type: "chat.completion.chunk", response: { model: "deepseek-chat" } };
+    expect(maskModelInData(src, REQUEST, UPSTREAM)).toBe(src);
+  });
 });
 
 describe("maskModelInStream", () => {

@@ -1,9 +1,9 @@
 // M5 5.4 明细保留期清理：scheduled cron 按保留期删除过期 request_logs（默认 30 天，env 可配置）。
 // D1 大批量删除分批执行（每批 DELETE ... LIMIT 500），避免单条超大语句与长事务；
 // 达到单次运行上限（MAX_CHUNKS × 500 行）时截断并记 warn（cron 执行时长防护）。
-import { lt } from "drizzle-orm";
+import { inArray, lt } from "drizzle-orm";
 import type { Db } from "../db";
-import { requestLogs } from "../db/schema";
+import { balanceTx, requestLogs } from "../db/schema";
 import type { Logger } from "./logger";
 
 export const DEFAULT_RETENTION_DAYS = 30;
@@ -36,10 +36,25 @@ export async function runRequestLogCleanup(
   let truncated = false;
 
   for (let chunk = 0; chunk < MAX_CHUNKS; chunk++) {
+    // D1 PRAGMA foreign_keys=1（本地/stg 实测）：balance_tx.ref_request_id 引用
+    // request_logs.id 且无 ON DELETE 动作 → 直接删被引用行会整批撞 FK 报错。
+    // 先取本批待删 id 并置空流水追溯指针（流水行保留，仅断明细跳转），再删明细。
+    const victims = await db
+      .select({ id: requestLogs.id })
+      .from(requestLogs)
+      .where(lt(requestLogs.createdAt, cutoff))
+      .limit(DELETE_CHUNK_SIZE);
+    if (victims.length === 0) {
+      break;
+    }
+    const ids = victims.map((v) => v.id);
+    await db
+      .update(balanceTx)
+      .set({ refRequestId: null })
+      .where(inArray(balanceTx.refRequestId, ids));
     const result = await db
       .delete(requestLogs)
-      .where(lt(requestLogs.createdAt, cutoff))
-      .limit(DELETE_CHUNK_SIZE)
+      .where(inArray(requestLogs.id, ids))
       .run();
     deleted += result.meta.changes;
     if (result.meta.changes < DELETE_CHUNK_SIZE) {

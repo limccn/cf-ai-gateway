@@ -106,6 +106,10 @@ export interface SsePipeOptions {
     kind: "end" | "error" | "cancel",
     detail?: unknown,
   ) => void | Promise<void>;
+  /** 流空闲超时（ms，U7）：两次上游 chunk 的最大间隔；触发 → 取消上游读并报
+   *  idle-timeout 错误（TTFB 超时只保护响应头前，流中途停顿由本层兜底）。
+   *  缺省 = 无超时。 */
+  idleTimeoutMs?: number;
 }
 
 /**
@@ -122,9 +126,21 @@ export function pipeSseStream(
   opts: SsePipeOptions = {},
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
+  // H12：reader 提升到构造作用域（cancel 钩子需访问；输入流在构造后立即被本管线独占，
+  // 调用方均为新构造流，无已锁定竞态）
+  const reader = input.getReader();
   let buffer = "";
   let stopped = false;
   let terminated = false;
+  let idleFired = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function clearIdleTimer(): void {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  }
 
   async function terminate(
     kind: "end" | "error" | "cancel",
@@ -141,20 +157,46 @@ export function pipeSseStream(
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      const reader = input.getReader();
       let endKind: "end" | "error" = "end";
       let endDetail: unknown;
       try {
         while (true) {
-          const { done, value } = await reader.read();
+          // U7：空闲超时（每 chunk 重置）。触发 → reader.cancel 停止上游拉取
+          //（pending read 转为 done → 循环退出 → terminate 结算），同时以
+          // idle-timeout 错误结束输出（下游 read 拒绝；error 优先于 close）
+          if (opts.idleTimeoutMs !== undefined) {
+            idleTimer = setTimeout(() => {
+              idleFired = true;
+              void reader.cancel(new Error("idle timeout")).catch(() => {});
+              try {
+                controller.error(new Error(`upstream idle timeout after ${opts.idleTimeoutMs}ms`));
+              } catch {
+                // 输出已取消/关闭，忽略
+              }
+            }, opts.idleTimeoutMs);
+          }
+          let done: boolean;
+          let value: Uint8Array | undefined;
+          try {
+            const read = await reader.read();
+            done = read.done;
+            value = read.value;
+          } finally {
+            clearIdleTimer();
+          }
           if (done) {
             break;
           }
+          // done=false 时 value 必有值（ReadableStream 契约）；undefined 分支为不可达防御
+          if (value === undefined) {
+            break;
+          }
+          const chunk = value;
           if (opts.transform === undefined) {
             // 透传模式：输出原始字节（settle/观察为旁路，不参与输出）
-            controller.enqueue(value);
+            controller.enqueue(chunk);
           }
-          buffer += decoder.decode(value, { stream: true });
+          buffer += decoder.decode(chunk, { stream: true });
           // 帧排空：一 chunk 可含多帧，一帧可跨多 chunk
           for (;;) {
             const frame = splitNextFrame(buffer);
@@ -186,8 +228,11 @@ export function pipeSseStream(
           opts.transform.onEnd?.(controller);
         }
       } catch (error) {
-        endDetail = error;
-        if (opts.transform?.onError !== undefined) {
+        if (idleFired) {
+          // 空闲超时：不输出错误帧（消费方已停投喂），直接以 idle-timeout 错误结束
+          endDetail = new Error(`upstream idle timeout after ${opts.idleTimeoutMs}ms`);
+          endKind = "error";
+        } else if (opts.transform?.onError !== undefined) {
           try {
             opts.transform.onError(error, controller);
             endKind = "end"; // 消费方已输出错误事件 → 正常关闭
@@ -213,7 +258,13 @@ export function pipeSseStream(
       }
     },
     async cancel(reason) {
+      clearIdleTimer();
       await terminate("cancel", reason);
+      // H12：cancel 传播 —— 客户端断开后释放上游 reader（pending read 转 done，
+      // 拉流循环退出），不再持续拉取+缓冲整个剩余响应（上游成本与内存同时释放）；
+      // 输入侧也是本管线的输出（wrapStreamWithSettlement 链）→ cancel 沿链上溯
+      // 直至真正释放上游 HTTP body。
+      await reader.cancel(reason).catch(() => {});
     },
   });
 }

@@ -106,6 +106,10 @@ describe("管道：/v1/chat/completions 非流式", () => {
 
     const res = await postChat(plaintext);
     expect(res.status).toBe(200);
+    // F4（安全评审）：成功路径限流头必须存在（c.body merge 语义修复，先于 body 断言）
+    expect(res.headers.get("x-ratelimit-limit")).toBe("60");
+    expect(res.headers.get("x-ratelimit-remaining")).toBe("59");
+    expect(res.headers.get("x-ratelimit-reset")).toBeTruthy();
     const json = (await res.json()) as { id: string; choices: unknown[] };
     expect(json["id"]).toBe("chatcmpl-baseline");
     expect(json["choices"]).toHaveLength(1);
@@ -186,8 +190,9 @@ describe("管道：/v1/chat/completions 非流式", () => {
     expect(await latestLogStatus(userId)).toBe("rejected");
   });
 
-  it("402：余额不足 → 不转发、不扣费", async () => {
-    const userId = await setupUser("pipeline-402@test.dev", 0);
+  it("402：余额为负（D2 债务）→ 拦截，不转发、不扣费", async () => {
+    // D2 债务模型（U3）：预检只拦 balance < 0（0/正余额可发请求，超额部分记债务后自愈）
+    const userId = await setupUser("pipeline-402@test.dev", -1);
     const { plaintext } = await setupKey(userId);
     await setupProviderWithModel(MODEL);
 
@@ -203,6 +208,17 @@ describe("管道：/v1/chat/completions 非流式", () => {
     expect(json["error"]?.["message"]).toBeTruthy();
     expect(upstreamCalled).toBe(false);
     expect(await countTxByType(userId, "usage")).toBe(0);
+  });
+
+  it("余额 0 可发请求（债务模型：用完变负，不预拦）", async () => {
+    const userId = await setupUser("pipeline-zero-balance@test.dev", 0);
+    const { plaintext } = await setupKey(userId);
+    await setupProviderWithModel(MODEL);
+    await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+    stubUpstreamFetch(() => new Response(JSON.stringify(CHAT_RESPONSE), { status: 200 }));
+
+    const res = await postChat(plaintext);
+    expect(res.status).toBe(200);
   });
 
   it("502：上游不可达 → 不扣费、明细记 error", async () => {
@@ -241,6 +257,10 @@ describe("管道：/v1/chat/completions 流式", () => {
 
     const res = await postChat(plaintext, chatBody(true));
     expect(res.status).toBe(200);
+    // F4（安全评审）：SSE 成功路径限流头必须存在（c.body merge 语义修复）
+    expect(res.headers.get("x-ratelimit-limit")).toBe("60");
+    expect(res.headers.get("x-ratelimit-remaining")).toBe("59");
+    expect(res.headers.get("x-ratelimit-reset")).toBeTruthy();
     expect(res.headers.get("Content-Type")).toContain("text/event-stream");
 
     const text = await res.text();

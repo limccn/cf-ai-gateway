@@ -30,10 +30,15 @@ const report = (name, ok, extra = "") => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ===== 夹具：member key + 历史行 =====
-const keyRows = q(`SELECT id FROM api_keys WHERE user_id=26 AND name='e2e-test';`);
+// user_id 从 key 行读取（曾硬编码 26，bootstrap 重建 member 后即失效）
+const keyRows = q(
+  `SELECT k.id, k.user_id, u.email FROM api_keys k JOIN users u ON u.id = k.user_id ` +
+  `WHERE k.name='e2e-test' ORDER BY k.id DESC LIMIT 1;`,
+);
 if (!keyRows[0]) throw new Error("e2e-test key not found — run stg-e2e-bootstrap first");
 const KEY_ID = keyRows[0].id;
-const MEMBER_ID = 26;
+const MEMBER_ID = keyRows[0].user_id;
+const MEMBER_EMAIL = keyRows[0].email;
 
 const DAY = 86_400_000;
 const offsetMs = TZ * 60_000;
@@ -74,7 +79,7 @@ console.log(`[ranges] credential account seeded:`, JSON.stringify(acctCheck[0] ?
 const signIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
   method: "POST",
   headers: { "Content-Type": "application/json", Origin: BASE },
-  body: JSON.stringify({ email: "e2e-user@staging.test", password: PW }),
+  body: JSON.stringify({ email: MEMBER_EMAIL, password: PW }),
 });
 // Node 24 getSetCookie() 返回全部 Set-Cookie 头（get() 只取第一个，可能丢 cookie）
 const setCookie = signIn.headers.getSetCookie().join("; ");
@@ -83,9 +88,32 @@ const m = setCookie.match(/(?:__Secure-)?better-auth\.session_token=[^;]+/);
 if (!m) throw new Error(`sign-in failed status=${signIn.status} body=${await signIn.text()}`);
 const COOKIE = m[0];
 console.log(`[ranges] set-cookie: ${setCookie.slice(0, 80)}…`);
-console.log(`[ranges] signed in as e2e-user@staging.test (cookie ok)`);
+console.log(`[ranges] signed in as ${MEMBER_EMAIL} (cookie ok)`);
+
+// 动态日期键（脚本运行日滚动；曾硬编码 2026-08-30 导致隔日 FAIL）。
+// 桶键是「本地时钟标签」：created_at 按 tzOffsetMin 平移后 strftime('%Y-%m-%dT%H:00:00Z')
+// —— 值为本地时刻，仅格式带 Z。故键必须由本地时钟派生（ts 平移 TZ 分钟后再格式化）。
+const localKey = (ts) => new Date((ts + TZ * 60) * 1000).toISOString();
+const dayKey = (ts) => localKey(ts).slice(0, 10);
+const hourKey = (ts) => `${localKey(ts).slice(0, 13)}:00:00Z`;
+const D1_KEY = dayKey(t(1, 12)); // 昨天直插行所在日
+const D3_KEY = dayKey(t(3, 9));
+const D29_KEY = dayKey(t(29, 9));
+const D30_KEY = dayKey(t(30, 9));
+const D1_HOUR = hourKey(t(1, 12));
+
+// 跨日防护：夹具 ts 是相对「脚本启动日」派生的绝对时刻；若本地日界在运行中被跨过，
+// 窗口/桶键随 API 的 now 移动而全部错位（静默 FAIL 难排查）——检测到即 fail fast。
+const START_DAY = dayKey(Math.floor(Date.now() / 1000));
+const assertSameDay = () => {
+  const nowDay = dayKey(Math.floor(Date.now() / 1000));
+  if (nowDay !== START_DAY) {
+    throw new Error(`local day changed mid-run (${START_DAY} → ${nowDay}) — relative fixtures stale; re-run`);
+  }
+};
 
 const usage = async (range, tz) => {
+  assertSameDay();
   const res = await fetch(`${BASE}/api/me/usage?range=${range}&tzOffsetMin=${tz}&limit=50`, {
     headers: { Cookie: COOKIE },
   });
@@ -104,7 +132,7 @@ try {
   const todayKeys = today.aggregates.map((a) => a.group);
   const todayTotal = today.aggregates.reduce((s, a) => s + a.requests, 0);
   report("today contains verify rows (≥7)", todayTotal >= 7, `total=${todayTotal}`);
-  report("today excludes yesterday-12h", !todayKeys.includes("yesterday-12h") && !todayKeys.some((k) => k.startsWith("2026-08-30T")), `buckets=${todayKeys.length}`);
+  report("today excludes yesterday-12h", !todayKeys.includes(D1_HOUR), `buckets=${todayKeys.length}`);
   const hourShape = todayKeys.every((k) => /^\d{4}-\d{2}-\d{2}T\d{2}:00:00Z$/.test(k));
   report("today hour bucket shape", hourShape, todayKeys.slice(0, 3).join(","));
   // tz 差异：480 时 today 首桶 = 本地 00:00；0 时首桶 = UTC 00:00（本地 08:00）——两者不同键
@@ -117,22 +145,22 @@ try {
   const yesterday = await usage("yesterday", TZ);
   const yKeys = yesterday.aggregates.map((a) => a.group);
   const yTotal = yesterday.aggregates.reduce((s, a) => s + a.requests, 0);
-  report("yesterday = 1 row", yTotal === 1 && yKeys.some((k) => k.startsWith("2026-08-30T12")), `total=${yTotal} buckets=${yKeys.join(",")}`);
+  report("yesterday = 1 row", yTotal === 1 && yKeys.includes(D1_HOUR), `total=${yTotal} buckets=${yKeys.join(",")}`);
 
   // 3. last14：昨天 + 3 天前（29 天前不在）
   const last14 = await usage("last14", TZ);
   const d14Keys = last14.aggregates.map((a) => a.group);
   const d14Total = last14.aggregates.reduce((s, a) => s + a.requests, 0);
   const dayShape = d14Keys.every((k) => /^\d{4}-\d{2}-\d{2}$/.test(k));
-  report("last14 includes d1+d3, excludes d29", d14Keys.includes("2026-08-30") && d14Keys.includes("2026-08-28") && !d14Keys.includes("2026-08-02"), d14Keys.join(","));
+  report("last14 includes d1+d3, excludes d29", d14Keys.includes(D1_KEY) && d14Keys.includes(D3_KEY) && !d14Keys.includes(D29_KEY), d14Keys.join(","));
   report("last14 day bucket shape + total", dayShape && d14Total >= 2, `total=${d14Total}`);
 
   // 4. last30：昨天 + 3 天前 + 29 天前（30 天前不在）
   const last30 = await usage("last30", TZ);
   const d30Keys = last30.aggregates.map((a) => a.group);
   const d30Total = last30.aggregates.reduce((s, a) => s + a.requests, 0);
-  report("last30 includes d1+d3+d29", ["2026-08-30", "2026-08-28", "2026-08-02"].every((k) => d30Keys.includes(k)), d30Keys.join(","));
-  report("last30 excludes d30", !d30Keys.includes("2026-08-01"), `total=${d30Total}`);
+  report("last30 includes d1+d3+d29", [D1_KEY, D3_KEY, D29_KEY].every((k) => d30Keys.includes(k)), d30Keys.join(","));
+  report("last30 excludes d30", !d30Keys.includes(D30_KEY), `total=${d30Total}`);
 
   // 5. 明细窗口边界：last30 details 含直插 3 条 + verify 行，不含 d30-09h
   const last30Details = await usage("last30", TZ);

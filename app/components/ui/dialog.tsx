@@ -25,6 +25,10 @@ export function Dialog({
   className,
 }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  // 回调经 ref 转发：调用方常见 inline lambda（每次渲染新引用）。若直接进 useEffect
+  // 依赖，任意渲染都触发 effect 重建 → panelRef.focus() 反复抢焦点，用户输入被断（丢输入）。
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
 
   useEffect(() => {
     if (!open) {
@@ -36,7 +40,7 @@ export function Dialog({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onOpenChange(false);
+        onOpenChangeRef.current(false);
       }
     };
     document.addEventListener("keydown", handleKeyDown);
@@ -44,7 +48,7 @@ export function Dialog({
       document.body.style.overflow = previousOverflow;
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [open, onOpenChange]);
+  }, [open]);
 
   if (!open) {
     return null;

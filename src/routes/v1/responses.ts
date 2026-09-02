@@ -6,9 +6,11 @@ import { HTTPException } from "hono/http-exception";
 import type { ProxyEndpointOptions } from "./proxy";
 import { AdapterError } from "../../providers/types";
 import type { AppEnv } from "../../types";
+import { logger as moduleLogger } from "../../lib/logger";
 import {
   buildInternalFromResponses,
   createStreamToResponsesTransform,
+  parseIncludeReasoning,
   transformResponseToResponses,
   transformStreamToResponses,
 } from "../../providers/responses";
@@ -38,7 +40,9 @@ function transformResponseWithModel(
   const validJson = c.req.valid.bind(c.req) as (target: "json") => unknown;
   const raw = validJson("json") as Record<string, unknown> | undefined;
   const model = raw !== undefined && typeof raw["model"] === "string" ? raw["model"] : "";
-  return transformResponseToResponses(data, model);
+  // R4：非流式 reasoning item 合成信号（include 白名单命中；与 buildInternalFromResponses 同源）
+  const includeReasoning = parseIncludeReasoning(raw ?? {}, moduleLogger);
+  return transformResponseToResponses(data, model, includeReasoning);
 }
 
 export const responsesProxyOptions: ProxyEndpointOptions = {
@@ -47,7 +51,9 @@ export const responsesProxyOptions: ProxyEndpointOptions = {
   transformResponse: transformResponseWithModel,
   // R2.4 帧级转换：OpenAI 上游时在结算管线上消费同一批帧（主路径）；
   // 保留字节级 transformStream 供 anthropic 上游 corner 使用（proxy 按上游类型分支）。
-  streamConsumer: createStreamToResponsesTransform,
+  // R4：工厂接收入站 rawBody（proxy 传参），解析 include 白名单信号后创建转换器
+  streamConsumer: (body?: Record<string, unknown>) =>
+    createStreamToResponsesTransform(parseIncludeReasoning(body ?? {}, moduleLogger)),
   transformStream: transformStreamToResponses,
   cachePrefix: "responses:",
   // 协议偏好：OpenAI 面请求优先 type=openai 的 provider；仅配 anthropic provider 时回退转换转发。

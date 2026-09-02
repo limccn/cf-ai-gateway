@@ -25,7 +25,10 @@ export function maskModelInErrorMessage(
  * 非流式 JSON 对象层伪装（就地浅拷贝，纯函数）：
  *   1. 顶层 `model` 字符串 → 回写请求内部名（OpenAI 与 Anthropic 两种出站形态都在顶层）。
  *   2. Anthropic 出站流式事件 `message_start.message.model` → 回写（流式帧复用本函数）。
- *   3. 顶层 `error.message` 字符串 → 上游模型名文本替换。
+ *   3. Responses SSE 帧 `response.model`（model 嵌套在 response 对象下，H4：response.created/
+ *      response.completed 等所有 `response.*` 事件都携带；此前只改顶层 → 流式泄漏上游真实 id，
+ *      客户端回传导致 404）。
+ *   4. 顶层 `error.message` 字符串 → 上游模型名文本替换。
  * 无变化时返回原引用（调用方据此跳过字节重写）；非对象/无 model 字段不伪造。
  */
 export function maskModelInData(
@@ -55,6 +58,23 @@ export function maskModelInData(
     const msg = inner as Record<string, unknown>;
     if (typeof msg["model"] === "string" && msg["model"] !== requestModel) {
       out["message"] = { ...msg, model: requestModel };
+      changed = true;
+    }
+  }
+
+  // H4：Responses SSE 帧 —— model 在 `response` 对象内（response.created/completed 等
+  // 所有 `response.*` 事件）；内层对象不可变拷贝（恒等判断走 changed 标志）
+  const resp = out["response"];
+  if (
+    typeof out["type"] === "string" &&
+    out["type"].startsWith("response.") &&
+    resp !== null &&
+    typeof resp === "object" &&
+    !Array.isArray(resp)
+  ) {
+    const r = resp as Record<string, unknown>;
+    if (typeof r["model"] === "string" && r["model"] !== requestModel) {
+      out["response"] = { ...r, model: requestModel };
       changed = true;
     }
   }
@@ -131,9 +151,10 @@ export function maskModelInStream(
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  // H12：reader 提升到构造作用域（cancel 钩子需访问；输入流为新构造流，无已锁定竞态）
+  const reader = body.getReader();
   return new ReadableStream<Uint8Array>({
     async start(controller) {
-      const reader = body.getReader();
       let errored = false;
       try {
         while (true) {
@@ -170,6 +191,11 @@ export function maskModelInStream(
           controller.close();
         }
       }
+    },
+    // H12：cancel 传播 —— 客户端断开后释放输入流 reader（通常是 wrapStreamWithSettlement
+    // 的输出），沿链上溯直至 sse-pipe 释放上游 HTTP body；断开后不再拉流缓冲剩余响应。
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => {});
     },
   });
 }

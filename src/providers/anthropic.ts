@@ -14,6 +14,7 @@ import type {
 import { AdapterError } from "./types";
 import { parseOpenAiUsage } from "./openai";
 import { applyHttpBody, buildUpstreamHeaders } from "./http-options";
+import { logger as moduleLogger } from "../lib/logger";
 import { resolveModelId } from "../lib/model-id";
 import {
   pipeSseStream,
@@ -28,6 +29,24 @@ const DEFAULT_MAX_TOKENS = 4096;
 type JsonObject = Record<string, unknown>;
 
 // ============ 请求转换（OpenAI chat → Anthropic messages） ============
+
+/**
+ * 档位归一（R2，导出供单测直测）：OpenAI/Responses 侧 reasoning_effort → Anthropic effort。
+ * - none → null（省略思考参数）；minimal → low；low/medium/high/xhigh 1:1；
+ * - 其他字符串 → 原样透传（上游兜底；调用方对未知档位 warn）。
+ */
+export function normalizeEffort(effort: string): string | null {
+  if (effort === "none") {
+    return null;
+  }
+  if (effort === "minimal") {
+    return "low";
+  }
+  return effort;
+}
+
+/** 已知 Anthropic effort 档位（unknown 检测用）。 */
+const KNOWN_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 
 function buildRequest(
   req: InternalRequest,
@@ -75,6 +94,65 @@ function buildRequest(
   }
   if (req.stream) {
     anthropicBody["stream"] = true;
+  }
+
+  // R1：Anthropic 入站透传字段（Claude Code 的 thinking/output_config）逐字写回上游，
+  // 不校验形态（畸形值由上游 400 显式暴露）。位于 applyHttpBody 之前 → httpOptions.body
+  // 显式覆盖优先级更高（语义自洽）。仅 anthropic 协议入口填充，其余请求为 undefined 零改动。
+  if (req.anthropicExtras) {
+    if (req.anthropicExtras.thinking !== undefined) {
+      anthropicBody["thinking"] = req.anthropicExtras.thinking;
+    }
+    if (req.anthropicExtras.output_config !== undefined) {
+      anthropicBody["output_config"] = req.anthropicExtras.output_config;
+    }
+  }
+
+  // R2：reasoning_effort → Anthropic effort 映射（Codex/OpenAI 协议侧思考深度；
+  // Responses 入站已归一为 reasoning_effort，同一逻辑生效）。仅 adaptive 线：
+  // thinking:{type:"adaptive"} + output_config:{effort}；思考激活时剥离
+  // temperature/top_p（Anthropic 思考模型不收，400 风险）；top_k 白名单本就不含，防御性。
+  // 优先级：R1 显式 thinking（anthropicExtras）> 本映射 > 丢弃（off）。
+  // H3：thinkingMode 未配置（NULL/undefined）≡ 不映射——零变更契约（此前 `?? "auto"`
+  // 把"未配置"静默升格为强制 adaptive 线，无配置上游载荷被注入 thinking + 删参数）。
+  // H6：schema 侧 zod enum 校验（providers/types.ts）拦非法值；此处防 DB 直改绕过 →
+  // 未知值 fail-fast 抛错（配置错误显式暴露，与 U6 fail-closed 精神一致）。
+  const effort = body["reasoning_effort"];
+  const mode = cfg.thinkingMode;
+  if (typeof effort === "string" && effort.length > 0 && mode !== "off") {
+    if (mode === null || mode === undefined) {
+      // H3：未配置 → 不映射（零变更契约，静默跳过）
+    } else if (req.anthropicExtras?.thinking !== undefined) {
+      // 显式 thinking 已含自身语义（客户端知道正确形态），effort 映射跳过
+      moduleLogger.warn("reasoning_effort_overridden_by_explicit_thinking", {
+        model: upstreamModel,
+      });
+    } else if (mode === "budget") {
+      // budget 线只服务 R1 逐字透传的老上游场景，不做档位→预算换算（官方无数值）
+      moduleLogger.warn("reasoning_effort_ignored_budget_mode", {
+        model: upstreamModel,
+      });
+    } else if (mode === "adaptive") {
+      const mapped = normalizeEffort(effort);
+      if (mapped !== null) {
+        if (!KNOWN_EFFORTS.has(mapped)) {
+          moduleLogger.warn("reasoning_effort_unknown", {
+            effort: mapped,
+            model: upstreamModel,
+          });
+        }
+        anthropicBody["thinking"] = { type: "adaptive" };
+        anthropicBody["output_config"] = { effort: mapped };
+        delete anthropicBody["temperature"];
+        delete anthropicBody["top_p"];
+        delete anthropicBody["top_k"];
+      }
+    } else {
+      // H6：schema 外直改 DB 写入的非法值 → fail-fast（不静默按错误配置转发）
+      throw new AdapterError(
+        `Invalid thinkingMode '${String(mode)}' for provider, expected adaptive/budget/off/null`,
+      );
+    }
   }
 
   // baseUrl 两种配置风格均兼容：`https://api.anthropic.com` 或
@@ -496,6 +574,10 @@ export function createStreamToOpenAITransform(): SseFrameTransform {
   let cachedTokens: number | null = null;
   let completionTokens: number | null = null;
   let doneSent = false;
+  // R3a：当前是否处于 thinking 内容块（09-01-stream-thinking-interop）。
+  // 块内 thinking_delta → OpenAI delta.reasoning_content；signature_delta 不输出
+  // （OpenAI 无对应物）；块外同名事件防御性忽略。
+  let inThinkingBlock = false;
 
   function enqueue(
     controller: ReadableStreamDefaultController<Uint8Array>,
@@ -558,7 +640,10 @@ export function createStreamToOpenAITransform(): SseFrameTransform {
       const block = obj["content_block"];
       if (block && typeof block === "object") {
         const b = block as JsonObject;
-        if (b["type"] === "tool_use" && typeof b["name"] === "string") {
+        if (b["type"] === "thinking") {
+          // R3a：thinking 块开始（OpenAI 无块开始语义，仅标记状态；块 index 沿用上游）
+          inThinkingBlock = true;
+        } else if (b["type"] === "tool_use" && typeof b["name"] === "string") {
           const index = typeof obj["index"] === "number" ? obj["index"] : 0;
           enqueue(controller, baseChunk(
             [{
@@ -598,7 +683,19 @@ export function createStreamToOpenAITransform(): SseFrameTransform {
             finish_reason: null,
           }],
         ));
+      } else if (d["type"] === "thinking_delta" && inThinkingBlock && typeof d["thinking"] === "string") {
+        // R3a：thinking 段 → OpenAI delta.reasoning_content（跨块顺序拼接 = 单条 reasoning 流）
+        enqueue(controller, baseChunk(
+          [{ index, delta: { reasoning_content: d["thinking"] }, finish_reason: null }],
+        ));
       }
+      // signature_delta（thinking 块内签名）→ 无输出（OpenAI 无对应物，且不可回写校验）
+      return true;
+    }
+
+    if (event.event === "content_block_stop" || type === "content_block_stop") {
+      // R3a：块结束清 thinking 标记（thinking 块恒先于 text/tool_use 块；Anthropic 无交错）
+      inThinkingBlock = false;
       return true;
     }
 

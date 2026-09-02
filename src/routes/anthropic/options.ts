@@ -41,6 +41,9 @@ export const anthropicProxyOptions: ProxyEndpointOptions = {
   // anthropic 上游时协议短路（passthroughAnthropicStream），不经过本转换。
   streamConsumer: createStreamToAnthropicTransform,
   passthroughAnthropicStream: true,
+  // R1：顶层 thinking/output_config 直通 anthropic 上游（Claude Code effort 恢复）；
+  // OpenAI 上游路径由适配器层天然忽略（extras 不进内部 body，零泄漏）。
+  passthroughAnthropicExtras: true,
   cachePrefix: "anthropic:",
   // 协议偏好：Anthropic 入站优先 type=anthropic 的 provider（上游原生 Anthropic 端点，
   // 如 DeepSeek /anthropic），仅配 openai provider 时回退转换转发（零回归）。
