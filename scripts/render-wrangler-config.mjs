@@ -29,7 +29,7 @@ const OUTPUT_PATH = join(ROOT, "wrangler.toml");
 const DOT_VARS = join(ROOT, ".dev.vars");
 const DOT_VARS_STAGING = join(ROOT, ".dev.vars.staging");
 
-// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（20 键）。
+// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（26 键）。
 // 顶层 [vars] 运行时配置（BETTER_AUTH_URL 等）与 infra 键同策略烘焙——wrangler 4.x 不解析
 // {KEY}，值必须在构建期就位。本地默认值（localhost / 占位）来自 .dev.vars，仅用于本地 dev
 // （wrangler dev 时 .dev.vars 优先于 [vars]，不受影响）；部署真实值走 shell export 覆盖。
@@ -54,19 +54,23 @@ const TOKENS = new Set([
   "GITHUB_CLIENT_ID",
   "GITHUB_ALLOWED_EMAILS",
   "REQUEST_LOG_RETENTION_DAYS",
+  "CACHE_ENABLED",
   // [env.staging.vars]：STAGING_* 独立键，与 infra 键同源管理（--env staging 渲染）。
   "STAGING_API_KEY_PREFIX",
   "STAGING_BETTER_AUTH_URL",
   "STAGING_GITHUB_CLIENT_ID",
   "STAGING_GITHUB_ALLOWED_EMAILS",
   "STAGING_REQUEST_LOG_RETENTION_DAYS",
+  "STAGING_CACHE_ENABLED",
 ]);
 
 /** 本地占位特征：命中即 WARN（仅提醒，不 fail——本地 dev 渲染本来就该是这些值）。 */
 const PLACEHOLDER_HINTS = [/localhost/i, /placeholder-/, /@example\.com/i, /REPLACE/i];
 
 /** 可选 token 的默认值（缺失不报错，取默认；默认链：process.env → .dev.vars → DEFAULT_VALUES）。 */
-const DEFAULT_VALUES = { API_KEY_PREFIX: "sk-" };
+// CACHE_ENABLED / STAGING_CACHE_ENABLED 可选（09-03）：缺省 "false"（全局缓存默认关闭），
+// 显式设 "true" 才启用；DEFAULT 非空避免 fail-fast（与 fail-fast 语义协调：缺省即合法值）。
+const DEFAULT_VALUES = { API_KEY_PREFIX: "sk-", CACHE_ENABLED: "false", STAGING_CACHE_ENABLED: "false" };
 
 // 解析 .dev.vars：KEY=VALUE 行 + # 注释 + 双/单引号剥离（手写解析，零依赖）。
 function parseDotVars(file) {

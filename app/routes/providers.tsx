@@ -363,7 +363,7 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
           <Textarea
             id="provider-models"
             rows={4}
-            placeholder={"gpt-4o=gpt-4o-2024-11-20\nclaude-sonnet=claude-sonnet-4-5"}
+            placeholder={"gpt-4o=gpt-4o-2024-11-20\nclaude-sonnet=claude-sonnet-4.5"}
             value={modelsText}
             onChange={(e) => setModelsText(e.target.value)}
             aria-invalid={errors.models !== undefined}

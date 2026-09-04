@@ -26,7 +26,7 @@ describe("has1mSuffix / strip1mSuffix", () => {
 });
 
 describe("resolveModelId", () => {
-  const MODELS = { "deepseek-chat": "deepseek-chat", "claude-sonnet": "claude-sonnet-4-5" };
+  const MODELS = { "deepseek-chat": "deepseek-chat", "claude-sonnet": "claude-sonnet-4.5" };
 
   it("精确匹配（无后缀请求）：上游/计费均为映射值", () => {
     const r = resolveModelId(MODELS, "deepseek-chat");

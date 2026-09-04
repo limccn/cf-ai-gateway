@@ -1,9 +1,15 @@
 // M4 响应缓存单测（4.5）：命中直接返回、不转发、不扣费、明细记 cached。
 // R3：非流式响应 >5MB 跳过 KV 缓存（照常返回，避免 waitUntil 内 stringify 大响应的峰值）。
+// 09-03：全局开关（CACHE_ENABLED）——缺省关闭，proxy 接入点见 tests 环境绑定 CACHE_ENABLED="true"。
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { buildCacheKey, buildCountKey, hashRequestBody } from "../src/lib/response-cache";
+import {
+  buildCacheKey,
+  buildCountKey,
+  hashRequestBody,
+  isGlobalCacheEnabled,
+} from "../src/lib/response-cache";
 import {
   applyMigrations,
   clearKv,
@@ -304,5 +310,25 @@ describe("响应缓存", () => {
     expect(upstreamCalls).toBe(2);
     expect(await env.CACHE_KV.get(countKey)).toBeNull();
     expect(await env.CACHE_KV.get(cacheKey)).toBeNull();
+  });
+});
+
+describe("全局缓存总开关（CACHE_ENABLED）", () => {
+  it("真值：true/1/yes/on（大小写不敏感、可带空白）→ 开启", () => {
+    expect(isGlobalCacheEnabled("true")).toBe(true);
+    expect(isGlobalCacheEnabled("1")).toBe(true);
+    expect(isGlobalCacheEnabled("yes")).toBe(true);
+    expect(isGlobalCacheEnabled("on")).toBe(true);
+    expect(isGlobalCacheEnabled(" TRUE ")).toBe(true);
+    expect(isGlobalCacheEnabled("On")).toBe(true);
+  });
+
+  it("缺省/其他值 → 关闭（默认关闭语义：false、空串、未知词、undefined）", () => {
+    expect(isGlobalCacheEnabled(undefined)).toBe(false);
+    expect(isGlobalCacheEnabled("false")).toBe(false);
+    expect(isGlobalCacheEnabled("")).toBe(false);
+    expect(isGlobalCacheEnabled("0")).toBe(false);
+    expect(isGlobalCacheEnabled("enabled")).toBe(false);
+    expect(isGlobalCacheEnabled("  ")).toBe(false);
   });
 });

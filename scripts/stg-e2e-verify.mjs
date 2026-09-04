@@ -103,7 +103,11 @@ report("chat stream usage tail", !!usageTail && usageTail.usage.total_tokens > 0
 // [4] Anthropic 面（/v1/messages → 路由到 anthropic provider 原生 /anthropic）
 // max_tokens=128：b.ai deepseek-v4-flash 在 64 下随机空流（reasoning 吃掉预算 → 0 deltas），128+ 稳定出内容（实测 6/6）
 const msg = await api("/v1/messages", { method: "POST", headers: { "anthropic-version": "2023-06-01" }, body: { model: MODEL, max_tokens: 128, messages: [{ role: "user", content: `Reply with exactly: ANTHRO-${NONCE}` }] } });
-const msgText = msg.json?.content?.[0]?.text ?? "";
+// 09-03-cc-stg-reasoning-400 R3：上游 reasoning_content → content 首个 thinking 块（text 紧随其后），
+// 文本断言须按 type 查找而非 content[0]（思考模型恒返回 thinking 块）。
+const msgText = (Array.isArray(msg.json?.content)
+  ? msg.json.content.find((b) => b?.type === "text")?.text
+  : msg.json?.content) ?? "";
 report("/v1/messages Anthropic form", msg.status === 200 && msgText.includes("ANTHRO-"), `status=${msg.status} content=${msgText.slice(0, 40)}`);
 report("/v1/messages usage", msg.json?.usage?.output_tokens > 0, `usage=${JSON.stringify(msg.json?.usage)}`);
 

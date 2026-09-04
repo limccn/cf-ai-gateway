@@ -3,6 +3,9 @@
 // （非流式全字段）、transformStreamToAnthropic（逐事件序列）、三路径等价、
 // x-api-key/Bearer 鉴权、错误重写（401/404/402/429/502/400）、openai 与 anthropic 两类上游、
 // 流式结算、缓存（anthropic: 前缀隔离）。
+// 09-03-cc-stg-reasoning-400（reasoning_content 双向闭环）：assistant thinking 块 →
+// 内部 reasoning_content（R1）、message.reasoning_content → thinking 块（R3 非流式）、
+// delta.reasoning_content → thinking 块事件（R2 流式）、E2E flag 剥/留裁决。
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { env } from "cloudflare:test";
@@ -295,7 +298,7 @@ describe("buildInternalFromAnthropic（入站映射）", () => {
     ]);
   });
 
-  it("assistant：text + tool_use → content + tool_calls；thinking 丢弃", () => {
+  it("assistant：thinking + text + tool_use → content + reasoning_content + tool_calls（R1 不再丢弃；signature 不映射）", () => {
     const result = buildInternalFromAnthropic({
       model: MODEL,
       max_tokens: 10,
@@ -303,9 +306,9 @@ describe("buildInternalFromAnthropic（入站映射）", () => {
         {
           role: "assistant",
           content: [
+            { type: "thinking", thinking: "internal chain", signature: "sig_mock_01" },
             { type: "text", text: "sure" },
             { type: "tool_use", id: "toolu_01", name: "get_weather", input: { city: "shanghai" } },
-            { type: "thinking", thinking: "internal chain" },
           ],
         },
       ],
@@ -314,6 +317,7 @@ describe("buildInternalFromAnthropic（入站映射）", () => {
       {
         role: "assistant",
         content: "sure",
+        reasoning_content: "internal chain",
         tool_calls: [
           {
             id: "toolu_01",
@@ -323,6 +327,84 @@ describe("buildInternalFromAnthropic（入站映射）", () => {
         ],
       },
     ]);
+    // signature 不泄漏进内部形态
+    expect(JSON.stringify(result)).not.toContain("sig_mock_01");
+  });
+
+  it("assistant 多 thinking 块 → reasoning_content 按序直接拼接（无分隔符，跨 text 块顺序保持）", () => {
+    const result = buildInternalFromAnthropic({
+      model: MODEL,
+      max_tokens: 10,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "step one " },
+            { type: "text", text: "working" },
+            { type: "thinking", thinking: "then step two" },
+          ],
+        },
+      ],
+    });
+    expect(result["messages"]).toEqual([
+      { role: "assistant", content: "working", reasoning_content: "step one then step two" },
+    ]);
+  });
+
+  it("assistant 无 thinking 块 → 内部消息与现状逐字节一致（零回归：不新增 reasoning_content 字段）", () => {
+    const textOnly = buildInternalFromAnthropic({
+      model: MODEL,
+      max_tokens: 10,
+      messages: [
+        { role: "assistant", content: [{ type: "text", text: "sure" }] },
+      ],
+    });
+    expect(textOnly["messages"]).toEqual([{ role: "assistant", content: "sure" }]);
+
+    const toolOnly = buildInternalFromAnthropic({
+      model: MODEL,
+      max_tokens: 10,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_01", name: "get_weather", input: { city: "shanghai" } },
+          ],
+        },
+      ],
+    });
+    expect(toolOnly["messages"]).toEqual([
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "toolu_01",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"shanghai"}' },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("thinking 块畸形（thinking 非 string / 缺失 / 空串）→ 跳过，不新增 reasoning_content", () => {
+    const result = buildInternalFromAnthropic({
+      model: MODEL,
+      max_tokens: 10,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking" },
+            { type: "thinking", thinking: 42 },
+            { type: "thinking", thinking: "" },
+            { type: "text", text: "fine" },
+          ],
+        },
+      ],
+    });
+    expect(result["messages"]).toEqual([{ role: "assistant", content: "fine" }]);
   });
 
   it("tools（扁平）→ function 嵌套（input_schema → parameters）；description 保留", () => {
@@ -511,6 +593,65 @@ describe("transformResponseToAnthropic（非流式出站）", () => {
     ]);
   });
 
+  it("reasoning_content → content 首个 thinking 块（text 紧随其后）；tool_calls 共存时顺序 thinking → text → tool_use（R3）", () => {
+    const result = transformResponseToAnthropic({
+      id: "x",
+      object: "chat.completion",
+      created: 1,
+      model: MODEL,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            reasoning_content: "let me reason",
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "get_weather", arguments: '{"city":"shanghai"}' },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    }) as Record<string, unknown>;
+    expect(result["stop_reason"]).toBe("tool_use");
+    expect(result["content"]).toEqual([
+      { type: "thinking", thinking: "let me reason" },
+      { type: "text", text: "answer" },
+      { type: "tool_use", id: "call_1", name: "get_weather", input: { city: "shanghai" } },
+    ]);
+  });
+
+  it("reasoning_content 缺失/空串 → 无 thinking 块（零回归：content 与现状逐字节一致）", () => {
+    const base = {
+      id: "x",
+      object: "chat.completion",
+      created: 1,
+      model: MODEL,
+      choices: [
+        { index: 0, message: { role: "assistant", content: "hi there" }, finish_reason: "stop" },
+      ],
+    };
+    const plain = transformResponseToAnthropic(base) as Record<string, unknown>;
+    const emptyReasoning = transformResponseToAnthropic({
+      ...base,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "hi there", reasoning_content: "" },
+          finish_reason: "stop",
+        },
+      ],
+    }) as Record<string, unknown>;
+    expect(plain["content"]).toEqual([{ type: "text", text: "hi there" }]);
+    // 空串 reasoning_content 与缺失等价（id 每次随机生成，仅比较 content 等有效载荷）
+    expect(emptyReasoning["content"]).toEqual(plain["content"]);
+  });
+
   it("arguments 非法 JSON → input 降级空对象；usage.cached_tokens → cache_read_input_tokens", () => {
     const result = transformResponseToAnthropic({
       id: "x",
@@ -658,6 +799,128 @@ describe("transformStreamToAnthropic（流式出站）", () => {
     });
     const delta = events[5]?.data as Record<string, unknown>;
     expect(delta["delta"]).toEqual({ stop_reason: "tool_use", stop_sequence: null });
+  });
+
+  it("思考流（R2）：delta.reasoning_content → thinking 块事件（start{thinking} → thinking_delta×N → stop），text 块紧随其后 index 递增", async () => {
+    const sse = [
+      openaiChunk('[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{"reasoning_content":"Let me reason"},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{"reasoning_content":" about the plan"},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{"content":"Answer"},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{},"finish_reason":"stop"}]'),
+      openaiChunk('[]').replace('"choices":[]', '"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}'),
+      "data: [DONE]",
+    ].join("\n\n") + "\n\n";
+
+    const text = await streamToText(transformStreamToAnthropic(sseStream(sse)));
+    const events = parseSseEvents(text);
+    expect(events.map((e) => e["event"])).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_delta",
+      "content_block_stop",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+
+    const thinkingStart = events[1]?.data as Record<string, unknown>;
+    expect(thinkingStart["index"]).toBe(0);
+    expect(thinkingStart["content_block"]).toEqual({ type: "thinking", thinking: "" });
+    expect(events[2]?.data["delta"]).toEqual({
+      type: "thinking_delta",
+      thinking: "Let me reason",
+    });
+    expect(events[3]?.data["delta"]).toEqual({
+      type: "thinking_delta",
+      thinking: " about the plan",
+    });
+    expect(events[4]?.data["index"]).toBe(0);
+    const textStart = events[5]?.data as Record<string, unknown>;
+    expect(textStart["index"]).toBe(1);
+    expect(textStart["content_block"]).toEqual({ type: "text" });
+    expect(events[6]?.data["delta"]).toEqual({ type: "text_delta", text: "Answer" });
+  });
+
+  it("思考 + 工具交错（R2）：thinking 块先收口再开 tool_use 块（index 按开启顺序递增）", async () => {
+    const sse = [
+      openaiChunk('[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{"reasoning_content":"need to search"},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{},"finish_reason":"tool_calls"}]'),
+      "data: [DONE]",
+    ].join("\n\n") + "\n\n";
+
+    const text = await streamToText(transformStreamToAnthropic(sseStream(sse)));
+    const events = parseSseEvents(text);
+    expect(events.map((e) => e["event"])).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+
+    const thinkingStart = events[1]?.data as Record<string, unknown>;
+    expect(thinkingStart["index"]).toBe(0);
+    expect(thinkingStart["content_block"]).toEqual({ type: "thinking", thinking: "" });
+    expect(events[2]?.data["delta"]).toEqual({
+      type: "thinking_delta",
+      thinking: "need to search",
+    });
+    expect(events[3]?.data["index"]).toBe(0); // thinking 收口
+    const toolStart = events[4]?.data as Record<string, unknown>;
+    expect(toolStart["index"]).toBe(1);
+    expect(toolStart["content_block"]).toEqual({
+      type: "tool_use",
+      id: "call_1",
+      name: "get_weather",
+    });
+    expect(events[5]?.data["delta"]).toEqual({
+      type: "input_json_delta",
+      partial_json: "{}",
+    });
+    const delta = events[7]?.data as Record<string, unknown>;
+    expect(delta["delta"]).toEqual({ stop_reason: "tool_use", stop_sequence: null });
+  });
+
+  it("防御（R2）：reasoning 晚于 text 到达 → text 块先收口，thinking 块独立成序", async () => {
+    const sse = [
+      openaiChunk('[{"index":0,"delta":{"role":"assistant","content":"early"},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{"reasoning_content":"late thinking"},"finish_reason":null}]'),
+      openaiChunk('[{"index":0,"delta":{},"finish_reason":"stop"}]'),
+      "data: [DONE]",
+    ].join("\n\n") + "\n\n";
+
+    const text = await streamToText(transformStreamToAnthropic(sseStream(sse)));
+    const events = parseSseEvents(text);
+    expect(events.map((e) => e["event"])).toEqual([
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "content_block_start",
+      "content_block_delta",
+      "content_block_stop",
+      "message_delta",
+      "message_stop",
+    ]);
+    // 事件序：text 块（idx0）先收口 → thinking 块（idx1）才开启
+    expect(events[2]?.data["delta"]).toEqual({ type: "text_delta", text: "early" });
+    expect((events[3]?.data as Record<string, unknown>)["index"]).toBe(0);
+    expect(events[4]?.data["content_block"]).toEqual({ type: "thinking", thinking: "" });
+    expect(events[5]?.data["delta"]).toEqual({
+      type: "thinking_delta",
+      thinking: "late thinking",
+    });
   });
 
   it("无 usage 尾包：message_delta output_tokens 兜底 0", async () => {
@@ -1043,6 +1306,127 @@ describe("端到端：openai 上游流式", () => {
     ]);
     expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
     expect(await countTxByType(userId, "usage")).toBe(1);
+  });
+});
+
+describe("端到端：assistant thinking 历史 → 内部 reasoning_content（R1 + flag 门，09-03-cc-stg-reasoning-400）", () => {
+  // 防 flag 状态泄漏：flag-on 测试后复位 mock-provider（setupProviderWithModel 复用行
+  // 不重置该列；后续同文件测试不携带 reasoning_content，泄漏无害但属隐性顺序依赖）。
+  afterEach(async () => {
+    const db = createDb(env);
+    const provider = await db.query.providers.findFirst({
+      where: eq(providers.name, "mock-provider"),
+      columns: { id: true },
+    });
+    if (provider) {
+      await db.update(providers).set({ reasoningRoundtrip: false }).where(eq(providers.id, provider.id));
+    }
+  });
+
+  /** Claude Code thinking 模式两轮 body：轮 1 带 thinking+tool_use，轮 2 带 thinking+text。 */
+  function thinkingRoundtripBody(): string {
+    return JSON.stringify({
+      model: MODEL,
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "weather in shanghai?" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "need to call the tool", signature: "sig_mock_01" },
+            { type: "tool_use", id: "toolu_01", name: "get_weather", input: { city: "shanghai" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_01", content: "20C" }],
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "got the reading" },
+            { type: "text", text: "It is 20C in shanghai." },
+          ],
+        },
+      ],
+    });
+  }
+
+  async function setupThinkingRoundtrip(email: string): Promise<{
+    plaintext: string;
+    captureBody: () => string;
+  }> {
+    const userId = await setupUser(email, 10);
+    const { plaintext } = await setupKey(userId);
+    await setupProviderWithModel(MODEL);
+    await setupPrice(MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+    let capturedBody = "";
+    stubUpstreamFetch((_url, init) => {
+      capturedBody = String(init.body ?? "");
+      return new Response(JSON.stringify(CHAT_RESPONSE), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    return { plaintext, captureBody: () => capturedBody };
+  }
+
+  function parseUpstreamMessages(body: string): Array<Record<string, unknown>> {
+    return (JSON.parse(body) as { messages: Array<Record<string, unknown>> })["messages"];
+  }
+
+  it("flag off（默认）→ openai 适配器剥离 reasoning_content（上游零回归现状语义）", async () => {
+    const { plaintext, captureBody } = await setupThinkingRoundtrip("anthro-rt-off@test.dev");
+    // 显式关 flag（防测试顺序依赖；默认即 false）
+    const db = createDb(env);
+    const provider = await db.query.providers.findFirst({
+      where: eq(providers.name, "mock-provider"),
+      columns: { id: true },
+    });
+    if (provider) {
+      await db.update(providers).set({ reasoningRoundtrip: false }).where(eq(providers.id, provider.id));
+    }
+
+    const res = await postAnthropic("/anthropic/v1/messages", plaintext, thinkingRoundtripBody());
+    expect(res.status).toBe(200);
+
+    const messages = parseUpstreamMessages(captureBody());
+    // R1 入站映射已产生 reasoning_content，但 flag off → 剥净：上游不可见该字段
+    const assistantMsgs = messages.filter((m) => m["role"] === "assistant");
+    expect(assistantMsgs.length).toBe(2);
+    for (const msg of assistantMsgs) {
+      expect(msg["reasoning_content"]).toBeUndefined();
+    }
+    // 工具轮转结构不受影响（tool_calls / tool / content 正常透出）
+    expect(assistantMsgs[0]?.["tool_calls"]).toBeDefined();
+    expect(messages.some((m) => m["role"] === "tool")).toBe(true);
+    expect(assistantMsgs[1]?.["content"]).toBe("It is 20C in shanghai.");
+  });
+
+  it("reasoning_roundtrip=true → 上游保留 reasoning_content（纯文本与 tool_calls 消息均携带）", async () => {
+    const { plaintext, captureBody } = await setupThinkingRoundtrip("anthro-rt-on@test.dev");
+    const db = createDb(env);
+    const provider = await db.query.providers.findFirst({
+      where: eq(providers.name, "mock-provider"),
+      columns: { id: true },
+    });
+    if (provider) {
+      await db.update(providers).set({ reasoningRoundtrip: true }).where(eq(providers.id, provider.id));
+    }
+
+    const res = await postAnthropic("/anthropic/v1/messages", plaintext, thinkingRoundtripBody());
+    expect(res.status).toBe(200);
+
+    const messages = parseUpstreamMessages(captureBody());
+    const assistantMsgs = messages.filter((m) => m["role"] === "assistant");
+    expect(assistantMsgs.length).toBe(2);
+    // 轮 1：thinking+tool_use 消息携带 reasoning_content（thinking 文本、signature 不泄漏）
+    expect(assistantMsgs[0]?.["reasoning_content"]).toBe("need to call the tool");
+    expect(assistantMsgs[0]?.["tool_calls"]).toBeDefined();
+    // 轮 2：thinking+text 消息携带 reasoning_content
+    expect(assistantMsgs[1]?.["reasoning_content"]).toBe("got the reading");
+    expect(assistantMsgs[1]?.["content"]).toBe("It is 20C in shanghai.");
+    expect(captureBody()).not.toContain("sig_mock_01");
   });
 });
 

@@ -16,6 +16,16 @@ export const CACHE_HIT_THRESHOLD = 2;
 /** 计数窗口（秒）：countKey TTL；窗口滚动后计数清零，重传热度需重新累积。 */
 export const CACHE_HIT_WINDOW_SECONDS = 600;
 
+/**
+ * 全局响应缓存总开关（09-03-stg-cache-investigation）：CACHE_ENABLED env（[vars] 烘焙）为
+ * true/1/yes/on（大小写不敏感）才允许缓存参与；缺省/其他值 = 关闭 —— 即使 key.cacheEnabled=true
+ * 也不命中/不写入。默认关闭：缓存是新机制，按环境显式开启（staging 用 STAGING_CACHE_ENABLED）。
+ */
+export function isGlobalCacheEnabled(raw: string | undefined): boolean {
+  const v = raw?.trim().toLowerCase();
+  return v === "true" || v === "1" || v === "yes" || v === "on";
+}
+
 /** 递归规范化 JSON：object key 排序、array 逐项、原始值原样，保证等价请求体哈希一致。 */
 export function normalizeJson(value: unknown): unknown {
   if (Array.isArray(value)) {

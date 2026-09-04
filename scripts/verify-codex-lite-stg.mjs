@@ -223,8 +223,12 @@ async function main() {
   );
 
   // ---------- 3. flag on：D1 直改 reasoning_roundtrip（与 PATCH 语义一致） ----------
+  // 09-03-cc-stg-reasoning-400 后 stg 运维默认 flag=1：先记录翻转前值，测试后恢复原值
+  // （写死复位 0 会撤销运维配置，使 bravo 上的 thinking 回传闭环失效）。
   console.log("\n[3] lite request (flag on)");
+  let preFlag = 0;
   if (provider) {
+    preFlag = q(`SELECT reasoning_roundtrip FROM providers WHERE id=${provider.id};`)[0]?.reasoning_roundtrip ?? 0;
     exec(`UPDATE providers SET reasoning_roundtrip=1 WHERE id=${provider.id};`);
     const flag = q(`SELECT reasoning_roundtrip FROM providers WHERE id=${provider.id};`)[0].reasoning_roundtrip;
     report("reasoning_roundtrip=1 生效", flag === 1, `flag=${flag}`);
@@ -240,8 +244,8 @@ async function main() {
     `status=${r2.status} output_type=${r2.json?.output?.[0]?.type ?? null}`,
   );
   if (provider) {
-    exec(`UPDATE providers SET reasoning_roundtrip=0 WHERE id=${provider.id};`);
-    console.log("[3] reasoning_roundtrip 已复位 0");
+    exec(`UPDATE providers SET reasoning_roundtrip=${preFlag} WHERE id=${provider.id};`);
+    console.log(`[3] reasoning_roundtrip 已复位 ${preFlag}`);
   }
 
   // ---------- 4. 结算 ----------

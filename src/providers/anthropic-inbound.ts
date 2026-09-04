@@ -247,14 +247,21 @@ function toolResultContent(content: unknown): unknown {
   return JSON.stringify(content);
 }
 
-/** assistant 消息：text blocks → content；tool_use → tool_calls；thinking 丢弃 + 日志。 */
+/**
+ * assistant 消息：text blocks → content；tool_use → tool_calls；thinking 块文本按序
+ * 直接拼接 → reasoning_content（R1，09-03-cc-stg-reasoning-400：正向闭环——Claude Code
+ * thinking 模式的历史 assistant 消息携带 thinking 块，内部形态不再丢弃，由 openai 适配器
+ * stripReasoningRoundtrip 按 provider flag 裁决剥/留；signature 不映射——Anthropic 侧
+ * 完整性签名，openai 上游无对应物）。
+ */
 function pushAssistantMessage(
   messages: JsonObject[],
   message: JsonObject,
-  logger: Logger,
+  _logger: Logger,
 ): void {
   const content = message["content"];
   let text = "";
+  let reasoning = "";
   const toolCalls: JsonObject[] = [];
   if (typeof content === "string") {
     text = content;
@@ -277,13 +284,20 @@ function pushAssistantMessage(
           });
         }
       } else if (type === "thinking") {
-        logDropped(logger, "thinking");
+        // 多 thinking 块按序拼接（无分隔符——reasoning_content 对上游是不透明字符串）；
+        // 畸形块（thinking 非 string）跳过，不告警（现为映射而非丢弃）
+        if (typeof b["thinking"] === "string") {
+          reasoning += b["thinking"];
+        }
       }
     }
   } else if (content !== undefined && content !== null) {
     throw new AdapterError("Assistant message content must be a string or an array of content blocks");
   }
   const out: JsonObject = { role: "assistant", content: text };
+  if (reasoning.length > 0) {
+    out["reasoning_content"] = reasoning;
+  }
   if (toolCalls.length > 0) {
     out["tool_calls"] = toolCalls;
   }
@@ -464,6 +478,13 @@ export function transformResponseToAnthropic(data: unknown): unknown {
   const message = choice?.["message"];
   if (message && typeof message === "object") {
     const m = message as JsonObject;
+    // R3（09-03-cc-stg-reasoning-400）：reasoning_content → 首个 thinking 块（置于 text 前）。
+    // 不门控：仅上游确实思考时才存在该字段，无则空操作（零回归）；signature 不合成
+    // （无法伪造——对 thinking 文本的校验签名，第三方上游同形态，客户端可接受）。
+    const reasoning = m["reasoning_content"];
+    if (typeof reasoning === "string" && reasoning.length > 0) {
+      content.push({ type: "thinking", thinking: reasoning });
+    }
     const text = m["content"];
     if (typeof text === "string" && text.length > 0) {
       content.push({ type: "text", text });
@@ -530,14 +551,15 @@ export function transformResponseToAnthropic(data: unknown): unknown {
 
 interface StreamBlockState {
   index: number;
-  type: "text" | "tool_use";
+  type: "text" | "tool_use" | "thinking";
   closed: boolean;
 }
 
 /**
  * 上游 OpenAI chat.completion.chunk SSE 事件 → Anthropic SSE 帧转换（AB §3.3 状态机，
  * R2.4 统一 SsePipe 帧层，消除转换器自有 decode/parse）。
- * 事件序列：message_start → content_block_start/delta/stop（text 与 tool_use 按块 index）→
+ * 事件序列：message_start → content_block_start/delta/stop（text / tool_use / thinking
+ * 按块 index；R2 09-03-cc-stg-reasoning-400 起 delta.reasoning_content → thinking 块）→
  * message_delta（finish_reason 双射 + output_tokens=上游尾包值）→ message_stop；
  * 无 [DONE]（终事件即 message_stop）；流内错误 → error 事件注入并终止。
  * 帧格式：`event: <type>\ndata: <json>\n\n`（与 Anthropic 官方一致，客户端按 event 名区分）。
@@ -556,6 +578,9 @@ export function createStreamToAnthropicTransform(): SseFrameTransform {
   const toolBlocks = new Map<number, StreamBlockState>();
   let nextBlockIndex = 0;
   let currentTextBlock: StreamBlockState | null = null;
+  // R2（09-03-cc-stg-reasoning-400）：thinking 块状态（与 currentTextBlock 同构，入
+  // blocks[] 统一 index 序列）——delta.reasoning_content → Anthropic thinking 块事件。
+  let currentThinkingBlock: StreamBlockState | null = null;
   let terminated = false;
 
   function enqueue(
@@ -590,19 +615,28 @@ export function createStreamToAnthropicTransform(): SseFrameTransform {
     });
   }
 
+  /** 关闭单个块（幂等：closed 置位避免 closeAllBlocks 重复收口）。 */
+  function closeBlock(
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    block: StreamBlockState,
+  ): void {
+    if (!block.closed) {
+      block.closed = true;
+      enqueue(controller, "content_block_stop", {
+        type: "content_block_stop",
+        index: block.index,
+      });
+    }
+  }
+
   function closeAllBlocks(
     controller: ReadableStreamDefaultController<Uint8Array>,
   ): void {
     for (const block of blocks) {
-      if (!block.closed) {
-        block.closed = true;
-        enqueue(controller, "content_block_stop", {
-          type: "content_block_stop",
-          index: block.index,
-        });
-      }
+      closeBlock(controller, block);
     }
     currentTextBlock = null;
+    currentThinkingBlock = null;
   }
 
   /** 关闭所有 content 块并发送 message_delta（幂等；stop_reason 缺失兜底 end_turn）。 */
@@ -693,8 +727,41 @@ export function createStreamToAnthropicTransform(): SseFrameTransform {
     const delta = (choice as JsonObject)["delta"];
     if (delta && typeof delta === "object") {
       const d = delta as JsonObject;
+      // R2：delta.reasoning_content（思考流）→ Anthropic thinking 块事件序列
+      const reasoning = d["reasoning_content"];
+      if (typeof reasoning === "string" && reasoning.length > 0) {
+        if (currentThinkingBlock === null) {
+          // 防御：正常顺序 reasoning 恒先于 content；若 text 块已开启先收口再开 thinking
+          if (currentTextBlock !== null) {
+            closeBlock(controller, currentTextBlock);
+            currentTextBlock = null;
+          }
+          currentThinkingBlock = {
+            index: nextBlockIndex++,
+            type: "thinking",
+            closed: false,
+          };
+          blocks.push(currentThinkingBlock);
+          enqueue(controller, "content_block_start", {
+            type: "content_block_start",
+            index: currentThinkingBlock.index,
+            content_block: { type: "thinking", thinking: "" },
+          });
+        }
+        // 逐段输出 thinking_delta；signature_delta 不合成（无法伪造签名，客户端可接受）
+        enqueue(controller, "content_block_delta", {
+          type: "content_block_delta",
+          index: currentThinkingBlock.index,
+          delta: { type: "thinking_delta", thinking: reasoning },
+        });
+      }
       const content = d["content"];
       if (typeof content === "string" && content.length > 0) {
+        if (currentThinkingBlock !== null) {
+          // thinking 块未收口 → 先收口再开 text 块（切换块先收口模式）
+          closeBlock(controller, currentThinkingBlock);
+          currentThinkingBlock = null;
+        }
         if (currentTextBlock === null) {
           currentTextBlock = { index: nextBlockIndex++, type: "text", closed: false };
           blocks.push(currentTextBlock);
@@ -727,6 +794,11 @@ export function createStreamToAnthropicTransform(): SseFrameTransform {
 
           let block = toolBlocks.get(toolIndex);
           if (block === undefined) {
+            if (currentThinkingBlock !== null) {
+              // thinking 块未收口 → 先收口再开 tool_use 块（切换块先收口模式）
+              closeBlock(controller, currentThinkingBlock);
+              currentThinkingBlock = null;
+            }
             const id =
               typeof call["id"] === "string"
                 ? call["id"]

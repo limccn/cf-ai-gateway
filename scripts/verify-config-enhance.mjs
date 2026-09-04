@@ -32,7 +32,7 @@ const MOCK_PORT = 8788;
 
 const INTERNAL_DS = "deepseek-chat"; // 网关内部模型名（= 上游名，无后缀）
 const INTERNAL_CLAUDE = "claude-sonnet";
-const UPSTREAM_CLAUDE = "claude-sonnet-4-5";
+const UPSTREAM_CLAUDE = "claude-sonnet-4.5";
 
 const ADMIN = { email: "e2e-enh-admin@local.test", name: "E2E Enh Admin", role: "admin", balance: 50 };
 const MEMBER = { email: "e2e-enh-user@local.test", name: "E2E Enh User", role: "member", balance: 100 };

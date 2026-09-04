@@ -67,6 +67,7 @@ import {
   bumpCacheMissCount,
   getCachedResponse,
   hashRequestBody,
+  isGlobalCacheEnabled,
   MAX_CACHE_BODY_BYTES,
   MAX_CACHE_RESPONSE_BYTES,
   setCachedResponse,
@@ -325,13 +326,17 @@ export function proxyRouteWithOptions(
       const CACHE_KV = c.env.CACHE_KV;
       const executionCtx = c.executionCtx;
 
-      // 5. 缓存（仅非流式 && key.cacheEnabled）→ 命中直接返回（不转发、不扣费）
+      // 5. 缓存（仅非流式 && key.cacheEnabled && 全局开关开启）→ 命中直接返回（不转发、不扣费）
+      // 09-03 全局开关：CACHE_ENABLED env 缺省 false —— 环境未显式开启时整段缓存评估短路
+      // （不 hash、不读 KV、不计数、不写），与 R2 大请求跳过路径同构（cacheState 保持 null）。
+      // 接入点唯一：命中/计数/写缓存全部挂在 cacheable/cacheState 之后，开关一次判断全路径生效。
       // R2 触发收窄：请求体 > MAX_CACHE_BODY_BYTES → 跳过整个缓存评估（不 hash、不读 KV、不计数、不写）；
       // 小请求未命中 → 记录热度指纹（cacheState），bump 计数与写缓存决策整体在成功路径 waitUntil 执行：
       //   - 请求路径 0 次计数 KV 读写（原 get+put/delete 两次同步 KV 挪出关键路径）；
       //   - 失败请求不消耗热度（H11：错误突发不再删计数键"饿死"缓存）；
       //   - KV get→put 非原子（并发计数丢失）由窗口滚动兜底，阈值语义不依赖精确计数。
-      const cacheable = !stream && auth.key.cacheEnabled;
+      const cacheable =
+        !stream && auth.key.cacheEnabled && isGlobalCacheEnabled(ENV.CACHE_ENABLED);
       let cacheState: { cacheKey: string; countKey: string } | null = null;
       if (cacheable) {
         const bodyBytes = JSON.stringify(rawBody).length;

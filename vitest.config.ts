@@ -27,6 +27,8 @@ export default defineConfig({
           GITHUB_CLIENT_ID: "test-github-client-id",
           GITHUB_CLIENT_SECRET: "test-github-client-secret",
           GITHUB_ALLOWED_EMAILS: "",
+          // 全局缓存总开关（09-03-stg-cache-investigation）：测试固定开启（cache.test.ts 依赖缓存生效）
+          CACHE_ENABLED: "true",
           // seed 路由测试固定种子（dev-only）：安全密码仅存在于测试绑定，不落盘
           SEED_USERS: JSON.stringify([
             {

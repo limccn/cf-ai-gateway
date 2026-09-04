@@ -26,6 +26,9 @@ interface Env {
   BILLING_QUEUE_NAME?: string;
   // 网关 API Key 明文前缀（缺省 "sk-"；空白视为未设置，回退默认。仅影响新生成 Key）
   API_KEY_PREFIX?: string;
+  // 全局响应缓存总开关（09-03-stg-cache-investigation；[vars] 渲染烘焙）：缺省/false = 关闭，
+  // 即使 key.cacheEnabled=true 也不缓存；true/1/yes/on = 开启。staging 用 STAGING_CACHE_ENABLED 独立设置
+  CACHE_ENABLED?: string;
   // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users
   // 并在注册校验中放行种子邮箱（绕过邀请码）。生产禁止设置。格式见 src/lib/seed-users.ts
   SEED_USERS?: string;

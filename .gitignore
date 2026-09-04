@@ -32,3 +32,5 @@ AGENTS.md
 
 # Playwright MCP 截图/控制台产物
 .playwright-mcp/
+
+skills-lock.json

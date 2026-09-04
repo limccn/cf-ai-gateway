@@ -133,10 +133,11 @@ export default function RegisterPage() {
           {errors.password ? <p className="text-xs text-destructive">{errors.password}</p> : null}
         </div>
         <div className="space-y-2">
+          {/* 占位符须与 src/lib/invites.ts generateInviteCode 一致：10 位大写字母数字、无连字符。 */}
           <Label htmlFor="register-invite">Invite code</Label>
           <Input
             id="register-invite"
-            placeholder="XXXX-XXXX-XXXX"
+            placeholder="10-character invite code"
             value={inviteCode}
             onChange={(e) => setInviteCode(e.target.value)}
             aria-invalid={errors.inviteCode !== undefined}
