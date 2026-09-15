@@ -151,8 +151,6 @@ export default function UsagePage() {
 
   const keys = keysQuery.data?.items ?? [];
   const users = usersQuery.data?.items ?? [];
-  const totalPages = Math.max(1, Math.ceil(total / LIMIT));
-  const currentPage = Math.floor(offset / LIMIT) + 1;
 
   const chartData = useMemo(() => {
     if (isRangeMode) {
@@ -305,7 +303,7 @@ export default function UsagePage() {
       </Card>
 
       {/* 图表 */}
-      <div className="mb-6 flex items-center gap-2">
+      <div className="mb-6 flex flex-wrap items-center gap-2">
         <span className="text-sm text-muted-foreground">Group by</span>
         <Button
           variant={groupBy === "date" ? "default" : "outline"}
@@ -369,9 +367,7 @@ export default function UsagePage() {
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle>Request details</CardTitle>
-            <CardDescription>
-              {formatNumber(total)} total — page {currentPage} of {totalPages}
-            </CardDescription>
+            <CardDescription>{formatNumber(total)} total</CardDescription>
           </div>
           <div className="flex items-center gap-2">
             <Select
@@ -390,22 +386,6 @@ export default function UsagePage() {
               <option value="cached">Cached</option>
               <option value="rejected">Rejected</option>
             </Select>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={offset === 0}
-              onClick={() => setOffset(Math.max(0, offset - LIMIT))}
-            >
-              Prev
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={offset + LIMIT >= total}
-              onClick={() => setOffset(offset + LIMIT)}
-            >
-              Next
-            </Button>
           </div>
         </CardHeader>
         <CardContent className="p-0">
@@ -414,58 +394,83 @@ export default function UsagePage() {
               <EmptyState title="No requests found" />
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Time</TableHead>
-                    <TableHead className="hidden sm:table-cell">Key</TableHead>
-                    <TableHead>Model</TableHead>
-                    <TableHead>Tokens</TableHead>
-                    <TableHead>Cost</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="hidden md:table-cell">Latency</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {details.map((detail) => (
-                    <TableRow key={detail.id}>
-                      <TableCell className="whitespace-nowrap text-muted-foreground">
-                        {isMobile
-                          ? formatDateTimeShort(detail.createdAt)
-                          : formatDateTime(detail.createdAt)}
-                      </TableCell>
-                      <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
-                        {detail.keyId ?? "—"}
-                      </TableCell>
-                      <TableCell className="font-medium">{detail.model ?? "—"}</TableCell>
-                      <TableCell>
-                        {formatNumber(detail.promptTokens)} / {formatNumber(detail.completionTokens)}
-                      </TableCell>
-                      <TableCell>{formatUsd(detail.cost)}</TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={
-                            detail.status === "success"
-                              ? "success"
-                              : detail.status === "cached"
-                                ? "secondary"
-                                : detail.status === "rejected"
-                                  ? "outline"
-                                  : "destructive"
-                          }
-                        >
-                          {detail.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="hidden text-muted-foreground md:table-cell">
-                        {detail.latencyMs === null ? "—" : `${formatNumber(detail.latencyMs)}ms`}
-                      </TableCell>
+            <>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Time</TableHead>
+                      <TableHead className="hidden sm:table-cell">Key</TableHead>
+                      <TableHead>Model</TableHead>
+                      <TableHead>Tokens</TableHead>
+                      <TableHead>Cost</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="hidden md:table-cell">Latency</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+                  </TableHeader>
+                  <TableBody>
+                    {details.map((detail) => (
+                      <TableRow key={detail.id}>
+                        <TableCell className="whitespace-nowrap text-muted-foreground">
+                          {isMobile
+                            ? formatDateTimeShort(detail.createdAt)
+                            : formatDateTime(detail.createdAt)}
+                        </TableCell>
+                        <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
+                          {detail.keyId ?? "—"}
+                        </TableCell>
+                        <TableCell className="font-medium">{detail.model ?? "—"}</TableCell>
+                        <TableCell>
+                          {formatNumber(detail.promptTokens)} / {formatNumber(detail.completionTokens)}
+                        </TableCell>
+                        <TableCell>{formatUsd(detail.cost)}</TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={
+                              detail.status === "success"
+                                ? "success"
+                                : detail.status === "cached"
+                                  ? "secondary"
+                                  : detail.status === "rejected"
+                                    ? "outline"
+                                    : "destructive"
+                            }
+                          >
+                            {detail.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="hidden text-muted-foreground md:table-cell">
+                          {detail.latencyMs === null ? "—" : `${formatNumber(detail.latencyMs)}ms`}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-2 px-6 pb-6">
+                <span className="text-sm text-muted-foreground">
+                  Showing {offset + 1}–{offset + details.length} of {total}
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={offset === 0}
+                    onClick={() => setOffset(Math.max(0, offset - LIMIT))}
+                  >
+                    Prev
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={offset + LIMIT >= total}
+                    onClick={() => setOffset(offset + LIMIT)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
