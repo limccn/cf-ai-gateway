@@ -64,6 +64,10 @@ export const updateUserOutputSchema = z.object({
   user: userResponseSchema,
 });
 
+export const deleteUserOutputSchema = z.object({
+  success: z.literal(true),
+});
+
 export const adjustBalanceOutputSchema = z.object({
   success: z.literal(true),
   balance: z.number(),
@@ -100,6 +104,7 @@ export const listInvitesOutputSchema = z.object({
 
 export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
 export type UpdateUserInput = z.infer<typeof updateUserInputSchema>;
+export type DeleteUserOutput = z.infer<typeof deleteUserOutputSchema>;
 export type CreateInviteInput = z.infer<typeof createInviteInputSchema>;
 export type AdjustBalanceInput = z.infer<typeof adjustBalanceInputSchema>;
 export type UserResponse = z.infer<typeof userResponseSchema>;

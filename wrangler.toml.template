@@ -137,6 +137,12 @@ max_retries = 3
 [env.staging.triggers]
 crons = ["0 2 * * *"]
 
+# --- Placement stg 覆盖（2026-09-14 用户决策）：stg 先行试验 Smart Placement 自适应 ---
+# 顶层 targeted aws:us-west-1（09-02 就近 b.ai/SJC）仍作用于 production；smart 由 CF 按上游实测延迟自选 colo。
+# 若 stg 试验结论回退或推广 production，改此处/顶层即可；placement 是 inheritable key，显式覆盖阻断继承。
+[env.staging.placement]
+mode = "smart"
+
 [env.staging.vars]
 BETTER_AUTH_URL = "{STAGING_BETTER_AUTH_URL}"
 GITHUB_CLIENT_ID = "{STAGING_GITHUB_CLIENT_ID}"

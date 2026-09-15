@@ -80,34 +80,9 @@ export function AppLayout() {
 
   return (
     <div className="min-h-screen">
-      {/* 移动端顶部导航 */}
-      <nav className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur md:hidden" aria-label="Mobile navigation">
-        <div className="flex items-center justify-between px-4 py-3">
-          <LinkBrand />
-          <UserButton />
-        </div>
-        <div className="flex gap-1 overflow-x-auto px-4 pb-2">
-          {visibleItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) =>
-                cn(
-                  "whitespace-nowrap rounded-md px-3 py-2 text-sm",
-                  isActive ? "bg-primary/15 text-primary" : "text-muted-foreground hover:bg-muted",
-                )
-              }
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </div>
-      </nav>
-
       <div className="flex">
-        {/* 桌面侧边栏（md 平板为图标栏，lg 起全宽；图标 title 提示） */}
-        <aside className="sticky top-0 hidden h-screen w-16 shrink-0 flex-col border-r md:flex lg:w-60">
+        {/* 侧边栏（全宽度可见：<lg 为 w-16 图标栏，lg 起全宽；图标 title 提示） */}
+        <aside className="sticky top-0 flex h-screen w-16 shrink-0 flex-col border-r lg:w-60">
           <div className="flex h-14 items-center justify-center border-b px-0 lg:justify-start lg:px-5">
             <LinkBrand compact />
           </div>

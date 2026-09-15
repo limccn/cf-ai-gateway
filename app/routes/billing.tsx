@@ -118,8 +118,6 @@ export default function BillingPage() {
 
   const items: TransactionItem[] = transactionsQuery.data?.items ?? [];
   const total = transactionsQuery.data?.total ?? 0;
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
 
   return (
     <PageContainer>
@@ -172,9 +170,7 @@ export default function BillingPage() {
         <CardHeader className="flex-col items-start gap-3 space-y-0 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle>Transactions</CardTitle>
-            <CardDescription>
-              {formatNumber(total)} total — page {currentPage} of {totalPages}
-            </CardDescription>
+            <CardDescription>{formatNumber(total)} total</CardDescription>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
             <Label htmlFor="billing-type" className="sr-only">
@@ -191,22 +187,6 @@ export default function BillingPage() {
               <option value="usage">Usage</option>
               <option value="adjust">Adjustment</option>
             </Select>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={offset === 0}
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-            >
-              Prev
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={offset + PAGE_SIZE >= total}
-              onClick={() => setOffset(offset + PAGE_SIZE)}
-            >
-              Next
-            </Button>
           </div>
         </CardHeader>
         <CardContent className="p-0">
@@ -224,42 +204,67 @@ export default function BillingPage() {
               <EmptyState title="No transactions yet" description="Balance adjustments and API usage charges will appear here." />
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Time</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Amount</TableHead>
-                    <TableHead>Note</TableHead>
-                    <TableHead className="hidden sm:table-cell">Request</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {items.map((tx) => (
-                    <TableRow key={tx.id}>
-                      <TableCell className="whitespace-nowrap text-muted-foreground">
-                        {isMobile
-                          ? formatDateTimeShort(tx.createdAt)
-                          : formatDateTime(tx.createdAt)}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={typeBadgeVariant(tx.type)}>{tx.type}</Badge>
-                      </TableCell>
-                      <TableCell className="font-medium">
-                        <AmountCell amount={tx.amount} />
-                      </TableCell>
-                      <TableCell className="max-w-64 truncate text-muted-foreground">
-                        {tx.note ?? "—"}
-                      </TableCell>
-                      <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
-                        {tx.refRequestId ?? "—"}
-                      </TableCell>
+            <>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Time</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Note</TableHead>
+                      <TableHead className="hidden sm:table-cell">Request</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+                  </TableHeader>
+                  <TableBody>
+                    {items.map((tx) => (
+                      <TableRow key={tx.id}>
+                        <TableCell className="whitespace-nowrap text-muted-foreground">
+                          {isMobile
+                            ? formatDateTimeShort(tx.createdAt)
+                            : formatDateTime(tx.createdAt)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant={typeBadgeVariant(tx.type)}>{tx.type}</Badge>
+                        </TableCell>
+                        <TableCell className="font-medium">
+                          <AmountCell amount={tx.amount} />
+                        </TableCell>
+                        <TableCell className="max-w-64 truncate text-muted-foreground">
+                          {tx.note ?? "—"}
+                        </TableCell>
+                        <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
+                          {tx.refRequestId ?? "—"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-2 px-6 pb-6">
+                <span className="text-sm text-muted-foreground">
+                  Showing {offset + 1}–{offset + items.length} of {total}
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={offset === 0}
+                    onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                  >
+                    Prev
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={offset + PAGE_SIZE >= total}
+                    onClick={() => setOffset(offset + PAGE_SIZE)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>

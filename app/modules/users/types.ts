@@ -5,6 +5,7 @@ import type {
   UpdateUserInput,
   AdjustBalanceInput,
   CreateInviteInput,
+  DeleteUserOutput,
 } from "../../../src/routes/users/types";
 
 export type {
@@ -13,6 +14,7 @@ export type {
   UpdateUserInput,
   AdjustBalanceInput,
   CreateInviteInput,
+  DeleteUserOutput,
 };
 
 export interface ListUsersOutput {

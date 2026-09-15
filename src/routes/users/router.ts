@@ -6,6 +6,7 @@ import type { AppEnv } from "../../types";
 import { adminOnly } from "../../middleware/auth";
 import { listUsersRoute } from "./procedures/list";
 import { updateUserRoute } from "./procedures/update";
+import { deleteUserRoute } from "./procedures/delete";
 import { createInviteRoute } from "./procedures/create-invite";
 import { listInvitesRoute } from "./procedures/list-invites";
 import { adjustBalanceRoute } from "./procedures/adjust-balance";
@@ -18,6 +19,7 @@ listUsersRoute(app); // GET /
 createInviteRoute(app); // POST /invites
 listInvitesRoute(app); // GET /invites
 updateUserRoute(app); // PATCH /:id
+deleteUserRoute(app); // DELETE /:id
 adjustBalanceRoute(app); // POST /:id/balance
 
 export default app;
