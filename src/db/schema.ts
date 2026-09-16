@@ -43,6 +43,17 @@ export const users = sqliteTable(
       .default(false),
     image: text("image"),
     githubId: text("github_id").unique(),
+    // 赠金幂等标记（09-16-signup-bonus-grant）：NULL = 该档未发放；非 NULL = 已发放时间。
+    // 均为 nullable 无默认值（迁移只增不改）；条件 UPDATE 的 WHERE 依据，
+    // 并发两次触发只有一次能命中（配合 balance_tx_bonus_once_idx 部分唯一索引双保险）。
+    signupBonusGrantedAt: integer("signup_bonus_granted_at", {
+      mode: "timestamp",
+    }),
+    emailVerifyBonusGrantedAt: integer("email_verify_bonus_granted_at", {
+      mode: "timestamp",
+    }),
+    // 首次登录欢迎弹窗标记（09-16-signup-bonus-onboarding C2 使用；本任务只建列，不写不改）
+    welcomeSeenAt: integer("welcome_seen_at", { mode: "timestamp" }),
     ...timestamps,
   },
   (table) => [index("users_email_idx").on(table.email)],
@@ -229,7 +240,9 @@ export const providers = sqliteTable(
 );
 
 // --- 余额流水 ---
-// amount 带符号（充值 + / 扣费 -）；type: 'recharge' | 'usage' | 'adjust'。
+// amount 带符号（充值 + / 扣费 -）；
+// type: 'recharge' | 'usage' | 'adjust' | 'signup_bonus' | 'email_verify_bonus'
+// （后两者为赠送赠金，2026-09-16 起；zod 是取值真源：src/routes/billing/types.ts）。
 export const balanceTx = sqliteTable(
   "balance_tx",
   {
@@ -250,6 +263,15 @@ export const balanceTx = sqliteTable(
   (table) => [
     index("balance_tx_user_id_idx").on(table.userId),
     index("balance_tx_created_at_idx").on(table.createdAt),
+    // 赠金幂等兜底（09-16-signup-bonus-grant）：同一用户每档赠金至多一行流水。
+    // 部分唯一索引只覆盖两个赠金 type（usage 单请求多行、adjust/recharge 不受影响）；
+    // 与 users.signup_bonus_granted_at / email_verify_bonus_granted_at 标记列双保险：
+    // 标记列挡住重复加钱，本索引挡住「标记被清空后重复写流水」。
+    uniqueIndex("balance_tx_bonus_once_idx")
+      .on(table.userId, table.type)
+      .where(
+        sql`${table.type} IN ('signup_bonus', 'email_verify_bonus')`,
+      ),
   ],
 );
 

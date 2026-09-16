@@ -4,6 +4,7 @@
 import { Info } from "lucide-react";
 import { useSettings } from "@/modules/settings/hooks/use-settings";
 import type { RuntimeSettings } from "@/modules/settings/types";
+import { formatUsd } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -40,6 +41,24 @@ function toSettingRows(settings: RuntimeSettings): SettingRow[] {
       value: String(settings.requestLogRetentionDays),
       description:
         "Request detail records are retained for this many days before being purged.",
+    },
+    {
+      key: "signup_bonus_amount",
+      value: formatUsd(settings.signupBonusAmount),
+      description:
+        "Bonus credited automatically once a new account is created (0 disables the grant).",
+    },
+    {
+      key: "email_verify_bonus_amount",
+      value: formatUsd(settings.emailVerifyBonusAmount),
+      description:
+        "Bonus credited once a user verifies their email address (0 disables the grant).",
+    },
+    {
+      key: "email_verification_enabled",
+      value: settings.emailVerificationEnabled ? "enabled" : "disabled",
+      description:
+        "When disabled, verification emails are not sent and the email verification bonus is unreachable.",
     },
   ];
 }

@@ -32,6 +32,13 @@ export default defineConfig({
           // modelcap 档位乘算常数：测试固定缺省基准（8192 × 2 → 档位 1 = 16384）
           MODELCAP_BASE_TOKENS: "8192",
           MODELCAP_MULTIPLIER: "2",
+          // 赠金（09-16-signup-bonus-grant）：金额固定缺省 5（金额分支矩阵在 bonus.unit.test.ts
+          // 与「直接调用 grantSignupBonus（传入自定义 env）」里覆盖 —— miniflare bindings
+          // 在测试进程内固定，无法逐用例改）。邮箱验证显式开启：否则 emailVerification 段
+          // 整段不配置，verify-email 链路（AC5/AC6）不可测。
+          SIGNUP_BONUS_AMOUNT: "5",
+          EMAIL_VERIFY_BONUS_AMOUNT: "5",
+          EMAIL_VERIFICATION_ENABLED: "true",
           // seed 路由测试固定种子（dev-only）：安全密码仅存在于测试绑定，不落盘
           SEED_USERS: JSON.stringify([
             {

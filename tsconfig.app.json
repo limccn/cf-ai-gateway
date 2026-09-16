@@ -32,6 +32,8 @@
     "src/routes/users/types.ts",
     "src/routes/usage/types.ts",
     "src/routes/settings/types.ts",
-    "src/routes/billing/types.ts"
+    "src/routes/billing/types.ts",
+    "src/routes/onboarding/types.ts",
+    "src/routes/profile/types.ts"
   ]
 }

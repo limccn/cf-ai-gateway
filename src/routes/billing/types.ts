@@ -4,7 +4,16 @@
 // 时间戳统一 ISO 字符串（type-safety spec）；响应格式 { success, items, total, limit, offset }。
 import { z } from "zod";
 
-export const balanceTxTypeSchema = z.enum(["recharge", "usage", "adjust"]);
+// 取值真源（筛选参数校验 + 输出校验共用）：新增 type 必须同步此 enum，
+// 否则前端筛选该 type 会被 zValidator 拒绝（400）。赠金两档（09-16-signup-bonus-grant）
+// 对应 users.signup_bonus_granted_at / email_verify_bonus_granted_at 的幂等标记。
+export const balanceTxTypeSchema = z.enum([
+  "recharge",
+  "usage",
+  "adjust",
+  "signup_bonus",
+  "email_verify_bonus",
+]);
 
 export const meTransactionsQuerySchema = z.object({
   type: balanceTxTypeSchema.optional(),

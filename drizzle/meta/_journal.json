@@ -71,6 +71,13 @@
       "when": 1788244738131,
       "tag": "0009_shallow_karnak",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789554208782,
+      "tag": "0010_cool_thunderbolts",
+      "breakpoints": true
     }
   ]
 }

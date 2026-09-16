@@ -19,6 +19,7 @@ import { queryClient } from "@/lib/query-client";
 import { cn } from "@/lib/utils";
 import { PageLoading } from "@/components/ui/states";
 import { Button } from "@/components/ui/button";
+import { WelcomeDialog } from "@/components/onboarding/welcome-dialog";
 import { UserButton } from "./user-button";
 
 interface NavItem {
@@ -119,6 +120,10 @@ export function AppLayout() {
 
         {/* 主内容 */}
         <main className="min-w-0 flex-1">
+          {/* 首登赠金引导弹窗（09-16-first-login-welcome）：挂在已认证分支内，
+              未登录/停用账号已在上方 return，不会挂载（避免无谓的 401 查询）。
+              组件自身处理 isPending/isError/无赠金 → 不渲染，不阻塞页面。 */}
+          <WelcomeDialog />
           <Outlet />
         </main>
       </div>

@@ -29,7 +29,8 @@ const OUTPUT_PATH = join(ROOT, "wrangler.toml");
 const DOT_VARS = join(ROOT, ".dev.vars");
 const DOT_VARS_STAGING = join(ROOT, ".dev.vars.staging");
 
-// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（26 键）。
+// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（36 键）。
+// 计数口径 = 本集合元素个数（非模板 {TOKEN} 出现次数，同一 token 会在多处复用）。
 // 顶层 [vars] 运行时配置（BETTER_AUTH_URL 等）与 infra 键同策略烘焙——wrangler 4.x 不解析
 // {KEY}，值必须在构建期就位。本地默认值（localhost / 占位）来自 .dev.vars，仅用于本地 dev
 // （wrangler dev 时 .dev.vars 优先于 [vars]，不受影响）；部署真实值走 shell export 覆盖。
@@ -57,6 +58,9 @@ const TOKENS = new Set([
   "CACHE_ENABLED",
   "MODELCAP_BASE_TOKENS",
   "MODELCAP_MULTIPLIER",
+  "SIGNUP_BONUS_AMOUNT",
+  "EMAIL_VERIFY_BONUS_AMOUNT",
+  "EMAIL_VERIFICATION_ENABLED",
   // [env.staging.vars]：STAGING_* 独立键，与 infra 键同源管理（--env staging 渲染）。
   "STAGING_API_KEY_PREFIX",
   "STAGING_BETTER_AUTH_URL",
@@ -66,6 +70,9 @@ const TOKENS = new Set([
   "STAGING_CACHE_ENABLED",
   "STAGING_MODELCAP_BASE_TOKENS",
   "STAGING_MODELCAP_MULTIPLIER",
+  "STAGING_SIGNUP_BONUS_AMOUNT",
+  "STAGING_EMAIL_VERIFY_BONUS_AMOUNT",
+  "STAGING_EMAIL_VERIFICATION_ENABLED",
 ]);
 
 /** 本地占位特征：命中即 WARN（仅提醒，不 fail——本地 dev 渲染本来就该是这些值）。 */
@@ -83,6 +90,15 @@ const DEFAULT_VALUES = {
   MODELCAP_MULTIPLIER: "2",
   STAGING_MODELCAP_BASE_TOKENS: "8192",
   STAGING_MODELCAP_MULTIPLIER: "2",
+  // 赠金与邮箱验证开关缺省（09-16-signup-bonus-grant）：金额 5（开箱即送）、验证关。
+  // 默认值必须非空，否则缺配置会触发下面的 fail-fast。
+  // 注意：staging 若要避免真实产生赠金，需在 .dev.vars 显式设 STAGING_*_BONUS_AMOUNT=0
+  SIGNUP_BONUS_AMOUNT: "5",
+  EMAIL_VERIFY_BONUS_AMOUNT: "5",
+  EMAIL_VERIFICATION_ENABLED: "false",
+  STAGING_SIGNUP_BONUS_AMOUNT: "5",
+  STAGING_EMAIL_VERIFY_BONUS_AMOUNT: "5",
+  STAGING_EMAIL_VERIFICATION_ENABLED: "false",
 };
 
 // 解析 .dev.vars：KEY=VALUE 行 + # 注释 + 双/单引号剥离（手写解析，零依赖）。
