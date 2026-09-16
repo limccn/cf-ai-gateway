@@ -129,17 +129,36 @@ export async function readCircuit(
   return { at: Date.now(), reason: "5xx" };
 }
 
-/** 断路器写：失败分类 → TTL 自动过期恢复（open 态标准语义，无需清理任务）。 */
+/**
+ * 断路器写：失败分类 → TTL 自动过期恢复（open 态标准语义，无需清理任务）。
+ * O6（09-11-kv-ops-optimization）：写收敛——距上次**成功** put < OPEN_SUPPRESS_SECONDS →
+ * 跳过（open 已是 open，TTL 自持）。并发风暴期 KV 写从 N/请求收敛到 1/10s，消解
+ * 「单键 1 写/秒软限速」在故障期的叠加压力。抑制期内不同 reason 的 re-open 被跳过，
+ * 首 reason 的 TTL 生效——当前四类 TTL 均 60s，无实际差异（TTL 差异化时需重审）。
+ */
+const OPEN_SUPPRESS_SECONDS = 10;
+const lastOpenedAt = new Map<number, number>();
+
 export async function openCircuit(
   kv: KVNamespace,
   providerId: number,
   reason: CircuitReason,
 ): Promise<void> {
+  const last = lastOpenedAt.get(providerId);
+  if (last !== undefined && Date.now() - last < OPEN_SUPPRESS_SECONDS * 1000) {
+    return;
+  }
   await kv.put(
     circuitKey(providerId),
     JSON.stringify({ at: Date.now(), reason }),
     { expirationTtl: CIRCUIT_TTL_SECONDS[reason] },
   );
+  lastOpenedAt.set(providerId, Date.now());
+}
+
+/** 测试隔离：清空写抑制状态。 */
+export function resetOpenSuppressionForTest(): void {
+  lastOpenedAt.clear();
 }
 
 /**

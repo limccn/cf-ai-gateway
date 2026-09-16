@@ -25,6 +25,21 @@ export interface ClampResult {
 
 const CLAMP_KEYS = ["max_tokens", "max_completion_tokens"] as const;
 
+/**
+ * 客户端显式索求的 max 值（两字段取最大；均缺/非法 → undefined）。
+ * O3c（09-11-kv-ops-optimization）modelcap 快/慢路径判定用：索求 > 常量才需查真值。
+ */
+export function maxRequestedTokens(body: Record<string, unknown>): number | undefined {
+  let max: number | undefined;
+  for (const key of CLAMP_KEYS) {
+    const value = body[key];
+    if (typeof value === "number" && Number.isFinite(value) && (max === undefined || value > max)) {
+      max = value;
+    }
+  }
+  return max;
+}
+
 export function clampMaxTokens(
   body: Record<string, unknown>,
   cap: number | undefined,

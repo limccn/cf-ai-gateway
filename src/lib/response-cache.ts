@@ -13,7 +13,7 @@ export const MAX_CACHE_BODY_BYTES = 32 * 1024;
 /** 高频重传阈值：同缓存键（keyId+model+bodyHash）在窗口内出现次数 ≥ 该值才写缓存。 */
 export const CACHE_HIT_THRESHOLD = 2;
 
-/** 计数窗口（秒）：countKey TTL；窗口滚动后计数清零，重传热度需重新累积。 */
+/** 计数窗口（秒）：热度计数的时间分桶（O2 起为 isolate 内分桶，非 KV TTL）；翻转清零，重传热度需重新累积。 */
 export const CACHE_HIT_WINDOW_SECONDS = 600;
 
 /**
@@ -74,21 +74,33 @@ export function buildCountKey(
 }
 
 /**
- * 未命中路径计数（R2）：本次出现次数 +1 并与阈值比较。
- * - 未达阈值 → 仅计数（TTL = CACHE_HIT_WINDOW_SECONDS），返回 false；
+ * 未命中路径计数（R2；O2 改造 09-11-kv-ops-optimization）：本次出现次数 +1 并与阈值比较。
+ * isolate 模块级 Map（0 KV 操作）——advisory 信号，isolate 回收计数丢失可接受
+ * （缓存填充略延迟；现状 KV 版本也有传播延迟）。
+ * - 未达阈值 → 仅计数，返回 false；
  * - 达到阈值 → 清零计数，返回 true（调用方在响应成功后写缓存）。
+ * 窗口 = CACHE_HIT_WINDOW_SECONDS，按 600s 时间分桶；翻转后计数清零（重传热度需重新累积，
+ * 与旧 KV TTL 版本同量级近似）。
  */
-export async function bumpCacheMissCount(kv: KVNamespace, countKey: string): Promise<boolean> {
-  const raw = await kv.get(countKey);
-  const previous = raw === null ? 0 : Number.parseInt(raw, 10);
-  const count = Number.isFinite(previous) && previous > 0 ? previous : 0;
-  const next = count + 1;
+const missCounts = new Map<string, { windowStart: number; count: number }>();
+
+export function bumpCacheMissCount(countKey: string): boolean {
+  const windowStart =
+    Math.floor(Date.now() / (CACHE_HIT_WINDOW_SECONDS * 1000)) * CACHE_HIT_WINDOW_SECONDS;
+  const existing = missCounts.get(countKey);
+  // 缺失或窗口翻转 → 重置计数（陈旧条目惰性清理）
+  const next = existing && existing.windowStart === windowStart ? existing.count + 1 : 1;
   if (next >= CACHE_HIT_THRESHOLD) {
-    await kv.delete(countKey);
+    missCounts.delete(countKey);
     return true;
   }
-  await kv.put(countKey, String(next), { expirationTtl: CACHE_HIT_WINDOW_SECONDS });
+  missCounts.set(countKey, { windowStart, count: next });
   return false;
+}
+
+/** 测试隔离：清空模块级计数状态。 */
+export function resetMissCountsForTest(): void {
+  missCounts.clear();
 }
 
 export async function getCachedResponse(

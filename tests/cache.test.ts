@@ -5,10 +5,13 @@ import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  CACHE_HIT_WINDOW_SECONDS,
   buildCacheKey,
   buildCountKey,
+  bumpCacheMissCount,
   hashRequestBody,
   isGlobalCacheEnabled,
+  resetMissCountsForTest,
 } from "../src/lib/response-cache";
 import {
   applyMigrations,
@@ -43,6 +46,8 @@ beforeAll(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // O2：miss 计数为 isolate 模块级 Map，防跨用例残留（keyId 各异理论上无碰撞，防御性清空）
+  resetMissCountsForTest();
 });
 
 /** mock provider 的 baseUrl（setupProviderWithModel 固定值），stub 按此前缀回 canned 上游。 */
@@ -192,23 +197,23 @@ describe("响应缓存", () => {
     const cacheKey = buildCacheKey(keyId, "gpt-4o-mini", bodyHash);
     const countKey = buildCountKey(keyId, "gpt-4o-mini", bodyHash);
 
-    // 第 1 次：仅计数（未达高频重传阈值 → 不写缓存）；bump 在响应后 waitUntil 异步执行
+    // 第 1 次：仅计数（未达高频重传阈值 → 不写缓存）；bump 在响应后 waitUntil 异步执行。
+    // O2：计数在 isolate 模块级 Map——countKey 永不出现在 KV（0 KV 操作契约）
     const first = await postChat(plaintext);
     expect(first.status).toBe(200);
     expect(((await first.json()) as { id: string })["id"]).toBe("chatcmpl-fresh");
     expect(await env.CACHE_KV.get(cacheKey)).toBeNull();
     await vi.waitFor(async () => {
-      expect(await env.CACHE_KV.get(countKey)).toBe("1");
+      expect(await env.CACHE_KV.get(countKey)).toBeNull();
     });
 
-    // 第 2 次：达到阈值 → waitUntil 异步写缓存并清零计数
+    // 第 2 次：达到阈值 → waitUntil 异步写缓存（计数清零在 isolate 内，KV 无痕）
     const second = await postChat(plaintext);
     expect(second.status).toBe(200);
     expect(upstreamCalls).toBe(2);
     await vi.waitFor(async () => {
       expect(await env.CACHE_KV.get(cacheKey)).not.toBeNull();
     });
-    expect(await env.CACHE_KV.get(countKey)).toBeNull();
 
     // 第 3 次：命中缓存值（上游未被再次调用）
     const third = await postChat(plaintext);
@@ -227,30 +232,28 @@ describe("响应缓存", () => {
     const cacheKey = buildCacheKey(keyId, "gpt-4o-mini", bodyHash);
     const countKey = buildCountKey(keyId, "gpt-4o-mini", bodyHash);
 
-    // 第 1 次成功 → 计数 1
+    // 第 1 次成功 → 计数 1（isolate 内，KV 无痕——O2 契约）
     stubUpstream(() => upstreamChat("chatcmpl-h11-1", "ok"));
     const first = await postChat(plaintext);
     expect(first.status).toBe(200);
     await vi.waitFor(async () => {
-      expect(await env.CACHE_KV.get(countKey)).toBe("1");
+      expect(await env.CACHE_KV.get(countKey)).toBeNull();
     });
 
-    // 第 2 次失败（上游 5xx）→ 不消耗计数（计数键保持 "1"，未被 delete——旧逻辑会在
-    // bump 达到阈值时提前删键，错误突发把热度清零 → 上游恢复后需重新累积）
+    // 第 2 次失败（上游 5xx）→ 不消耗计数（bump 只在成功路径 waitUntil——错误突发
+    // 不把热度清零 → 上游恢复后无需重新累积）
     stubUpstream(() => new Response("boom", { status: 502 }));
     const failed = await postChat(plaintext);
     expect(failed.status).toBe(502);
-    expect(await env.CACHE_KV.get(countKey)).toBe("1");
     expect(await env.CACHE_KV.get(cacheKey)).toBeNull();
 
-    // 第 3 次成功 → 计数 2 = 阈值 → 写缓存并清零
+    // 第 3 次成功 → 计数 2 = 阈值 → 写缓存（失败未消耗热度，3 次总流量即触发）
     stubUpstream(() => upstreamChat("chatcmpl-h11-3", "ok"));
     const third = await postChat(plaintext);
     expect(third.status).toBe(200);
     await vi.waitFor(async () => {
       expect(await env.CACHE_KV.get(cacheKey)).not.toBeNull();
     });
-    expect(await env.CACHE_KV.get(countKey)).toBeNull();
   });
 
   it("H11：count key 带协议前缀（协议分支计数隔离）", () => {
@@ -330,5 +333,37 @@ describe("全局缓存总开关（CACHE_ENABLED）", () => {
     expect(isGlobalCacheEnabled("0")).toBe(false);
     expect(isGlobalCacheEnabled("enabled")).toBe(false);
     expect(isGlobalCacheEnabled("  ")).toBe(false);
+  });
+});
+
+// O2（09-11-kv-ops-optimization）：miss 计数 isolate 化 —— 纯函数语义（0 KV 由签名保证：
+// bumpCacheMissCount(countKey) 不再接收 KV 入参，KV 读写在该路径上不可能发生）。
+describe("O2 miss 计数（isolate 窗口分桶）", () => {
+  const ORIGINAL_DATE_NOW = Date.now;
+
+  it("同窗口 ≥ 阈值 → true 并清零；窗口翻转 → 重新累积", () => {
+    resetMissCountsForTest();
+    const key = "cachecnt:o2:1:gpt-4o-mini:deadbeef";
+    const base = 1_700_000_000_000;
+    Date.now = () => base;
+    try {
+      expect(bumpCacheMissCount(key)).toBe(false); // 第 1 次：计数 1
+      expect(bumpCacheMissCount(key)).toBe(true); // 第 2 次 = 阈值 → 写缓存 + 清零
+      expect(bumpCacheMissCount(key)).toBe(false); // 清零后重新计数 1
+      Date.now = () => base + CACHE_HIT_WINDOW_SECONDS * 1000; // 窗口翻转
+      expect(bumpCacheMissCount(key)).toBe(false); // 陈旧条目按 1 重计（惰性清理）
+      expect(bumpCacheMissCount(key)).toBe(true); // 新窗口重新累积到阈值
+    } finally {
+      Date.now = ORIGINAL_DATE_NOW;
+      resetMissCountsForTest();
+    }
+  });
+
+  it("不同 countKey 计数隔离（键含 keyId/model/bodyHash/协议前缀）", () => {
+    resetMissCountsForTest();
+    expect(bumpCacheMissCount("cachecnt:1:m:h")).toBe(false); // key1 → 1
+    expect(bumpCacheMissCount("cachecnt:2:m:h")).toBe(false); // key2 → 1（与 key1 隔离）
+    expect(bumpCacheMissCount("cachecnt:2:m:h")).toBe(true); // key2 → 达阈值
+    expect(bumpCacheMissCount("cachecnt:1:m:h")).toBe(true); // key1 → 达阈值（未被 key2 消耗）
   });
 });

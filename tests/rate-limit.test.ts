@@ -3,10 +3,14 @@
 // 因此本文件冻结 Date.now 保证窗口确定（主 worker 与测试同 isolate，全局 mock 对其生效）。
 // 计数后移语义：响应返回后才消耗配额 —— 5xx（上游失败）不计数、4xx（网关拦截，如
 // 债务模型下负余额 402）计数。限流用例用负余额制造稳定 402（计数确定，不依赖上游）。
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+// 09-11-kv-ops-optimization（O1 方案 B）：计数在 isolate 模块级 Map + KV 定期落账，
+// 末段用例以计数 KV 包装（helpers.countKvOps）断言「每请求 1 读 0 写」防回潮。
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetAllForTest } from "../src/lib/rate-counter";
 import {
   applyMigrations,
   clearKv,
+  countKvOps,
   selfFetch,
   setupKey,
   setupProviderWithModel,
@@ -23,6 +27,8 @@ beforeEach(() => {
 afterEach(() => {
   // 恢复真实时钟，避免影响其他用例
   Date.now = ORIGINAL_DATE_NOW;
+  // O1：计数为 isolate 模块级 Map（clearKv 清不掉）→ 用例间显式复位
+  resetAllForTest();
 });
 
 const BODY = {
@@ -103,5 +109,37 @@ describe("限流（KV 固定窗口）", () => {
     expect(first.status).toBe(502);
     const second = await postChat(plaintext);
     expect(second.status).toBe(502);
+  });
+});
+
+/** O1 防回潮：每请求 KV 操作数断言（含落账写上界）。 */
+describe("O1 限流 KV 操作数（每请求 1 读 0 写，防回潮）", () => {
+  it("delta 达阈值前零写；10 请求写 ≤ 3（旧实现为 10 写）", async () => {
+    // 负余额：每请求被网关 402 拦截（4xx 计数）→ 计数确定，不依赖上游
+    const userId = await setupUser("ratelimit-kvops@test.dev", -1);
+    const { plaintext } = await setupKey(userId); // qpsLimit 默认 60（本用例不触限）
+    await setupProviderWithModel("gpt-4o-mini");
+
+    const kv = countKvOps("rate:");
+    try {
+      for (let i = 0; i < 4; i += 1) {
+        const res = await postChat(plaintext);
+        expect(res.status).toBe(402);
+      }
+      // FLUSH_DELTA_THRESHOLD = 5：未达阈值 → 0 写；每请求恰 1 读（快照合成）
+      expect(kv.puts).toHaveLength(0);
+      expect(kv.gets).toHaveLength(4);
+
+      for (let i = 0; i < 6; i += 1) {
+        await postChat(plaintext);
+      }
+      // 第 5 / 10 次请求触发落账（waitUntil 异步）→ 等待落地后核对上界
+      await vi.waitFor(() => expect(kv.puts.length).toBeGreaterThan(0));
+      expect(kv.puts.length).toBeLessThanOrEqual(3);
+      // 读 = 请求数 + 落账读（每请求 1 读 + 每次落账 1 读）
+      expect(kv.gets.length).toBeLessThanOrEqual(12);
+    } finally {
+      kv.unwrap();
+    }
   });
 });

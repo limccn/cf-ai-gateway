@@ -49,6 +49,10 @@ GATEWAY_SECRET_KEY=local-gateway-secret-key-change-me-0123456789abcdef
 # 全局响应缓存总开关（09-03-stg-cache-investigation）；缺省 false（关闭），设为 true/1/yes/on 开启
 # 即使设为 true，仍需 key.cacheEnabled=true 且非流式且请求体 ≤32KB 才能命中/写入缓存
 # CACHE_ENABLED=false
+# modelcap 档位乘算常数（09-16 kv-ops O3c 档位化）：cap = BASE × MULT × 档位（modelcaps.ts 存档位）
+# 缺省 8192 × 2 = 16384 基准；改后重跑 render:modelcaps + 部署（档位按当前常数推导）
+# MODELCAP_BASE_TOKENS=8192
+# MODELCAP_MULTIPLIER=2
 # request_logs 明细保留天数（cron 清理用；缺省 30）
 REQUEST_LOG_RETENTION_DAYS=30
 # 网关 API Key 明文前缀（可选；缺省 sk-。空白视为未设置。仅影响新生成的 Key）
@@ -61,6 +65,9 @@ STAGING_REQUEST_LOG_RETENTION_DAYS=30
 STAGING_API_KEY_PREFIX=sk-
 # staging 全局缓存开关（缺省 false，关闭）；覆盖顶层 CACHE_ENABLED
 # STAGING_CACHE_ENABLED=false
+# staging modelcap 档位乘算常数（缺省与顶层同 8192 × 2）；stg 如需整体缩容改此处
+# STAGING_MODELCAP_BASE_TOKENS=8192
+# STAGING_MODELCAP_MULTIPLIER=2
 # 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
 # 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
 # SEED_USERS=
