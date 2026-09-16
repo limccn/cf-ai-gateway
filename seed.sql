@@ -24,35 +24,35 @@ VALUES
   ('gpt-5.6-luna',   0.20,   0.40,   0.02,    1.20,   1.80,  16384, unixepoch(), unixepoch()),
   ('gpt-6-astra',    10.00,  15.00,  1.50,   60.00,  90.00,  16384, unixepoch(), unixepoch()),
   -- Anthropic（除 claude-sonnet-4.5 外官方未分层；缓存价 = 输入价 10%）
-  ('claude-fable-5.1',    20.00, 20.00, 2.00, 50.00, 50.00, NULL, unixepoch(), unixepoch()),
-  ('claude-fable-5',      10.00, 10.00, 1.00, 50.00, 50.00, NULL, unixepoch(), unixepoch()),
-  ('claude-opus-5',       5.00,  5.00, 0.50, 25.00, 25.00, NULL, unixepoch(), unixepoch()),
-  ('claude-opus-4.8',     5.00,  5.00, 0.50, 25.00, 25.00, NULL, unixepoch(), unixepoch()),
-  ('claude-opus-4.5',     5.00,  5.00, 0.50, 25.00, 25.00, NULL, unixepoch(), unixepoch()),
-  ('claude-sonnet-5',     2.00,  2.00, 0.20, 10.00, 10.00, NULL, unixepoch(), unixepoch()),
-  ('claude-sonnet-4.6',   3.00,  3.00, 0.30, 15.00, 15.00, NULL, unixepoch(), unixepoch()),
-  ('claude-sonnet-4.5',   3.00,  6.00, 0.30, 15.00, 22.50, NULL, unixepoch(), unixepoch()), -- 官方阈值 200K，网关 128K 判档
-  ('claude-haiku-4.5',    1.00,  1.00, 0.10,  5.00,  5.00,  NULL, unixepoch(), unixepoch()),
+  ('claude-fable-5.1',    20.00, 20.00, 2.00, 50.00, 50.00, 16384, unixepoch(), unixepoch()),
+  ('claude-fable-5',      10.00, 10.00, 1.00, 50.00, 50.00, 16384, unixepoch(), unixepoch()),
+  ('claude-opus-5',       5.00,  5.00, 0.50, 25.00, 25.00, 16384, unixepoch(), unixepoch()),
+  ('claude-opus-4.8',     5.00,  5.00, 0.50, 25.00, 25.00, 16384, unixepoch(), unixepoch()),
+  ('claude-opus-4.5',     5.00,  5.00, 0.50, 25.00, 25.00, 16384, unixepoch(), unixepoch()),
+  ('claude-sonnet-5',     2.00,  2.00, 0.20, 10.00, 10.00, 16384, unixepoch(), unixepoch()),
+  ('claude-sonnet-4.6',   3.00,  3.00, 0.30, 15.00, 15.00, 16384, unixepoch(), unixepoch()),
+  ('claude-sonnet-4.5',   3.00,  6.00, 0.30, 15.00, 22.50, 16384, unixepoch(), unixepoch()), -- 官方阈值 200K，网关 128K 判档
+  ('claude-haiku-4.5',    1.00,  1.00, 0.10,  5.00,  5.00,  16384, unixepoch(), unixepoch()),
   -- DeepSeek（缓存价 ≈ 输入价 20%；2026-08-26 决策取最新快照价，OpenRouter 裸 slug 指向旧快照）
-  ('deepseek-v4.1-flash', 0.040, 0.040, 0.008,  0.080,  0.080,  16384, unixepoch(), unixepoch()),
+  ('deepseek-v4.1-flash', 0.040, 0.040, 0.008,  0.080,  0.080,  65536, unixepoch(), unixepoch()),
   ('deepseek-v4-pro',     1.122, 1.122, 0.0374, 3.366,  3.366,  16384, unixepoch(), unixepoch()),
   -- placeholder: qwen3.8-flash 未上架任何市场源（OpenRouter 全量 417 模型 + 阿里官方页 404，2026-08-26），
   -- 价取同族 qwen3.7-flash 占位，在架后请 admin 覆盖
   ('qwen3.8-flash', 0.03,   0.03,   0.006,  0.13,   0.13,   32768, unixepoch(), unixepoch()),
   -- placeholder: qwen3.8-27b 未上架任何市场源（同上），价取 qwen3.7-plus 占位，在架后请 admin 覆盖
-  ('qwen3.8-27b',   0.32,   0.32,   0.064,  1.28,   1.28,   16384, unixepoch(), unixepoch()),
+  ('qwen3.8-27b',   0.32,   0.32,   0.064,  1.28,   1.28,   65536, unixepoch(), unixepoch()),
   ('qwen3.8-max',   2.00,   2.00,   0.25,   6.00,   6.00,   16384, unixepoch(), unixepoch()),
   -- Zhipu（GLM，官方未分层；缓存价 ≈ 输入价 18.6%）
-  ('glm-5.3',       1.19,   1.19,   0.221,  3.74,   3.74,   16384, unixepoch(), unixepoch()),
-  ('glm-5.3-flash', 0.040,  0.040,  0.008,  0.080,  0.080,  16384, unixepoch(), unixepoch()),
+  ('glm-5.3',       1.19,   1.19,   0.221,  3.74,   3.74,   32768, unixepoch(), unixepoch()),
+  ('glm-5.3-flash', 0.040,  0.040,  0.008,  0.080,  0.080,  65536, unixepoch(), unixepoch()),
   -- MIMO（官方未分层；缓存价 ≈ 输入价 20%）
-  ('mimo-v2.5',    0.10,   0.10,   0.02,   0.30,   0.30,   16384, unixepoch(), unixepoch()),
-  ('mimo-v2.5-pro',0.10,  0.10,   0.02,   0.30,   0.30,   16384, unixepoch(), unixepoch()),
+  ('mimo-v2.5',    0.10,   0.10,   0.02,   0.30,   0.30,   32768, unixepoch(), unixepoch()),
+  ('mimo-v2.5-pro',0.10,  0.10,   0.02,   0.30,   0.30,   32768, unixepoch(), unixepoch()),
   -- Hy3（官方未分层；缓存价 ≈ 输入价 20%）
-  ('hy3',          0.10,   0.10,   0.02,   0.30,   0.30,   16384, unixepoch(), unixepoch()),
-  ('hy4-preview',  0.32,   0.32,   0.064,  1.28,   1.28,   NULL,  unixepoch(), unixepoch()),
+  ('hy3',          0.10,   0.10,   0.02,   0.30,   0.30,   65536, unixepoch(), unixepoch()),
+  ('hy4-preview',  0.32,   0.32,   0.064,  1.28,   1.28,   16384,  unixepoch(), unixepoch()),
   -- kimi
-  ('kimi-k2.6',    0.040,  0.040,  0.008,  0.080,  0.080,  32768, unixepoch(), unixepoch()),
+  ('kimi-k2.6',    0.040,  0.040,  0.008,  0.080,  0.080,  65536, unixepoch(), unixepoch()),
   ('kimi-k3',      1.19,   1.19,   0.221,  3.74,   3.74,   16384, unixepoch(), unixepoch()),
   -- minimax
   ('minimax-m3',   0.10,   0.10,   0.02,   0.30,   0.30,   16384, unixepoch(), unixepoch());

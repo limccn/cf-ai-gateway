@@ -1,14 +1,22 @@
-// 代理面限流中间件（M3 3.3 第二步，占位实现）。
-// KV 固定 60s 窗口计数器：`rate:{keyId}:{windowStart}`；超限 429（OpenAI 风格错误体）。
-// M3 占位说明：get+put 非原子（KV 无原子自增），边界突发可接受（design §8 权衡）；
-// 并发精确语义与可配置窗口在 M4（4.4）完善。
+// 代理面限流中间件（M3 3.3 第二步；O1 方案 B 重写，09-11-kv-ops-optimization）。
+// isolate 模块级计数 + KV 定期落账（rate-counter.ts）：每请求 1 KV 读（全局快照 +
+// 本地增量合成），KV 写仅在落账触发时发生（delta≥5 / 30s 兜底 / 失败退避）。
+// 语义保留：固定 60s 窗口、计数后移（status<500 才消耗配额）、429 不计数、
+// 标准限流头公式不变；KV 读失败 → 快照按 0 处理（fail-open 到本地有界计数，
+// 不 500——先例 proxy.ts modelcap「KV 抖动不 fail-closed」）。
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../../types";
+import {
+  WINDOW_SECONDS,
+  ensureEntry,
+  flushEntry,
+  kvKey,
+  recordIncrement,
+  windowStartOf,
+} from "../../lib/rate-counter";
 
-/** 固定窗口长度（秒）；qpsLimit 语义 = 每分钟请求上限（PRD R6.1）。导出供 /api/admin/settings 展示。 */
-export const WINDOW_SECONDS = 60;
-/** KV 计数器 TTL：两倍窗口，防残留。 */
-const COUNTER_TTL_SECONDS = WINDOW_SECONDS * 2;
+/** 固定窗口长度（秒）；qpsLimit 语义 = 每分钟请求上限。导出供 /api/admin/settings 展示。 */
+export { WINDOW_SECONDS };
 
 export const gatewayRateLimit = (): MiddlewareHandler<AppEnv> => {
   return async (c, next) => {
@@ -21,12 +29,22 @@ export const gatewayRateLimit = (): MiddlewareHandler<AppEnv> => {
     }
 
     const limit = auth.key.qpsLimit;
-    const windowStart = Math.floor(Date.now() / (WINDOW_SECONDS * 1000)) * WINDOW_SECONDS;
-    const kvKey = `rate:${auth.key.id}:${windowStart}`;
+    const windowStart = windowStartOf(Date.now());
 
-    const currentRaw = await c.env.CACHE_KV.get(kvKey);
-    const parsed = currentRaw ? parseInt(currentRaw, 10) : 0;
-    const current = Number.isFinite(parsed) ? parsed : 0;
+    let snapshot = 0;
+    try {
+      const raw = await c.env.CACHE_KV.get(kvKey(auth.key.id, windowStart));
+      const parsed = raw === null ? 0 : Number.parseInt(raw, 10);
+      snapshot = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    } catch (error) {
+      logger.warn("rate_limit_kv_read_failed", {
+        keyId: auth.key.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const entry = ensureEntry(auth.key.id, windowStart);
+    const current = snapshot + entry.local;
 
     // 标准限流头（窗口语义：limit=每分钟上限，reset=窗口结束 unix 秒）
     const windowEnd = windowStart + WINDOW_SECONDS;
@@ -57,9 +75,9 @@ export const gatewayRateLimit = (): MiddlewareHandler<AppEnv> => {
     // 4xx（402 余额不足/400 校验失败等）仍计数（客户端问题，防滥用）。
     await next();
     if (c.res.status < 500) {
-      await c.env.CACHE_KV.put(kvKey, String(current + 1), {
-        expirationTtl: COUNTER_TTL_SECONDS,
-      });
+      if (recordIncrement(auth.key.id, windowStart)) {
+        c.executionCtx.waitUntil(flushEntry(c.env.CACHE_KV, auth.key.id, entry));
+      }
     }
   };
 };

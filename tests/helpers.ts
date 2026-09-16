@@ -33,6 +33,51 @@ export async function clearKv(): Promise<void> {
   await Promise.all(listed.keys.map((k) => env.CACHE_KV.delete(k.name)));
 }
 
+/**
+ * 计数 KV 包装：拦截指定前缀键的 get/put（其余键透明转发），供 KV 操作数断言
+ * （防回潮：O1 限流每请求 1 读 0 写、O4.2 断路读请求内 memo 去重等，09-11-kv-ops-optimization）。
+ * 用法：`const kv = countKvOps("rate:"); try { ...断言 kv.gets/kv.puts... } finally { kv.unwrap(); }`
+ */
+export function countKvOps(prefix: string): {
+  gets: string[];
+  puts: string[];
+  unwrap: () => void;
+} {
+  const original = env.CACHE_KV;
+  const gets: string[] = [];
+  const puts: string[] = [];
+  const wrapped = new Proxy(original, {
+    get(target, prop, receiver) {
+      if (prop === "get") {
+        return async (key: string, options?: { cacheTtl?: number }) => {
+          if (key.startsWith(prefix)) {
+            gets.push(key);
+          }
+          return target.get(key, options);
+        };
+      }
+      if (prop === "put") {
+        return async (key: string, value: string, options?: { expirationTtl?: number }) => {
+          if (key.startsWith(prefix)) {
+            puts.push(key);
+          }
+          return target.put(key, value, options);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  env.CACHE_KV = wrapped;
+  return {
+    gets,
+    puts,
+    unwrap: () => {
+      env.CACHE_KV = original;
+    },
+  };
+}
+
 // ============ 延迟计费（08-31-perf-v2）测试辅助 ============
 // 请求路径成功时只向 BILLING_QUEUE 发事件（不写 D1）；单测环境不自动投递队列消息，
 // 与 usage.test.ts 的 consumeUsageBatch 驱动模式一致：构造批 → 手动驱动消费者。

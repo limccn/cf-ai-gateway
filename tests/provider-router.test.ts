@@ -13,6 +13,7 @@ import {
   pickIndex,
   pickProvider,
   readCircuit,
+  resetOpenSuppressionForTest,
   type RouteCandidate,
 } from "../src/lib/provider-router";
 
@@ -29,6 +30,7 @@ beforeAll(async () => {
 afterEach(async () => {
   const listed = await env.CACHE_KV.list({ prefix: "circuit:" });
   await Promise.all(listed.keys.map((k) => env.CACHE_KV.delete(k.name)));
+  resetOpenSuppressionForTest();
 });
 
 describe("fnv1a32", () => {
@@ -149,6 +151,28 @@ describe("断路器", () => {
     // KV expirationTtl 由 miniflare 管理，此处仅验证键存在且 reason 正确
     expect((await readCircuit(env.CACHE_KV, 1))?.reason).toBe("429");
     expect((await readCircuit(env.CACHE_KV, 2))?.reason).toBe("5xx");
+  });
+
+  it("O6：10s 内重复 openCircuit 只写一次 KV（抑制期内换 reason 也不覆盖）", async () => {
+    resetOpenSuppressionForTest();
+    await openCircuit(env.CACHE_KV, 11, "5xx");
+    expect(await env.CACHE_KV.get(circuitKey(11))).not.toBeNull();
+    await openCircuit(env.CACHE_KV, 11, "429");
+    // 第二次 put 被抑制 → KV 值未变化（首 reason 的 TTL 生效）
+    expect((await readCircuit(env.CACHE_KV, 11))?.reason).toBe("5xx");
+  });
+
+  it("O6：超过 10s 后可再次写入（新 reason 生效）", async () => {
+    resetOpenSuppressionForTest();
+    await openCircuit(env.CACHE_KV, 12, "5xx");
+    const originalNow = Date.now;
+    Date.now = () => originalNow() + 11_000;
+    try {
+      await openCircuit(env.CACHE_KV, 12, "429");
+    } finally {
+      Date.now = originalNow;
+    }
+    expect((await readCircuit(env.CACHE_KV, 12))?.reason).toBe("429");
   });
 });
 

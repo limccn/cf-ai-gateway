@@ -53,7 +53,13 @@ import {
   logUpstreamError,
   UpstreamTimeoutError,
 } from "../../lib/upstream";
-import { clampMaxTokens } from "../../lib/max-tokens";
+import { clampMaxTokens, maxRequestedTokens } from "../../lib/max-tokens";
+import {
+  DEFAULT_MODELCAP_BASE_TOKENS,
+  DEFAULT_MODELCAP_MULTIPLIER,
+  modelCapFor,
+  parsePositiveInt,
+} from "../../lib/modelcaps";
 import {
   chatCompletionsInputSchema,
   completionsInputSchema,
@@ -415,63 +421,88 @@ export function proxyRouteWithOptions(
       };
       const multiCandidate = candidates.length > 1;
 
-      // 09-01-stg-glm-ccswitch-fix + U6：模型级 max_tokens 上限（models.max_output_tokens，
-      // NULL ≡ 不限）。一次查询、失败尝试共享；**查询失败 → 拒绝**（fail-closed——
-      // 不知道 cap 就放行会让 09-01 事故形态复活；D1 抖动瞬时，请求可重试）。
-      // 效率项（09-01-review）：KV TTL 缓存（MODEL_CAP_CACHE_TTL_SECONDS）免每请求同步 D1 读——
-      // 缓存命中直接取；KV 读失败 → 降级 D1 权威查询（KV 抖动不 fail-closed）；D1 失败才拒绝。
+      // 09-01-stg-glm-ccswitch-fix + U6 + O3c（09-11-kv-ops-optimization）：模型级 max_tokens
+      // 上限（models.max_output_tokens，NULL ≡ 不限）。O3c 常量权威 + 慢路径（design.md §3.1）：
+      //   快路径：常量已知且（索求 ≤ 常量 或 省略或 不限）→ 直接用常量做 cap，0 KV / 0 D1。
+      //     省略场景 clampMaxTokens 按常量注入 max_tokens（U6 兜底，防 adapter 缺省注入
+      //     超 cap 的事故形态复活）—— 常量不仅是跳过条件，也是执行值。
+      //   慢路径：索求 > 常量 或 不在常量 → KV（cacheTtl:60）→ miss → D1 权威 → waitUntil 写回。
+      //   契约（2026-09-16 用户裁决）：cap 升调即时生效（索求超常量者走慢路径见 D1 新值）；
+      //     cap 降调对「索求 ≤ 常量」客户端需重新生成常量 + 部署（慢路径客户端即时生效）。
+      //   **慢路径查询失败 → 拒绝**（fail-closed——不知道 cap 就放行会让 09-01 事故形态复活；
+      //   D1 抖动瞬时，请求可重试）。KV 读失败 → 降级 D1（KV 抖动不 fail-closed）。
       // clamp 在 buildRequest 前统一执行（全部 adapter/协议生效，含 Responses 的
       // max_completion_tokens 与 anthropic 转换后的 max_tokens）。
+      // 档位化（09-16）：cap = BASE × MULT × 档位（env [vars] 烘焙；缺省 8192 × 2）
+      const constCapLookup = modelCapFor(
+        billingModel,
+        parsePositiveInt(ENV.MODELCAP_BASE_TOKENS, DEFAULT_MODELCAP_BASE_TOKENS),
+        parsePositiveInt(ENV.MODELCAP_MULTIPLIER, DEFAULT_MODELCAP_MULTIPLIER),
+      );
+      const constCapKnown = constCapLookup.known;
+      const constCap = constCapLookup.cap;
+      const requestedMax = maxRequestedTokens(internalReq.body);
+      const fastPath =
+        constCapKnown &&
+        (constCap === null || requestedMax === undefined || requestedMax <= constCap);
+
       let maxOutputTokens: number | undefined;
-      try {
-        const capCacheKey = `modelcap:${billingModel}`;
-        let cachedCap: string | null = null;
+      if (fastPath) {
+        // 快路径：常量即 cap（clampMaxTokens 对「≤ cap / 省略 / cap 无效」均正确）
+        maxOutputTokens = constCap ?? undefined;
+      } else {
         try {
-          cachedCap = await CACHE_KV.get(capCacheKey);
-        } catch {
-          // KV 抖动 → 降级 D1（缓存只是加速层，D1 是权威）
-        }
-        if (cachedCap !== null) {
-          maxOutputTokens = cachedCap === "null" ? undefined : Number(cachedCap);
-          if (cachedCap !== "null" && !Number.isFinite(maxOutputTokens)) {
-            // 损坏值（非我方写入格式）→ 按 miss 处理：走 D1 覆盖
-            cachedCap = null;
+          const capCacheKey = `modelcap:${billingModel}`;
+          let cachedCap: string | null = null;
+          try {
+            cachedCap = await CACHE_KV.get(capCacheKey, {
+              cacheTtl: MODEL_CAP_CACHE_TTL_SECONDS,
+            });
+          } catch {
+            // KV 抖动 → 降级 D1（缓存只是加速层，D1 是权威）
           }
-        }
-        if (cachedCap === null) {
-          const modelRow = await db
-            .select({ cap: models.maxOutputTokens })
-            .from(models)
-            .where(eq(models.model, billingModel))
-            .limit(1);
-          const cap = modelRow[0]?.cap ?? null;
-          maxOutputTokens = cap ?? undefined;
-          // 写回缓存（含 null=不限，避免每请求确认"不限"）；失败仅影响加速层
-          executionCtx.waitUntil(
-            CACHE_KV.put(capCacheKey, cap === null ? "null" : String(cap), {
-              expirationTtl: MODEL_CAP_CACHE_TTL_SECONDS,
-            }).catch(() => {}),
+          if (cachedCap !== null) {
+            maxOutputTokens = cachedCap === "null" ? undefined : Number(cachedCap);
+            if (cachedCap !== "null" && !Number.isFinite(maxOutputTokens)) {
+              // 损坏值（非我方写入格式）→ 按 miss 处理：走 D1 覆盖
+              cachedCap = null;
+            }
+          }
+          if (cachedCap === null) {
+            const modelRow = await db
+              .select({ cap: models.maxOutputTokens })
+              .from(models)
+              .where(eq(models.model, billingModel))
+              .limit(1);
+            const cap = modelRow[0]?.cap ?? null;
+            maxOutputTokens = cap ?? undefined;
+            // 写回缓存（含 null=不限，避免每请求确认"不限"）；失败仅影响加速层
+            executionCtx.waitUntil(
+              CACHE_KV.put(capCacheKey, cap === null ? "null" : String(cap), {
+                expirationTtl: MODEL_CAP_CACHE_TTL_SECONDS,
+              }).catch(() => {}),
+            );
+          }
+        } catch (error) {
+          logger.error("model_cap_query_failed", {
+            model: billingModel,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          const capFailLog: RequestLogRecord = {
+            requestId,
+            userId: auth.user.id,
+            keyId: auth.key.id,
+            providerId: null,
+            model: billingModel,
+            status: "error",
+            latencyMs: Date.now() - startTime,
+          };
+          await recordRequestLog(db, capFailLog);
+          return c.json(
+            { error: { message: "Model configuration temporarily unavailable. Please retry." } },
+            500,
           );
         }
-      } catch (error) {
-        logger.error("model_cap_query_failed", {
-          model: billingModel,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        const capFailLog: RequestLogRecord = {
-          requestId,
-          userId: auth.user.id,
-          keyId: auth.key.id,
-          providerId: null,
-          model: billingModel,
-          status: "error",
-          latencyMs: Date.now() - startTime,
-        };
-        await recordRequestLog(db, capFailLog);
-        return c.json(
-          { error: { message: "Model configuration temporarily unavailable. Please retry." } },
-          500,
-        );
       }
       if (maxOutputTokens !== undefined) {
         const clamped = clampMaxTokens(internalReq.body, maxOutputTokens);
@@ -501,11 +532,19 @@ export function proxyRouteWithOptions(
           providerId: c.providerId,
           weight: c.weight,
         }));
-        const picked = await pickHealthyProvider(
-          routeCandidates,
-          auth.key.id,
-          (id) => isCircuitOpen(c.env.CACHE_KV, id),
-        );
+        // O4.2（09-11-kv-ops-optimization）：请求内 memo 去重——预筛已读过的候选
+        // 填充循环不再重读（消除「首选被断路跳过」场景的重复读）。
+        const circuitMemo = new Map<number, boolean>();
+        const readOpen = async (providerId: number): Promise<boolean> => {
+          const known = circuitMemo.get(providerId);
+          if (known !== undefined) {
+            return known;
+          }
+          const open = await isCircuitOpen(c.env.CACHE_KV, providerId);
+          circuitMemo.set(providerId, open);
+          return open;
+        };
+        const picked = await pickHealthyProvider(routeCandidates, auth.key.id, readOpen);
         if (picked === null) {
           allCircuitsOpen = true;
         } else {
@@ -517,7 +556,7 @@ export function proxyRouteWithOptions(
             if (attempts.some((a) => a.providerId === cand.providerId)) {
               continue;
             }
-            if (!(await isCircuitOpen(c.env.CACHE_KV, cand.providerId))) {
+            if (!(await readOpen(cand.providerId))) {
               attempts.push(cand);
             }
             if (attempts.length >= 2) {
@@ -996,7 +1035,7 @@ export function proxyRouteWithOptions(
           serializedOutbound = serialized;
           executionCtx.waitUntil(
             (async () => {
-              if (await bumpCacheMissCount(CACHE_KV, cacheState.countKey)) {
+              if (bumpCacheMissCount(cacheState.countKey)) {
                 await setCachedResponse(
                   CACHE_KV,
                   cacheState.cacheKey,

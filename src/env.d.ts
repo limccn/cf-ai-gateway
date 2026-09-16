@@ -29,6 +29,10 @@ interface Env {
   // 全局响应缓存总开关（09-03-stg-cache-investigation；[vars] 渲染烘焙）：缺省/false = 关闭，
   // 即使 key.cacheEnabled=true 也不缓存；true/1/yes/on = 开启。staging 用 STAGING_CACHE_ENABLED 独立设置
   CACHE_ENABLED?: string;
+  // modelcap 档位乘算常数（09-16 kv-ops 档位化；[vars] 渲染烘焙）：cap = BASE × MULT × 档位
+  // （src/generated/modelcaps.ts 存档位）；缺省 8192 × 2 = 16384 基准。staging 用 STAGING_* 独立设置
+  MODELCAP_BASE_TOKENS?: string;
+  MODELCAP_MULTIPLIER?: string;
   // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users
   // 并在注册校验中放行种子邮箱（绕过邀请码）。生产禁止设置。格式见 src/lib/seed-users.ts
   SEED_USERS?: string;

@@ -55,6 +55,8 @@ const TOKENS = new Set([
   "GITHUB_ALLOWED_EMAILS",
   "REQUEST_LOG_RETENTION_DAYS",
   "CACHE_ENABLED",
+  "MODELCAP_BASE_TOKENS",
+  "MODELCAP_MULTIPLIER",
   // [env.staging.vars]：STAGING_* 独立键，与 infra 键同源管理（--env staging 渲染）。
   "STAGING_API_KEY_PREFIX",
   "STAGING_BETTER_AUTH_URL",
@@ -62,6 +64,8 @@ const TOKENS = new Set([
   "STAGING_GITHUB_ALLOWED_EMAILS",
   "STAGING_REQUEST_LOG_RETENTION_DAYS",
   "STAGING_CACHE_ENABLED",
+  "STAGING_MODELCAP_BASE_TOKENS",
+  "STAGING_MODELCAP_MULTIPLIER",
 ]);
 
 /** 本地占位特征：命中即 WARN（仅提醒，不 fail——本地 dev 渲染本来就该是这些值）。 */
@@ -70,7 +74,16 @@ const PLACEHOLDER_HINTS = [/localhost/i, /placeholder-/, /@example\.com/i, /REPL
 /** 可选 token 的默认值（缺失不报错，取默认；默认链：process.env → .dev.vars → DEFAULT_VALUES）。 */
 // CACHE_ENABLED / STAGING_CACHE_ENABLED 可选（09-03）：缺省 "false"（全局缓存默认关闭），
 // 显式设 "true" 才启用；DEFAULT 非空避免 fail-fast（与 fail-fast 语义协调：缺省即合法值）。
-const DEFAULT_VALUES = { API_KEY_PREFIX: "sk-", CACHE_ENABLED: "false", STAGING_CACHE_ENABLED: "false" };
+const DEFAULT_VALUES = {
+  API_KEY_PREFIX: "sk-",
+  CACHE_ENABLED: "false",
+  STAGING_CACHE_ENABLED: "false",
+  // modelcap 档位乘算常数缺省（09-16 kv-ops 档位化）：8192 × 2 = 16384 基准
+  MODELCAP_BASE_TOKENS: "8192",
+  MODELCAP_MULTIPLIER: "2",
+  STAGING_MODELCAP_BASE_TOKENS: "8192",
+  STAGING_MODELCAP_MULTIPLIER: "2",
+};
 
 // 解析 .dev.vars：KEY=VALUE 行 + # 注释 + 双/单引号剥离（手写解析，零依赖）。
 function parseDotVars(file) {

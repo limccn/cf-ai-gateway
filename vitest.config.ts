@@ -29,6 +29,9 @@ export default defineConfig({
           GITHUB_ALLOWED_EMAILS: "",
           // 全局缓存总开关（09-03-stg-cache-investigation）：测试固定开启（cache.test.ts 依赖缓存生效）
           CACHE_ENABLED: "true",
+          // modelcap 档位乘算常数：测试固定缺省基准（8192 × 2 → 档位 1 = 16384）
+          MODELCAP_BASE_TOKENS: "8192",
+          MODELCAP_MULTIPLIER: "2",
           // seed 路由测试固定种子（dev-only）：安全密码仅存在于测试绑定，不落盘
           SEED_USERS: JSON.stringify([
             {

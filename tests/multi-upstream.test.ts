@@ -11,14 +11,17 @@ import { asc, eq } from "drizzle-orm";
 import { createDb } from "../src/db";
 import { requestLogs } from "../src/db/schema";
 import {
+  circuitKey,
   openCircuit,
   pickProvider,
   readCircuit,
+  resetOpenSuppressionForTest,
   type RouteCandidate,
 } from "../src/lib/provider-router";
 import {
   applyMigrations,
   clearKv,
+  countKvOps,
   countTxByType,
   createSession,
   getBalance,
@@ -142,6 +145,8 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   // 清空断路器键（防跨用例残留误判 circuitKeys() 与断路器跳过行为）
   await clearKv();
+  // O6：openCircuit 10s 写抑制为 isolate 模块级（clearKv 清不掉）→ 用例间显式复位
+  resetOpenSuppressionForTest();
 });
 
 describe("多候选：分配与粘性", () => {
@@ -382,6 +387,40 @@ describe("多候选：故障转移", () => {
     expect(res.status).toBe(200);
     expect(called).toHaveLength(1);
     expect(called[0]).toContain(primary === a ? "b.test" : "a.test");
+  });
+
+  it("O4.2：断路读请求内 memo 去重——首选断路场景每个候选恰 1 读", async () => {
+    const model = uniqueModel();
+    const a = await setupProvider("memo-a", model, { baseUrl: BASE_A });
+    const b = await setupProvider("memo-b", model, { baseUrl: BASE_B });
+    const userId = await setupUser("multi-memo@test.dev", 10);
+    const { keyId, plaintext } = await setupKey(userId);
+
+    const primary = pickProvider(
+      [
+        { providerId: a, weight: 1 },
+        { providerId: b, weight: 1 },
+      ],
+      keyId,
+    ).providerId;
+    await openCircuit(env.CACHE_KV, primary, "5xx");
+
+    const called = stubUpstreamFetch(() =>
+      new Response(JSON.stringify(okResponse(model)), { status: 200 }),
+    );
+    const kv = countKvOps("circuit:");
+    try {
+      const res = await postChat(plaintext, model);
+      expect(res.status).toBe(200);
+      expect(called).toHaveLength(1);
+      expect(called[0]).toContain(primary === a ? "b.test" : "a.test");
+    } finally {
+      kv.unwrap();
+    }
+    // 预筛读 primary（断路）+ 健康候选各 1 次；填充循环复用 memo → 无重读
+    // （无 memo 时「首选被跳过」场景会把 primary 再读一次 = 3 读）
+    expect(kv.gets).toHaveLength(2);
+    expect(kv.gets.filter((k) => k === circuitKey(primary))).toHaveLength(1);
   });
 
   it("全部候选断路 → 502 All upstream providers unavailable；零上游调用", async () => {
