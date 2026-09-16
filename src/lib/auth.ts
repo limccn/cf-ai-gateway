@@ -8,11 +8,26 @@
 //   随 session 用户对象下发；inviteCode 仅允许注册时提交（input: true），写入前由 create.before 钩子剥离。
 // - user.validateUserInfo：注册/登录准入门（邀请码校验 + GitHub 白名单），
 //   通过 source.method/action 区分 email-password 注册与 GitHub OAuth 流程。
+//
+// 赠金与邮箱验证（09-16-signup-bonus-grant）：
+// - 注册赠金挂在 `databaseHooks.user.create.after` —— 该钩子**不区分 provider**，
+//   email/password 与 GitHub OAuth 两条注册路径都触发（PRD R9/D4）；
+//   挂 before 不行：建号失败会在库里留下孤儿赠金。
+// - 邮箱验证**开关语义**：EMAIL_VERIFICATION_ENABLED 关闭（缺省）时整个 emailVerification
+//   段不配置 —— 而非「配置了但内部 no-op」。后果（刻意设计）：
+//     1) sendOnSignUp 一并消失 → 注册不签发验证 token、不发信；
+//     2) afterEmailVerification 未接线 → 即使有人拿旧 token 打通 GET /api/auth/verify-email
+//        （Better Auth 内置端点恒在）也不会发验证赠金 —— 开关关闭期间赠金结构性不可达。
+// - 不开 emailAndPassword.requireEmailVerification、不设 autoSignIn:false：
+//   未验证邮箱仍可登录与调用（D3），且注册响应形状零变更
+//   （Better Auth sign-up 的 shouldReturnGenericDuplicateResponse = requireEmailVerification
+//    || autoSignIn === false；二者都不动 → 重复邮箱仍返回既有 422）。
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { eq } from "drizzle-orm";
 import type { Db } from "../db";
 import * as schema from "../db/schema";
+import { grantEmailVerifyBonus, grantSignupBonus, isEmailVerificationEnabled } from "./bonus";
 import { consumeInviteCode, validateInviteCode } from "./invites";
 import { logger } from "./logger";
 
@@ -95,6 +110,35 @@ export function createAuth(env: Env, db: Db) {
       minPasswordLength: 8,
     },
 
+    // 邮箱验证：整段由 EMAIL_VERIFICATION_ENABLED 门控（缺省关闭 → 整段不配置，见文件头注释）。
+    // 两种认证路径的影响：OAuth 用户建号即 emailVerified=true，Better Auth 在 verify-email
+    // 端点会短路返回（不调 afterEmailVerification）→ OAuth 用户不获验证赠金（D5）。
+    ...(isEmailVerificationEnabled(env.EMAIL_VERIFICATION_ENABLED)
+      ? {
+          emailVerification: {
+            // D9：注册即自动发（本轮 sendVerificationEmail 为占位，不发真实邮件）
+            sendOnSignUp: true,
+            // 显式写出默认值，便于阅读：验证成功后自动为该邮箱建会话
+            autoSignInAfterVerification: true,
+            expiresIn: 60 * 60, // 1 小时
+            sendVerificationEmail: async ({ user, url }) => {
+              // 占位（D2：本轮不发信）：记录 user id 与链接骨架供排障（baseURL 配错会体现在这里，
+              // 见 spec big-question/env-configuration）。**token 不入日志**（spec backend/security
+              // 「Never log raw tokens」）—— 只留 token 参数的存在性，邮件通道就绪后接 sendEmail。
+              logger.info("email_verify_link_issued", {
+                userId: Number(user.id),
+                email: user.email,
+                url: url.replace(/token=[^&]*/, "token=<redacted>"),
+              });
+            },
+            // 完成验证 → 发放验证赠金（fail-open：赠金异常不影响验证结果）
+            afterEmailVerification: async (user) => {
+              await grantEmailVerifyBonus(env, db, logger, Number(user.id));
+            },
+          },
+        }
+      : {}),
+
     socialProviders: {
       github: {
         clientId: env.GITHUB_CLIENT_ID,
@@ -129,6 +173,11 @@ export function createAuth(env: Env, db: Db) {
               return { data: { inviteCode: undefined } };
             }
             return undefined;
+          },
+          // 注册赠金（R1/R9）：挂在 after —— 此时用户已落库、已有自增 id，且两条注册路径
+          // （email/password 与 GitHub OAuth）都经过本钩子。fail-open 由 grantSignupBonus 保证。
+          after: async (user) => {
+            await grantSignupBonus(env, db, logger, Number(user.id));
           },
         },
       },

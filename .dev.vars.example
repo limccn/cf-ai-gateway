@@ -57,6 +57,12 @@ GATEWAY_SECRET_KEY=local-gateway-secret-key-change-me-0123456789abcdef
 REQUEST_LOG_RETENTION_DAYS=30
 # 网关 API Key 明文前缀（可选；缺省 sk-。空白视为未设置。仅影响新生成的 Key）
 API_KEY_PREFIX=sk-
+# 注册赠金 / 邮箱验证赠金金额（USD，09-16-signup-bonus-grant）：缺省 5（开箱即送）；
+# 显式设 0（或非法值）即不赠（涉及钱，非法配置一律 fail-safe 到少发）
+# SIGNUP_BONUS_AMOUNT=5
+# EMAIL_VERIFY_BONUS_AMOUNT=5
+# 邮箱验证功能总开关（缺省 false = 休眠：不发验证信、不发验证赠金、前端不展示验证入口）
+# EMAIL_VERIFICATION_ENABLED=false
 # ---- staging 环境 [vars] 独立值（--env staging 渲染时覆盖顶层同名键；与 STAGING_* infra 键同源管理） ----
 STAGING_BETTER_AUTH_URL=https://stg-router.lmlh.net
 STAGING_GITHUB_CLIENT_ID=replace-me-github-client-id
@@ -68,6 +74,11 @@ STAGING_API_KEY_PREFIX=sk-
 # staging modelcap 档位乘算常数（缺省与顶层同 8192 × 2）；stg 如需整体缩容改此处
 # STAGING_MODELCAP_BASE_TOKENS=8192
 # STAGING_MODELCAP_MULTIPLIER=2
+# staging 赠金与邮箱验证开关：默认与顶层同（金额 5 / 验证关）。
+# 注意：stg 若不做限制，注册会真实产生赠金流水 —— 不希望如此就显式置 0：
+# STAGING_SIGNUP_BONUS_AMOUNT=0
+# STAGING_EMAIL_VERIFY_BONUS_AMOUNT=0
+# STAGING_EMAIL_VERIFICATION_ENABLED=false
 # 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
 # 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
 # SEED_USERS=

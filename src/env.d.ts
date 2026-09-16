@@ -33,6 +33,15 @@ interface Env {
   // （src/generated/modelcaps.ts 存档位）；缺省 8192 × 2 = 16384 基准。staging 用 STAGING_* 独立设置
   MODELCAP_BASE_TOKENS?: string;
   MODELCAP_MULTIPLIER?: string;
+  // 注册赠金 / 邮箱验证赠金金额（USD，09-16-signup-bonus-grant；[vars] 渲染烘焙）：
+  // 缺省 5（开箱即送）；显式设 0（或非法值）即不赠（fail-safe 到少发）。
+  // staging 用 STAGING_* 独立设置（stg 需显式置 0 才不送）
+  SIGNUP_BONUS_AMOUNT?: string;
+  EMAIL_VERIFY_BONUS_AMOUNT?: string;
+  // 邮箱验证功能总开关（09-16-signup-bonus-grant；[vars] 渲染烘焙）：缺省 false = 整个
+  // emailVerification 段不配置（不发验证信、不发验证赠金）；true/1/yes/on 才开启。
+  // staging 用 STAGING_EMAIL_VERIFICATION_ENABLED 独立设置
+  EMAIL_VERIFICATION_ENABLED?: string;
   // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users
   // 并在注册校验中放行种子邮箱（绕过邀请码）。生产禁止设置。格式见 src/lib/seed-users.ts
   SEED_USERS?: string;

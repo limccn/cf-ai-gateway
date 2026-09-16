@@ -20,6 +20,9 @@ interface SettingsBody {
     cacheTtlSeconds: number;
     rateLimitWindowSeconds: number;
     requestLogRetentionDays: number;
+    signupBonusAmount: number;
+    emailVerifyBonusAmount: number;
+    emailVerificationEnabled: boolean;
   };
 }
 
@@ -38,7 +41,7 @@ describe("GET /api/admin/settings", () => {
     expect(res.status).toBe(403);
   });
 
-  it("admin → 200，返回 3 项运行时默认配置（与代码常量一致）", async () => {
+  it("admin → 200，返回全部运行时默认配置（与代码常量/env 生效值一致）", async () => {
     const adminId = await setupUser("settings-admin@test.dev", 0, "admin");
     const cookie = sessionCookie(await createSession(adminId));
     const res = await selfFetch("http://localhost/api/admin/settings", {
@@ -50,5 +53,9 @@ describe("GET /api/admin/settings", () => {
     expect(body.settings.cacheTtlSeconds).toBe(3600); // api_keys.cache_ttl schema 默认
     expect(body.settings.rateLimitWindowSeconds).toBe(60); // rate-limit.ts WINDOW_SECONDS
     expect(body.settings.requestLogRetentionDays).toBe(30); // cleanup.ts 默认（测试 env 无覆盖）
+    // 赠金三项（09-16-signup-bonus-grant AC11）：金额为解析后的生效值，开关为布尔
+    expect(body.settings.signupBonusAmount).toBe(5); // bonus.ts 默认（测试 env 无覆盖）
+    expect(body.settings.emailVerifyBonusAmount).toBe(5);
+    expect(body.settings.emailVerificationEnabled).toBe(true); // 测试绑定显式开启（vitest.config.ts）
   });
 });

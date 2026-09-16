@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch, buildQuery } from "@/lib/api";
-import type { TransactionsOutput } from "../types";
+// type 用后端 schema 推导的 BalanceTxType（唯一真源，勿在此手写字符串联合）
+import type { BalanceTxType, TransactionsOutput } from "../types";
 
 export interface AdminTransactionsParams {
   userId?: number;
-  type?: "recharge" | "usage" | "adjust";
+  type?: BalanceTxType;
   from?: string;
   to?: string;
   limit?: number;

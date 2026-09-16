@@ -25,6 +25,8 @@ import anthropicRouter from "./routes/anthropic/router";
 import usageRouter from "./routes/usage/router";
 import settingsRouter from "./routes/settings/router";
 import billingRouter from "./routes/billing/router";
+import onboardingRouter from "./routes/onboarding/router";
+import profileRouter from "./routes/profile/router";
 import { toUnifiedErrorBody } from "./lib/error-format";
 import { logger } from "./lib/logger";
 import { consumeUsageBatch } from "./lib/usage-aggregation";
@@ -93,6 +95,8 @@ app.route("/api/models", modelsRouter);
 app.route("/api", usageRouter); // /api/me/usage（member）、/api/admin/usage（admin）
 app.route("/api", settingsRouter); // /api/admin/settings（admin 只读）
 app.route("/api", billingRouter); // /api/me/transactions（member）、/api/admin/transactions（admin）
+app.route("/api", onboardingRouter); // /api/me/onboarding（member：首登欢迎状态 / 标记已读）
+app.route("/api", profileRouter); // /api/me/profile（member：账号资料只读，改 name 走 /api/auth/update-user）
 
 // notFound 兜底（M6）：API 路径保持 JSON 404；其余路径（SPA 深链/静态资源）交给 Workers Assets。
 // run_worker_first=true 下 Worker 先收到全部请求，这里对非 API 路径回落到 env.ASSETS.fetch，

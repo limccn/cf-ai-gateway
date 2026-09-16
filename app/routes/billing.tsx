@@ -42,7 +42,8 @@ const adjustFormSchema = z.object({
 type TypeFilter = "all" | BalanceTxType;
 
 function typeBadgeVariant(type: BalanceTxType): "success" | "secondary" | "destructive" {
-  if (type === "recharge") {
+  // 进账（充值 / 注册赠金 / 验证赠金）与扣费（usage）分色；adjust 可正可负 → 中性
+  if (type === "recharge" || type === "signup_bonus" || type === "email_verify_bonus") {
     return "success";
   }
   if (type === "usage") {
@@ -159,7 +160,9 @@ export default function BillingPage() {
             </div>
             <div className="flex items-center justify-between">
               <span className="text-muted-foreground">Types</span>
-              <span className="font-mono text-xs">recharge / usage / adjust</span>
+              <span className="font-mono text-xs">
+                recharge / usage / adjust / signup_bonus / email_verify_bonus
+              </span>
             </div>
           </CardContent>
         </Card>
@@ -186,6 +189,8 @@ export default function BillingPage() {
               <option value="recharge">Recharge</option>
               <option value="usage">Usage</option>
               <option value="adjust">Adjustment</option>
+              <option value="signup_bonus">Signup bonus</option>
+              <option value="email_verify_bonus">Email verified bonus</option>
             </Select>
           </div>
         </CardHeader>
