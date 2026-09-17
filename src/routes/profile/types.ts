@@ -23,6 +23,15 @@ export const profileSchema = z.object({
    * 该判断必须走本字段，不能靠调用失败来发现（开关关闭时 emailVerification 段整段不存在）。
    */
   emailVerificationEnabled: z.boolean(),
+  /**
+   * 该用户是否持有密码凭据（09-17-change-password）。前端「Password 区块是否渲染」的**唯一**
+   * 判据 —— 前端不得自行从 session/accounts 推导（design §3.2）。
+   * 判据取宽容侧：只匹配 providerId='credential' 且 password 非空，不判 issuer（design §3.1）。
+   * 注意：密码下限常量（MIN_PASSWORD_LENGTH）**不经本模块**下发给前端 —— 本模块 import 了 zod，
+   * 而从本模块取一个常量会把整份 schema + zod 拖进调用方的分块（实测：把首屏 index 从
+   * 182 kB 顶到 255 kB）。前端一律直取零依赖的 src/lib/password.ts。
+   */
+  hasPassword: z.boolean(),
 });
 
 export const profileOutputSchema = z.object({

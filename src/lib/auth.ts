@@ -30,6 +30,7 @@ import * as schema from "../db/schema";
 import { grantEmailVerifyBonus, grantSignupBonus, isEmailVerificationEnabled } from "./bonus";
 import { consumeInviteCode, validateInviteCode } from "./invites";
 import { logger } from "./logger";
+import { MIN_PASSWORD_LENGTH } from "./password";
 
 // F2（安全评审）：先消费后建号 —— create.before 钩子内消费邀请码（乐观锁条件 UPDATE），
 // 消费失败 return false 阻止建号，关闭「两并发同码注册都通过校验、一码两用」的重放窗口。
@@ -107,7 +108,8 @@ export function createAuth(env: Env, db: Db) {
 
     emailAndPassword: {
       enabled: true,
-      minPasswordLength: 8,
+      // 下限取自唯一真源：前端拦截文案插值同一个常量（见 src/lib/password.ts）
+      minPasswordLength: MIN_PASSWORD_LENGTH,
     },
 
     // 邮箱验证：整段由 EMAIL_VERIFICATION_ENABLED 门控（缺省关闭 → 整段不配置，见文件头注释）。
