@@ -1,5 +1,10 @@
 // Profile 弹窗（09-16-account-menu，design §4.2）：自助查看账号资料 + 改 name。
 //
+// 09-17-password-menu-and-dialog-overflow：**改密区块已迁出**（原内嵌于本弹窗底部），
+// 现在是账户菜单里的并列项 + 独立弹窗 —— 见 user-button.tsx 的 ChangePasswordMenuItem
+// 与 change-password-dialog.tsx。本弹窗因此显著变矮，矮视口下不再咬着视口两头
+// （642px 是改动前在 600px 视口下的实测值；改动后高度见本任务 verification.md）。
+//
 // 数据源：useProfile()（GET /api/me/profile）—— 一次请求拿到 name/email/emailVerified/验证开关，
 // 且是服务端最新值（session 可能因 staleTime 滞后，且 SessionUser 不含 emailVerified）。
 //
@@ -17,7 +22,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import { authClient } from "@/lib/auth-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ChangePasswordForm } from "@/components/layout/change-password-form";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -215,17 +219,6 @@ function ProfileForm({ profile, onClose }: { profile: Profile; onClose: () => vo
           </p>
         ) : null}
       </div>
-
-      {/* 改密码区块：只对邮箱注册用户渲染（R1 / D5 —— 整块不渲染，不做灰色置灰，
-          后者会引入一个永远不可用的控件）。判据取服务端下发的 hasPassword，前端不自行推导
-          （design §3.2）。字段缺失（新前端遇旧后端）时同样不渲染 —— fail-closed，
-          不会暴露一个必然被库拒绝的表单。 */}
-      {profile.hasPassword ? (
-        <div className="space-y-2">
-          <p className="text-sm font-medium leading-none">Password</p>
-          <ChangePasswordForm />
-        </div>
-      ) : null}
     </div>
   );
 }
