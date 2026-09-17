@@ -7,6 +7,7 @@ import { z } from "zod";
 import { authClient } from "@/lib/auth-client";
 import { useSession } from "@/hooks/use-session";
 import { useMounted } from "@/hooks/use-mounted";
+import { MIN_PASSWORD_LENGTH } from "../../src/lib/password";
 import { AuthCard } from "@/components/layout/auth-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +16,14 @@ import { Label } from "@/components/ui/label";
 const registerFormSchema = z.object({
   name: z.string().min(1, "Name is required").max(64, "Name must be 64 characters or fewer"),
   email: z.string().email("Enter a valid email address"),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  // 下限取自唯一真源 src/lib/password.ts（直接导入属主模块 —— 注册页与 profile 契约无关，
+  // 经 @/modules/profile/types 取会是一次语义错配的耦合；同 providers.tsx 直取 src/ 的既有模式）。
+  // 09-17 修正：此处原为字面量 8，是「单一真源」名存实亡的第三处（另两处：src/lib/auth.ts、
+  // 改密码表单文案）。注册页是**在库校验之前**拦截的，写死会让「库改了、注册页没改」
+  // 直接表现为合法密码注册不进去。
+  password: z
+    .string()
+    .min(MIN_PASSWORD_LENGTH, `Password must be at least ${MIN_PASSWORD_LENGTH} characters`),
   inviteCode: z.string().min(1, "An invite code is required"),
 });
 
@@ -125,7 +133,7 @@ export default function RegisterPage() {
             id="register-password"
             type="password"
             autoComplete="new-password"
-            placeholder="At least 8 characters"
+            placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             aria-invalid={errors.password !== undefined}

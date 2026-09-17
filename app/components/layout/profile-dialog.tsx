@@ -17,6 +17,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { authClient } from "@/lib/auth-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ChangePasswordForm } from "@/components/layout/change-password-form";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -214,6 +215,17 @@ function ProfileForm({ profile, onClose }: { profile: Profile; onClose: () => vo
           </p>
         ) : null}
       </div>
+
+      {/* 改密码区块：只对邮箱注册用户渲染（R1 / D5 —— 整块不渲染，不做灰色置灰，
+          后者会引入一个永远不可用的控件）。判据取服务端下发的 hasPassword，前端不自行推导
+          （design §3.2）。字段缺失（新前端遇旧后端）时同样不渲染 —— fail-closed，
+          不会暴露一个必然被库拒绝的表单。 */}
+      {profile.hasPassword ? (
+        <div className="space-y-2">
+          <p className="text-sm font-medium leading-none">Password</p>
+          <ChangePasswordForm />
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -8,7 +8,10 @@
 //   - ↑/↓/Home/End 在项间移动焦点；打开期间才挂 document 监听，关闭即移除（无泄漏）
 //
 // 定位：面板 bottom-full（向上弹出）—— 侧栏在窄屏是 w-16 图标栏，向下/向右弹出会被视口裁切。
-// z-index 取 50，与 dialog 同级（侧栏本身是 sticky，面板需在其上方且不受 overflow 裁切）。
+// z-index 取 50：面板只需在**本层叠上下文内**胜出（侧栏自身是 sticky，自成层叠上下文；
+// 面板在这个上下文里跟侧栏内容比层级，因而不受 overflow 裁切）。
+// 注意这与 dialog 不是同一场比赛：dialog.tsx 已 portal 到 document.body，落在**根**层叠上下文，
+// 恒在菜单之上 —— 无需再靠 DOM 顺序决定谁盖住谁。
 import {
   createContext,
   useContext,

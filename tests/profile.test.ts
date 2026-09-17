@@ -16,7 +16,7 @@ import { env } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../src/db";
-import { users } from "../src/db/schema";
+import { accounts, inviteCodes, users } from "../src/db/schema";
 import {
   applyMigrations,
   createSession,
@@ -35,6 +35,7 @@ interface ProfileBody {
     email: string;
     emailVerified: boolean;
     emailVerificationEnabled: boolean;
+    hasPassword: boolean;
   };
 }
 
@@ -44,6 +45,50 @@ beforeAll(async () => {
 
 async function cookieFor(userId: number): Promise<string> {
   return sessionCookie(await createSession(userId));
+}
+
+// hasPassword 的取证需要真实的凭据账号。造号一律走真实注册端点（库写入密码哈希），
+// 不手工 INSERT accounts —— 手插的哈希不是库认得的格式，测出来的"有密码"是假的。
+let inviteSeq = 0;
+let inviterId = 0;
+async function insertInvite(): Promise<string> {
+  const db = createDb(env);
+  if (inviterId === 0) {
+    inviterId = await setupUser("pf-inviter@test.dev", 0, "admin");
+  }
+  inviteSeq += 1;
+  const code = `PFTEST${String(inviteSeq).padStart(2, "0")}`;
+  await db.insert(inviteCodes).values({
+    code,
+    createdBy: inviterId,
+    expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+  });
+  return code;
+}
+
+/** 走真实注册端点建号（邮箱密码路径）→ userId。 */
+async function signUp(email: string): Promise<number> {
+  const inviteCode = await insertInvite();
+  const res = await selfFetch("http://localhost/api/auth/sign-up/email", {
+    method: "POST",
+    headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email,
+      password: "testpass123",
+      name: email.split("@")[0] ?? email,
+      inviteCode,
+    }),
+  });
+  expect(res.status).toBe(200);
+  const db = createDb(env);
+  const row = await db.query.users.findFirst({
+    where: eq(users.email, email),
+    columns: { id: true },
+  });
+  if (!row) {
+    throw new Error(`signup did not create user ${email}`);
+  }
+  return row.id;
 }
 
 /** GET /api/me/profile（无 cookie = 未登录）。 */
@@ -104,18 +149,19 @@ describe("GET /api/me/profile（账号资料，只读）", () => {
     expect(body).toBeNull();
   });
 
-  it("登录后 → 200，四字段形状与类型正确；开关随 env 生效（测试绑定为开启）", async () => {
+  it("登录后 → 200，五字段形状与类型正确；开关随 env 生效（测试绑定为开启）", async () => {
     const userId = await setupUser("pf-basic@test.dev", 0);
     const { status, body } = await getProfile(await cookieFor(userId));
 
     expect(status).toBe(200);
     expect(body?.success).toBe(true);
-    // 响应形状契约（design §2.1）：顶层 success + profile 四字段，无多余字段（不泄露 role/balance）
+    // 响应形状契约（design §2.1）：顶层 success + profile 五字段，无多余字段（不泄露 role/balance）
     expect(Object.keys(body ?? {}).sort()).toEqual(["profile", "success"]);
     expect(Object.keys(body?.profile ?? {}).sort()).toEqual([
       "email",
       "emailVerificationEnabled",
       "emailVerified",
+      "hasPassword",
       "name",
     ]);
     expect(body?.profile).toEqual({
@@ -126,7 +172,60 @@ describe("GET /api/me/profile（账号资料，只读）", () => {
       // 关闭分支（"false"/未配置 → false）由 isEmailVerificationEnabled 的纯函数单测覆盖
       // （tests/bonus.unit.test.ts）—— miniflare bindings 无法逐用例改 env。
       emailVerificationEnabled: true,
+      // setupUser 只插 users 行、不插 accounts 行 → 无凭据账号。恰好是「无 account 行」这一分支
+      hasPassword: false,
     });
+  });
+
+  // hasPassword 的四条分支。它决定前端「改密码」区块是否渲染，判据错的方向代价不对称
+  // （design §3.1）：判 false 会让合法邮箱用户永久失去自助入口，故这里把每一侧都钉住。
+  it("hasPassword：邮箱注册用户（credential 账号 + 真实哈希）→ true（AC1 的判据来源）", async () => {
+    const userId = await signUp("pf-cred@test.dev");
+    const { body } = await getProfile(await cookieFor(userId));
+    expect(body?.profile.hasPassword).toBe(true);
+  });
+
+  it("hasPassword：providerId='github' 且 password 为 null → false（AC2 的判据来源）", async () => {
+    const userId = await setupUser("pf-github@test.dev", 0);
+    const db = createDb(env);
+    await db.insert(accounts).values({
+      issuer: "github",
+      accountId: "gh-12345",
+      providerId: "github",
+      userId,
+      password: null,
+    });
+    const { body } = await getProfile(await cookieFor(userId));
+    expect(body?.profile.hasPassword).toBe(false);
+  });
+
+  it("hasPassword：判据含 password 非空 —— providerId='credential' 但无密码 → false", async () => {
+    const userId = await setupUser("pf-nopw@test.dev", 0);
+    const db = createDb(env);
+    await db.insert(accounts).values({
+      issuer: "local:credential",
+      accountId: String(userId),
+      providerId: "credential",
+      userId,
+    });
+    const { body } = await getProfile(await cookieFor(userId));
+    expect(body?.profile.hasPassword).toBe(false);
+  });
+
+  it("hasPassword：刻意不判 issuer（D7）—— issuer 不是 local:credential 仍 → true", async () => {
+    // 本条是**故意**的宽容：库若将来改 issuer 编码，我们不该因此把入口藏掉。
+    // 若有人"收紧"判据把 issuer 加回来，这条测试会红 —— 那正是它存在的意义。
+    const userId = await setupUser("pf-issuer@test.dev", 0);
+    const db = createDb(env);
+    await db.insert(accounts).values({
+      issuer: "some-future-issuer",
+      accountId: String(userId),
+      providerId: "credential",
+      userId,
+      password: "not-a-real-hash-but-presence-is-what-we-match",
+    });
+    const { body } = await getProfile(await cookieFor(userId));
+    expect(body?.profile.hasPassword).toBe(true);
   });
 
   it("AC11 数据源：emailVerified 取 DB 最新值（已验证用户 → true）", async () => {
