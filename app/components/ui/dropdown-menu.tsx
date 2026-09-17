@@ -7,21 +7,32 @@
 //   - 关闭路径：Esc / 面板外 mousedown / 选中项；Esc 与选中项关闭后焦点回到触发器
 //   - ↑/↓/Home/End 在项间移动焦点；打开期间才挂 document 监听，关闭即移除（无泄漏）
 //
-// 定位：面板 bottom-full（向上弹出）—— 侧栏在窄屏是 w-16 图标栏，向下/向右弹出会被视口裁切。
-// z-index 取 50：面板只需在**本层叠上下文内**胜出（侧栏自身是 sticky，自成层叠上下文；
-// 面板在这个上下文里跟侧栏内容比层级，因而不受 overflow 裁切）。
-// 注意这与 dialog 不是同一场比赛：dialog.tsx 已 portal 到 document.body，落在**根**层叠上下文，
-// 恒在菜单之上 —— 无需再靠 DOM 顺序决定谁盖住谁。
+// 定位：面板恒向上弹出（bottom-full 语义）—— 侧栏在窄屏是 w-16 图标栏，
+// 向下/向右弹出会被视口裁切。坐标由 menu-position.ts 算，样式走 `position: fixed`。
+//
+// 为什么必须 portal 到 document.body（2026-09-17-ui-paint-order-audit 实测）：
+// 本组件挂在 app-layout 的 `sticky <aside>` 内，而 `position: sticky` 的祖先**自成层叠上下文**
+// （z-index: auto 也一样）。面板若留在那棵树里，它的 `z-50` 只在 aside 内比较；而 <main> 在 DOM
+// 中位于 aside 之后，其中任何 positioned 元素（table.tsx 的 relative 包裹层、Search 图标包裹层）
+// 都绘制在**整个 aside 子树之上** —— 面板被盖住，点击被这些元素截获，菜单项点了没反应。
+//
+// 判据是「DOM 祖先里有没有 sticky」，**不是「是不是弹窗」**：早先只把 Dialog portal 出去
+// （a7fc9c3），本面板因为「不是弹窗」被漏掉，实测 375 档 38.5% / 768 档 47.8% 面积不可命中。
+// 修法不能靠给 <aside> 加 z-index —— 那只是把层级竞态全局化（详见本任务 design.md §2）。
+// 挂到 body 后 z-50 在**根**层叠上下文里参与比较，与 dialog.tsx 同一套机制。
 import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
+import { computeMenuPosition, type MenuPosition } from "./menu-position";
 
 interface DropdownMenuContextValue {
   /** 关闭菜单；restoreFocus=true 时把焦点交还触发器。 */
@@ -56,6 +67,8 @@ export function DropdownMenu({
   children,
 }: DropdownMenuProps) {
   const [open, setOpen] = useState(false);
+  // 面板坐标（fixed）。null = 尚未算出 —— 面板在算出前不渲染，故不会闪现在错误位置。
+  const [pos, setPos] = useState<MenuPosition | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -67,13 +80,53 @@ export function DropdownMenu({
     }
   };
 
+  // 面板坐标：useLayoutEffect 在 DOM 提交后、**绘制前**同步算出，用户看不到未定位的一帧。
+  // 依赖 [open, align] 而非 [pos] —— 滚动重算不能反过来再触发自身。
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const update = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) {
+        return;
+      }
+      const rect = trigger.getBoundingClientRect();
+      setPos(
+        computeMenuPosition(
+          { top: rect.top, left: rect.left, right: rect.right },
+          align,
+          { width: window.innerWidth, height: window.innerHeight },
+        ),
+      );
+    };
+    update();
+    // scroll 用捕获阶段：滚动事件不冒泡到 window，只有捕获才收得到嵌套滚动容器
+    // （app-layout 的 nav 就有 overflow-y-auto）。菜单跟着触发器走是硬契约 ——
+    // 本用例里触发器在 sticky h-screen 侧栏内、nav 之外，实际不会动，这里是防御性的：
+    // 一旦布局改成侧栏可折叠 / 触发器移入可滚动区，没有它就会静默脱锚。
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [open, align]);
+
   useEffect(() => {
     if (!open) {
       return;
     }
     const handleMouseDown = (event: MouseEvent) => {
       const target = event.target;
-      if (target instanceof Node && rootRef.current?.contains(target)) {
+      if (
+        target instanceof Node &&
+        // 面板已 portal 到 body，**不再是 rootRef 的后代** —— 少了这半边判据，
+        // 在菜单项上 mousedown 会被判成「点了外面」：先关菜单、面板卸载，
+        // 后续 click 永不派发，onSelect 不执行（表现为菜单项点了没反应）。
+        (rootRef.current?.contains(target) || panelRef.current?.contains(target))
+      ) {
         return;
       }
       // 面板外点击：不抢焦点（平台惯例——焦点随点击走），只关闭
@@ -83,9 +136,14 @@ export function DropdownMenu({
     return () => document.removeEventListener("mousedown", handleMouseDown);
   }, [open]);
 
-  // 打开后焦点移入第一个 item：面板在本次提交后已挂载，effect 里可直接查询
+  // 打开后焦点移入第一个 item（无 item 时聚焦面板本身，保证 Esc 仍可用）。
+  //
+  // 依赖里带 panelReady 而不是只依赖 open：面板要等坐标算出才渲染，所以「open 翻 true」
+  // 那一帧 panelRef 还是空的，只看 open 会静默跳过聚焦。panelReady 是布尔量 ——
+  // 滚动重算让 pos 反复变化时它恒为 true，**不会**把焦点从用户正在操作的项上抢走。
+  const panelReady = pos !== null;
   useEffect(() => {
-    if (!open) {
+    if (!open || !panelReady) {
       return;
     }
     const panel = panelRef.current;
@@ -94,7 +152,7 @@ export function DropdownMenu({
     }
     const first = panel.querySelector<HTMLElement>('[role="menuitem"]');
     (first ?? panel).focus();
-  }, [open]);
+  }, [open, panelReady]);
 
   const handlePanelKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
@@ -130,24 +188,32 @@ export function DropdownMenu({
       >
         {trigger}
       </button>
-      {open ? (
-        <DropdownMenuContext.Provider value={{ close }}>
-          <div
-            ref={panelRef}
-            role="menu"
-            tabIndex={-1}
-            aria-orientation="vertical"
-            onKeyDown={handlePanelKeyDown}
-            className={cn(
-              "absolute bottom-full z-50 mb-2 w-56 rounded-md border bg-card p-1 shadow-lg outline-none",
-              align === "end" ? "right-0" : "left-0",
-              className,
-            )}
-          >
-            {children}
-          </div>
-        </DropdownMenuContext.Provider>
-      ) : null}
+      {/* 面板 portal 到 body：脱离 sticky aside 的层叠上下文，z-50 在根上下文参与比较。
+          定位用 inline style（fixed + 远边锚定）而非 Tailwind 类 ——
+          `bottom-full` / `mb-2` / `left-0` 都相对**最近的定位祖先**，portal 后语义已变，
+          且滚动重算需逐帧写入坐标（style 是 React 状态，不是命令式改 DOM，见 design §3.6）。
+          `pos` 就绪前不渲染：宁可晚一帧（实际在绘制前，用户看不到）也不闪现在 (0,0)。 */}
+      {open && pos
+        ? createPortal(
+            <DropdownMenuContext.Provider value={{ close }}>
+              <div
+                ref={panelRef}
+                role="menu"
+                tabIndex={-1}
+                aria-orientation="vertical"
+                onKeyDown={handlePanelKeyDown}
+                style={pos}
+                className={cn(
+                  "fixed z-50 w-56 rounded-md border bg-card p-1 shadow-lg outline-none",
+                  className,
+                )}
+              >
+                {children}
+              </div>
+            </DropdownMenuContext.Provider>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
