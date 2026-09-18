@@ -7,6 +7,7 @@ import type {
   UsageRange,
   MeUsageQuery,
   AdminUsageQuery,
+  LifetimeCostOutput,
 } from "../../../src/routes/usage/types";
 
 export type {
@@ -17,4 +18,5 @@ export type {
   UsageRange,
   MeUsageQuery,
   AdminUsageQuery,
+  LifetimeCostOutput,
 };

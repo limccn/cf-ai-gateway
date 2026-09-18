@@ -281,6 +281,25 @@ export async function fetchUsageAggregates(
   return rows;
 }
 
+/**
+ * 账户累计消费（全时段，不随任何筛选条件变化）：`GET /api/me/usage/lifetime` 的唯一数据源。
+ *
+ * **必须取 usage_daily，不能取 request_logs**：后者受 REQUEST_LOG_RETENTION_DAYS（默认 30 天，
+ * src/lib/cleanup.ts 的 cron）裁剪，拿它算「累计」得到的其实是「最近 30 天」——数字会随时间
+ * **悄悄倒退**（今天 $50、一个月后 $20），且不报任何错。usage_daily 是队列写入的**永久**日汇总，
+ * 只在用户被删时级联清除（src/routes/users/procedures/delete.ts），才是「累计」的正确口径。
+ *
+ * 代价可忽略：主键 [userId, keyId, model, date] 的**前导列**就是 userId ⇒ 等值查询是索引 seek，
+ * 不需要新索引。口径上与 usage 页的 Custom 区间同源（那条路也走 usage_daily）。
+ */
+export async function fetchLifetimeCost(db: Db, userId: number): Promise<number> {
+  const rows = await db
+    .select({ cost: sql<number>`coalesce(sum(${usageDaily.cost}), 0)` })
+    .from(usageDaily)
+    .where(eq(usageDaily.userId, userId));
+  return rows[0]?.cost ?? 0;
+}
+
 // ============ 明细查询 ============
 
 export interface UsageDetailRow {

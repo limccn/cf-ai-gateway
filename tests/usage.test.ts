@@ -250,6 +250,58 @@ describe("GET /api/me/usage（member 自己）", () => {
   });
 });
 
+describe("GET /api/me/usage/lifetime（账户累计消费）", () => {
+  /** 打一次累积端点，返回响应体（各用例共用；未登录的 401 用例不走它）。 */
+  async function lifetimeBody(userId: number): Promise<{ success: boolean; totalCost: number }> {
+    const cookie = sessionCookie(await createSession(userId));
+    const res = await selfFetch("http://localhost/api/me/usage/lifetime", {
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as { success: boolean; totalCost: number };
+  }
+
+  // 这条是本组**最有判别力**的一条：它锁的不是「求和」这个动作，而是**「全时段」这个口径**。
+  // 若有人把数据源换回 request_logs（看起来更「实时」、且 range 模式的图表就取自它），
+  // 保留期 cron 会把两年前那行删掉 → 累计值凭空变小，而本用例立刻红。
+  it("汇总 usage_daily 全时段消费：远超保留期（默认 30 天）的旧行仍计入", async () => {
+    const userId = await setupUser("lifetime@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    await consumeUsageBatch(
+      makeBatch([
+        { userId, keyId, model: "gpt-4o", promptTokens: 1, completionTokens: 1, cost: 1.5, status: "success", ts: Date.UTC(2026, 8, 1, 2) },
+        // 两年前：request_logs 里对应行早已被保留期清理删除，usage_daily 的日汇总仍在
+        { userId, keyId, model: "gpt-4o", promptTokens: 1, completionTokens: 1, cost: 2.25, status: "success", ts: Date.UTC(2024, 0, 15, 2) },
+      ]),
+      env,
+    );
+
+    const body = await lifetimeBody(userId);
+    expect(body.success).toBe(true);
+    expect(body.totalCost).toBeCloseTo(3.75, 10);
+  });
+
+  it("按账户隔离：只算自己的；无用量账户回 0（不是报错）", async () => {
+    const mine = await setupUser("lifetime-mine@test.dev", 10);
+    const { keyId } = await setupKey(mine);
+    await consumeUsageBatch(
+      makeBatch([
+        { userId: mine, keyId, model: "gpt-4o", promptTokens: 1, completionTokens: 1, cost: 4, status: "success", ts: Date.UTC(2026, 8, 1, 2) },
+      ]),
+      env,
+    );
+    const other = await setupUser("lifetime-other@test.dev", 10);
+
+    expect((await lifetimeBody(mine)).totalCost).toBeCloseTo(4, 10);
+    expect((await lifetimeBody(other)).totalCost).toBe(0);
+  });
+
+  it("未登录 → 401", async () => {
+    const res = await selfFetch("http://localhost/api/me/usage/lifetime");
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("groupBy=hour（最近 24h 逐小时聚合）", () => {
   /** Date 毫秒 → 与后端 strftime 同格式的 UTC 小时键 "YYYY-MM-DDTHH:00:00Z"。 */
   const hourKey = (ms: number) => `${new Date(ms).toISOString().slice(0, 13)}:00:00Z`;

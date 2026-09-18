@@ -25,6 +25,13 @@ const RANGE_SHAPES: Record<UsageRange, RangeShape> = {
   last30: { daysAgo: 29, count: 30, granularity: "day" },
 };
 
+/** 窗口的桶粒度：today/yesterday 逐小时，last14/last30 逐日。
+ *  导出给调用方**措辞**用 —— 例如「N 个活跃小时」与「N 个活跃天」不能混用
+ *  （dashboard 原先把 hour 桶也写成 "active days"，是句假话）。 */
+export function rangeGranularity(range: UsageRange): "hour" | "day" {
+  return RANGE_SHAPES[range].granularity;
+}
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /** N 个本地日前（今天=0）的本地日 0:00 的 UTC 时刻。
@@ -73,9 +80,14 @@ function bucketLabel(key: string, granularity: "hour" | "day"): string {
 }
 
 /** 快捷窗口定义（dashboard 与 usage 页共用；usage 页另加 Custom 选项）。
- * usage 页有三张柱状图（请求 / 成本 / tokens），故每个窗口各配一组标题说明：
- * `title`/`desc` 给请求卡，`costTitle`/`costDesc` 给成本卡（09-14 批次 A），
- * `tokensTitle`/`tokensDesc` 给 tokens 卡（09-14 批次 B）—— 都是新增字段，不动既有字段。 */
+ * usage 页有三张柱状图（请求 / 消费 / tokens），故每个窗口各配一组标题说明：
+ * `title`/`desc` 给请求卡，`costTitle`/`costDesc` 给消费卡（09-14 批次 A），
+ * `tokensTitle`/`tokensDesc` 给 tokens 卡（09-14 批次 B）—— 都是新增字段，不动既有字段。
+ *
+ * **用词（批次 J，2026-09-18 用户裁决）**：用户可见文案统一用 **spend**，不再用 cost
+ * （原文「全局统一 spend 和 cost 的词语表述，优先使用 spend」）。`costTitle` / `costDesc`
+ * 这类**字段名**刻意保留：裁决同时限定「只改用户可见文案，不要动后台和表」，
+ * 改字段名属纯 churn，且会与后端 `cost` 字段名分叉。 */
 export const RANGE_OPTIONS: Array<{
   value: UsageRange;
   label: string;
@@ -91,8 +103,8 @@ export const RANGE_OPTIONS: Array<{
     label: "Today",
     title: "Requests today",
     desc: "Hourly request count (local timezone)",
-    costTitle: "Cost today",
-    costDesc: "Hourly cost (local timezone)",
+    costTitle: "Spend today",
+    costDesc: "Hourly spend (local timezone)",
     tokensTitle: "Tokens today",
     tokensDesc: "Hourly token usage, input + output (local timezone)",
   },
@@ -101,8 +113,8 @@ export const RANGE_OPTIONS: Array<{
     label: "Yesterday",
     title: "Requests yesterday",
     desc: "Hourly request count (local timezone)",
-    costTitle: "Cost yesterday",
-    costDesc: "Hourly cost (local timezone)",
+    costTitle: "Spend yesterday",
+    costDesc: "Hourly spend (local timezone)",
     tokensTitle: "Tokens yesterday",
     tokensDesc: "Hourly token usage, input + output (local timezone)",
   },
@@ -111,8 +123,8 @@ export const RANGE_OPTIONS: Array<{
     label: "Last 14 days",
     title: "Requests per day",
     desc: "Daily request count over the last 14 days",
-    costTitle: "Cost per day",
-    costDesc: "Daily cost over the last 14 days",
+    costTitle: "Spend per day",
+    costDesc: "Daily spend over the last 14 days",
     tokensTitle: "Tokens per day",
     tokensDesc: "Daily token usage, input + output over the last 14 days",
   },
@@ -121,8 +133,8 @@ export const RANGE_OPTIONS: Array<{
     label: "Last 30 days",
     title: "Requests per day",
     desc: "Daily request count over the last 30 days",
-    costTitle: "Cost per day",
-    costDesc: "Daily cost over the last 30 days",
+    costTitle: "Spend per day",
+    costDesc: "Daily spend over the last 30 days",
     tokensTitle: "Tokens per day",
     tokensDesc: "Daily token usage, input + output over the last 30 days",
   },
