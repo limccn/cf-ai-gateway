@@ -21,11 +21,20 @@
 //        缺陷同源。修法是把 usage 页三分栏推到 xl（1280，内容盒实测 259.7px），1024~1279
 //        退回单列。故本组新增「图例实得 ≥ 118 且序列名未压成 0 宽」断言，并把 1024 与 1280
 //        都纳入视口清单 —— 断点被改回 lg 时它会立刻红。
-//     ③ 数值格式（AC16）：Cost 柱顶标签保留且小数位 ≤ 3；tokens 柱顶走紧凑格式；
+//     ③ 数值格式（AC16）：Cost 柱顶标签小数位 ≤ 3；tokens 柱顶走紧凑格式；
 //        图例数值**永不截断**（可以截名字，不能截数字）。
-//     ④ 柱图与同排环图等高（AC18，2026-09-18 追加）：三张柱状图由 240 降到 152，与环形图的
-//        `size` 同值。锁法是「= 152」+「= 环图实际渲染高度」两条互补，只在 1440 断言
-//        （1280~1439 环图会被图例挤小、本就不同高，是使用方接受的权衡，不是回归）。
+//        **批次 H 订正**：柱顶标签的**有无**改锁「严格由柱宽阈值 14 决定」这条不变量。
+//        原先只在标签**存在**时校验格式、不存在时打一行「既有降级规则，非本批改动」放行 ——
+//        二分栏后柱宽从 ~30 掉到 10~17，降级成了**常态**，那行日志随之变成**假话**
+//        （标签消失正是本批改动导致的）。同时补上「标签降级后数值仍在 `<title>` 里且格式不变」，
+//        这是用户接受「对半分 + 标签消失」的前提：数据可无损取回（见 usage.tsx 的批次 H 注）。
+//     ④ 柱图与同排环图等高（AC18，2026-09-18 追加；批次 H 扩到**全视口**）：三张柱状图由 240
+//        降到 152，与环形图的 `size` 同值。锁法是「= 152」+「= 环图实际渲染高度」两条互补。
+//        原先只在 1440 断言（三分栏时代 1280~1439 环图被图例挤小、本就不同高，是使用方接受的
+//        权衡）；批次 H 改成二分栏后环图列宽翻倍，**该坏带消失**（实测 1280 环图 117.7 → 152），
+//        故断言放开到全视口，唯一例外是**手机 375 单列**（内容盒 214 < 环图宽度预算 222）——
+//        那里环图落到 `MIN_SIZE` 下限 80、图例保住 118，是「图例可读优先于两者等高」的既有取舍；
+//        该档不跳过，而是**显式断言它停在 80**，否则「某天它变成 120」会无人知道。
 //
 //   **刻度文字的 y 不写死**：它是各图自身 `height − 8`（usage 与 dashboard 传的高度不同），
 //   故在 readCharts 里按图从 DOM 现算。写死会静默把 tickY 指空 → 一个刻度都取不到、
@@ -104,15 +113,20 @@ const usdShortFmt = new Intl.NumberFormat("en-US", {
 
 /** 与 donut-chart.tsx 保持一致（契约值，改了要同步）。 */
 const DONUT_LEGEND_MIN_WIDTH = 118;
+/** 与 donut-chart.tsx 的 MIN_SIZE 保持一致：环图被图例预算挤到不能再挤时的下限。 */
+const DONUT_MIN_SIZE = 80;
+/** 与 bar-chart.tsx 的 `showValues = barWidth >= 14` 保持一致（契约值，改了要同步）。 */
+const COST_LABEL_MIN_BAR_WIDTH = 14;
 
 const VIEWPORTS = [
   { name: "PC 1440", width: 1440, height: 900 },
-  // 三分栏断点的两端：1279 走单列、1280 起走 1/3 栏。1024 是**曾经的**断点（lg）——
+  // 二分栏断点（xl=1280）的两端：1279 走单列、1280 起走 1/2 栏。1024 是**曾经的**三分栏断点（lg）——
   // 它与侧栏出现的断点重合，1/3 卡内容盒只剩 174px，图例被压到 70px、序列名 0 宽。
   // 这两档锁的不是「好看」，而是「图例拿到了保底宽度」（见下方 118 断言）。
   { name: "PC 1024（旧 lg 断点）", width: 1024, height: 900 },
   { name: "PC 1280（现 xl 断点）", width: 1280, height: 900 },
   { name: "平板 768", width: 768, height: 1024 },
+  // 375 是唯一「环图到不了 152」的档（单列内容盒 214 < 222 预算）—— AC18 在此档改断言下限值。
   { name: "手机 375", width: 375, height: 812 },
 ];
 
@@ -348,25 +362,35 @@ for (const vp of VIEWPORTS) {
     );
   }
 
-  // ── AC18（2026-09-18 追加）：柱状图高度 = 同排环形图高度 ──
+  // ── AC18（2026-09-18 追加，批次 H 扩到全视口）：柱状图高度 = 同排环形图高度 ──
   // 用户裁决把三张柱状图从 240 降到与环图同高，这两条是该裁决的锁。**两条互补**：
   //   ① 「= 152」把具体高度钉住；
   //   ② 「= 环形图渲染高度」锁的是用户要的**效果**（两侧都从 DOM 量）。
   // 只留②不够：将来两边一起漂移（例如又被一起改回 240）它照样 PASS，裁决本身就锁不住了。
   // 只留①也不够：环图若单方面缩小，柱图仍会脱离契约而①不响。
   //
-  // 为何只在 1440 断言：环图的 `size` 是**上限**，1280~1439 会被图例挤小
-  // （实测 1366 → 146.3、1280 → 117.7），该段「同高」本就不成立 —— 这是使用方
-  // 明确接受的权衡（理由与实测数见 usage.tsx 的 CHART_ROW_SIZE 注释），不是回归。
-  if (vp.width === 1440) {
+  // 断言范围（批次 H 订正）：原先只在 1440 断言 —— 三分栏时代环图的 `size` 是**上限**，
+  // 1280~1439 会被图例挤小（实测 1366 → 146.3、1280 → 117.7），该段「同高」本就不成立。
+  // 批次 H 把三行卡改成二分栏（bar/环图对半分）后环图列宽翻倍，**这段坏带消失**
+  // （实测 1280 环图 117.7 → 152），故断言放开到全视口。
+  // 唯一例外是手机 375 单列：内容盒 214px < 环图宽度预算 (80+118+24)=222px，`max(MIN_SIZE, …)`
+  // 的下限获胜 → 环图落 80、图例保住 118（AC17 已锁）。这是「图例可读优先」的既有取舍，
+  // 但**不跳过**——改为显式断言它停在 80：跳过会让「某天它变成 120（下限被改）」无人知道。
+  {
     const pairs = [["Cost", costBar, modelDonut], ["Requests", reqBar, statusDonut], ["Tokens", tokBar, tokDonut]];
     for (const [label, bar, donut] of pairs) {
       if (bar?.kind !== "bar") continue;
       check(`${tag} ${label} 柱状图高度 = ${EXPECTED_BAR_HEIGHT}（降高裁决值）`,
         bar.height === EXPECTED_BAR_HEIGHT, `实测 ${bar.height}`);
-      check(`${tag} ${label} 柱状图高度 = 环形图渲染高度`,
-        donut?.kind === "donut" && bar.height === donut.donutSize,
-        `柱图 ${bar.height} vs 环图 ${donut?.kind === "donut" ? donut.donutSize : "缺失"}`);
+      if (vp.width === 375) {
+        check(`${tag} ${label} 手机单列：环图停在 MIN_SIZE 下限（图例保底优先，非回归）`,
+          donut?.kind === "donut" && donut.donutSize === DONUT_MIN_SIZE,
+          `环图 ${donut?.kind === "donut" ? donut.donutSize : "缺失"} vs 下限 ${DONUT_MIN_SIZE}`);
+      } else {
+        check(`${tag} ${label} 柱状图高度 = 环形图渲染高度`,
+          donut?.kind === "donut" && bar.height === donut.donutSize,
+          `柱图 ${bar.height} vs 环图 ${donut?.kind === "donut" ? donut.donutSize : "缺失"}`);
+      }
     }
   }
 
@@ -406,15 +430,29 @@ for (const vp of VIEWPORTS) {
     }
   }
 
-  // ── AC16：Cost 柱顶标签保留且小数位 ≤ 3 ──
+  // ── AC16（批次 H 订正）：柱顶标签的有无严格由柱宽阈值决定，且数值不因降级而丢失 ──
+  // 原实现只在标签**存在**时校验格式；标签不存在时打一行「barWidth < 14，既有降级规则，
+  // 非本批改动」就放行。批次 H 改二分栏后柱宽从 ~30 掉到 10~12（≥1280），这条降级路径
+  // **成了常态**，那行日志也随之变成**假话**——标签消失正是本批改动造成的（用户已知情并接受）。
+  // 故改为断言不变量：`柱宽 ≥ 14` ⇔ `柱顶有标签`。两个方向都能抓：该出没出（回归）、
+  // 不够宽却硬出（标签互相重叠）。
+  // 标签缺席时改为断言**数值仍在 `<title>`（悬停 tooltip）里且格式不变** —— 这正是
+  // 「标签消失」被接受的前提：数据可无损取回，而不是看不见了。
   if (costBar?.kind === "bar") {
-    if (costBar.values.length > 0) {
-      const bad = costBar.values.filter((v) => !/^\$[\d,]+\.\d{1,3}$/.test(v));
-      const over3 = costBar.values.filter((v) => (v.split(".")[1] ?? "").length > 3);
-      check(`${tag} Cost 柱顶标签存在且全为 $x.yz(≤3 位)`, bad.length === 0 && over3.length === 0,
-        bad.length ? `不合式：${bad.join(",")}` : `共 ${costBar.values.length} 个：${costBar.values.join(" ")}`);
+    const titleValues = costBar.titles.map((t) => t.slice(t.indexOf(": ") + 2));
+    // 全 0 时无论多宽都不渲染标签（bar-chart 的 `datum.value > 0` 条件），此时阈值不变量不适用。
+    const hasPositive = titleValues.some((v) => Number(v.replace(/[$,]/g, "")) > 0);
+    if (!hasPositive) {
+      console.log(`      · Cost 全桶为 0，柱顶标签本就不渲染（与柱宽无关），跳过 AC16`);
     } else {
-      console.log(`      · Cost 柱顶标签未渲染（barWidth=${costBar.barWidth} < 14，既有降级规则，非本批改动）`);
+      const hasLabels = costBar.values.length > 0;
+      const wideEnough = costBar.barWidth >= COST_LABEL_MIN_BAR_WIDTH;
+      check(`${tag} Cost 柱顶标签有无 = 柱宽阈值 ${COST_LABEL_MIN_BAR_WIDTH}（柱宽 ${costBar.barWidth}）`,
+        hasLabels === wideEnough, `标签${hasLabels ? "有" : "无"} vs 阈值判定${wideEnough ? "该有" : "该降级"}`);
+      const source = hasLabels ? costBar.values : titleValues;
+      const bad = source.filter((v) => !/^\$[\d,]+\.\d{1,3}$/.test(v));
+      check(`${tag} Cost 数值（${hasLabels ? "柱顶" : "tooltip"}）全为 $x.yz(≤3 位)`, bad.length === 0,
+        bad.length ? `不合式：${bad.join(",")}` : `共 ${source.length} 个：${source.slice(0, 4).join(" ")}…`);
     }
   }
 

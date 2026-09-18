@@ -1,5 +1,5 @@
 // /usage — 用量报表页（09-14 批次 A 改造）：筛选即选即查，成本 / 请求 / tokens 三行图表卡
-// （各 2/3 柱状图 + 1/3 环形图）+ 明细分页表格。
+// （各 1/2 柱状图 + 1/2 环形图，2026-09-18 批次 H 由「2/3 + 1/3」改为对半分）+ 明细分页表格。
 //
 // 与旧版的差别（裁决理由见任务 design.md）：
 //   - 筛选即选即查：没有 Apply/Reset 与草稿态，控件直接写查询参数；Time / API key / User
@@ -82,13 +82,16 @@ const STATUS_COLORS: Record<string, string> = {
  *  「柱高 = 环图尺寸」这件事只有一个来源，将来改高度不会只改一边。
  *
  *  为什么取 152：环形图的 `size` 是**上限**而非定值（donut-chart.tsx 按容器宽反算
- *  `min(size, max(80, 内容盒 − 118 − 24))`）。桌面 1/3 卡内容盒实测 302px → 算得 160 > 152，
- *  上限先生效，故 ≥1440 时环图**恒渲染成 152**；而本页在最大宽度容器下 1920/1600/1440 三档的
- *  内容盒完全相同（实测 726 / 350），1440 起即进入稳态，没有更宽的档会再变。
- *  1280~1439 环图会被图例挤小（实测 1366 → 146.3、1280 → 117.7），这段柱图保持 152、略高于环图：
- *  1366（常见笔记本宽）仅差 5.7px 不可辨，1280 上差 34px。若将来要连这一段也严格等高，
- *  得让柱高随环图的**实际渲染尺寸**联动（跨卡测量 / 提升到页面级派生），当前刻意不做 ——
- *  为一档边缘宽度引入跨组件耦合不划算，权衡与实测数见任务 implement.md。 */
+ *  `min(size, max(80, 内容盒 − 118 − 24))`）。二分栏（批次 H）后每列内容盒实测
+ *  ≥425px（1280）→ 算得 283 > 152，上限恒先生效 ⇒ **≥1280 的任意宽度下环图都渲染成 152**，
+ *  与柱图严格等高。页面在最大宽度容器下 1920/1600/1440 三档内容盒完全相同（实测 726 / 350），
+ *  1440 起即进入稳态。
+ *
+ *  **批次 H（2026-09-18）前的历史**：三分栏时代环图列内容盒只有 259.7px（1280）→ 算得
+ *  117.7 < 152，被图例挤小（实测 1366 → 146.3、1280 → 117.7），该段柱图比环图高 34px。
+ *  用户裁决「直接 3 分栏改为 2 分栏，bar 图和环图对半分」，加宽环图列后这个坏带消失 ——
+ *  这是**改布局**而非「让柱高跟随环图」，故不需要跨卡测量。
+ *  唯一残存的挤小档是**手机单列**（375 内容盒 ≈214px，算出 80 = 下限），见 implement.md 记录。 */
 const CHART_ROW_SIZE = 152;
 
 export default function UsagePage() {
@@ -355,14 +358,16 @@ export default function UsagePage() {
         </CardContent>
       </Card>
 
-      {/* 图表：成本行在上、请求行在下（A4/A3），各 2/3 柱状图 + 1/3 环形图。
+      {/* 图表：成本行在上、请求行在下（A4/A3），每行 **1/2 柱状图 + 1/2 环形图**（批次 H）。
           grid 显式 grid-cols-1 起步：BarChart 首帧用 FALLBACK_WIDTH=640 兜底，
           不显式写单列会让窄屏先被撑开再被测量锁死（frontend/components.md 响应式契约）。
-          三分栏用 **xl（1280）而非 lg（1024）**：lg 正好也是侧栏出现的断点，两者叠加会把 1/3
-          列压到内容盒 **174px**（实测 1024），而环形图并排的宽度预算是
-          `MIN_SIZE(80) + LEGEND_MIN_WIDTH(118) + gap(24) = 222px` —— 174 < 222 时下限获胜，
-          图例被压到 70px、序列名 0 宽（**名字完全不可见**）。1280 起内容盒 ≈253px > 222，
-          预算成立；1024~1279 退回单列堆叠（与平板同形态），不再有坏带。 */}
+          二分栏用 **xl（1280）而非 lg（1024）**：环形图并排的宽度预算是
+          `MIN_SIZE(80) + LEGEND_MIN_WIDTH(118) + gap(24) = 222px`，而 lg 正好也是侧栏出现的
+          断点，1024 下**单列**内容盒就已只剩 174px（实测）→ 174 < 222 时下限获胜，
+          图例被压到 70px、序列名 0 宽（**名字完全不可见**）。1280 起单列内容盒 ≈971px、
+          二分栏后每列 ≈425px > 222，预算成立；1024~1279 退回单列堆叠（与平板同形态），不再有坏带。
+          批次 H 之前这里是三分栏（1/3 环图列内容盒 259.7px），环图被图例挤到 117.7px、
+          比 152 的柱图矮一截；改对半分后环图列宽翻倍，环图恒渲染满 152。 */}
       {report.isLoading ? (
         <div className="mb-6 flex h-64 items-center justify-center text-sm text-muted-foreground">
           Loading…
@@ -373,8 +378,8 @@ export default function UsagePage() {
         </div>
       ) : (
         <>
-          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-            <Card className="xl:col-span-2">
+          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <Card>
               <CardHeader>
                 <CardTitle>{costTitle}</CardTitle>
                 <CardDescription>{costDesc}</CardDescription>
@@ -402,8 +407,8 @@ export default function UsagePage() {
             </Card>
           </div>
 
-          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-            <Card className="xl:col-span-2">
+          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <Card>
               <CardHeader>
                 <CardTitle>{requestsTitle}</CardTitle>
                 <CardDescription>{requestsDesc}</CardDescription>
@@ -434,8 +439,8 @@ export default function UsagePage() {
           {/* tokens 行（B1）：柱状图取「输入 + 输出」总量，环形图按 input / output 两段切分。
               环形图数据源是 buckets（时间桶）—— 时间桶必有键，故不适用 model 那套 null 组过滤；
               两段之和恒等于柱状图各桶之和（AC13/AC14）。 */}
-          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-            <Card className="xl:col-span-2">
+          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <Card>
               <CardHeader>
                 <CardTitle>{tokensTitle}</CardTitle>
                 <CardDescription>{tokensDesc}</CardDescription>

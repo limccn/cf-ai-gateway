@@ -160,7 +160,16 @@ for (const vp of VIEWPORTS) {
   await ctx.close();
 }
 
-// ---- AC4 手机 billing 控件可见 ----
+// ---- AC4 手机 billing 筛选控件可见（2026-09-18 批次 I 订正） ----
+// 旧断言停在**已被主动废弃**的结构上：type 下拉原在流水表 header 内，判据是
+// `sel.closest(".space-y-0")` 的 flexDirection 在手机下为 column。批次 I 把下拉移入
+// Ledger summary 卡（替换该卡的 Types 静态行），那个 `.space-y-0` 已不存在 ——
+// 若不动它，`closest()` 回 null → headerDir=null → **恒 FAIL**，红点与真实回归混在一起
+// （与 AC5 那次「断言停在废弃契约上」同型，修法是订正断言、不是把下拉搬回去）。
+// 改为指向现行契约三条：
+//   ① 下拉在手机视口内完整可见（核心诉求，**不变**）；
+//   ② 下拉确实落在 Ledger summary 卡内（批次 I 的搬移契约 —— 搬回去必须有人知道）；
+//   ③ 下拉未被压扁、也未跑出所在卡片右边界（1/3 窄卡 + w-full 的真实风险）。
 {
   const ctx = await browser.newContext({ viewport: { width: 375, height: 812 }, storageState: STATE });
   const page = await ctx.newPage();
@@ -168,14 +177,32 @@ for (const vp of VIEWPORTS) {
   await page.waitForTimeout(1300);
   const r = await page.evaluate(() => {
     const sel = document.querySelector("#billing-type");
+    if (!sel) return { found: false };
     const doc = document.documentElement;
-    const rect = sel?.getBoundingClientRect();
+    const rect = sel.getBoundingClientRect();
+    // 卡片根 = 最近的 .rounded-lg 祖先（与 AC5 同一条判据：table.tsx 包裹层只有
+    // relative/overflow-auto，CardContent 只有 p-0，故 closest() 无歧义）
+    const card = sel.closest(".rounded-lg");
+    const cardRect = card?.getBoundingClientRect();
     return {
-      inViewport: rect ? rect.left >= 0 && rect.right <= doc.clientWidth : null,
-      headerDir: sel?.closest(".space-y-0") ? getComputedStyle(sel.closest(".space-y-0")).flexDirection : null,
+      found: true,
+      inViewport: rect.left >= 0 && rect.right <= doc.clientWidth,
+      width: Math.round(rect.width),
+      cardHeading: card?.querySelector("h3")?.textContent?.trim() ?? null,
+      withinCard: cardRect ? rect.right <= cardRect.right + 1 : null,
     };
   });
-  check("AC4 手机 billing Select 可见", r.inViewport === true && r.headerDir === "column", JSON.stringify(r));
+  check("AC4 手机 billing Select 可见", r.found === true && r.inViewport === true, JSON.stringify(r));
+  check(
+    "AC4 手机 billing Select 落在 Ledger summary 卡内（批次 I 契约）",
+    r.cardHeading === "Ledger summary",
+    `所在卡标题=${r.cardHeading}`,
+  );
+  check(
+    "AC4 手机 billing Select 未被压扁且未跑出卡片",
+    (r.width ?? 0) >= 120 && r.withinCard === true,
+    `宽 ${r.width}px，withinCard=${r.withinCard}`,
+  );
   await ctx.close();
 }
 

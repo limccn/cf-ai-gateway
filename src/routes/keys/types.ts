@@ -73,9 +73,8 @@ export const revokeKeyOutputSchema = z.object({
   key: keyResponseSchema,
 });
 
-export const deleteKeyOutputSchema = z.object({
-  success: z.literal(true),
-});
+// 无 deleteKeyOutputSchema：本模块**不提供删除**（2026-09-18 用户裁决，理由见 router.ts 文件头）。
+// 原 delete 路由撤除后该 schema 已无引用，一并删除 —— 留着会让人以为「只是路由漏挂了」而把它补回来。
 
 // ============= 类型导出 =============
 
