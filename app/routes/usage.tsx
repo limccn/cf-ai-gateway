@@ -1,26 +1,46 @@
-// /usage — 用量报表页（M6 6.3）：时间/Key/模型/用户（admin）筛选，
-// 按日期柱状图 / 按模型环形图，明细分页表格。
+// /usage — 用量报表页（09-14 批次 A 改造）：筛选即选即查，成本 / 请求两行图表卡
+// （各 2/3 柱状图 + 1/3 环形图）+ 明细分页表格。
+//
+// 与旧版的差别（裁决理由见任务 design.md）：
+//   - 筛选即选即查：没有 Apply/Reset 与草稿态，控件直接写查询参数；Time / API key / User
+//     变更走 updateFilters()（刷新桶窗口快照 + 回第一页），状态筛选与翻页只回第一页 /
+//     改 offset（快照与请求必须同刻，判据见 updateFilters 的注释）；
+//   - 时间维度收成一个下拉（默认 Today，含 Custom）：Custom 的 From/To 收进 Popover，
+//     关闭时只留一行文本触发器，不再占满整行两个输入框；模型筛选入口移除
+//     （model 只作聚合维度；后端参数保留，属契约面）；
+//   - 图表从「一个可切维度的大图」改为两张固定维度的卡：groupBy 是单值参数、
+//     一次请求只能给一种聚合，故四路查询在 use-usage-report 里编排；
+//   - 状态筛选只作用于明细查询（D3）：图表不随它变化，也修掉「range 模式筛状态会连带
+//     改变柱状图、custom 模式不会」的既存不一致。
 import { useMemo, useState } from "react";
-import { Filter, RefreshCw } from "lucide-react";
-import type { UsageGroupBy, UsageRange } from "@/modules/usage/types";
-import { useUsage } from "@/modules/usage/hooks/use-usage";
-import { useAdminUsage } from "@/modules/usage/hooks/use-admin-usage";
+import { CalendarDays, Filter } from "lucide-react";
+import type { UsageRange } from "@/modules/usage/types";
+import { useUsageReport } from "@/modules/usage/hooks/use-usage-report";
 import { buildRangeSeries, getTzOffsetMin, RANGE_OPTIONS } from "@/modules/usage/range";
-import type { UsageParams } from "@/modules/usage/hooks/usage-params";
+import { buildModelCostSeries } from "@/modules/usage/series";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
 import { useUsers } from "@/modules/users/hooks/use-users";
 import { useSession } from "@/hooks/use-session";
 import { useIsMobile } from "@/hooks/use-media-query";
-import { formatDateOnly, formatDateTime, formatDateTimeShort, formatNumber, formatShortDate, formatUsd } from "@/lib/format";
-import { daysAgoParam, toDateParam } from "@/lib/format";
+import {
+  daysAgoParam,
+  formatDateOnly,
+  formatDateTime,
+  formatDateTimeShort,
+  formatNumber,
+  formatShortDate,
+  formatUsd,
+  toDateParam,
+} from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { BarChart } from "@/components/charts/bar-chart";
 import { DonutChart, CHART_COLORS } from "@/components/charts/donut-chart";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover } from "@/components/ui/popover";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { ErrorState, EmptyState } from "@/components/ui/states";
@@ -35,6 +55,15 @@ import {
 
 const LIMIT = 20;
 
+/** Popover 面板尺寸常量（w-72；两个 Label + h-9 日期输入 + p-3 的内高）：
+ *  定位算术的输入，同时是面板的 inline 尺寸 —— 面板在坐标算出前不渲染，无法测量自身。
+ *  高度 158 是 1440×900 实测值（两个 Label 20 + 间距 8 + 输入 36 的两组 + 组间距 12 + 内边距 24），
+ *  只参与「上下翻转」与 maxHeight 判定；真实高度仍由 CSS 决定。 */
+const RANGE_POPOVER_PANEL = { width: 288, height: 158 };
+
+/** 状态环形图的固定段序：缺项补 0，颜色语义不随数据抖动（design §6）。 */
+const STATUS_ORDER = ["success", "cached", "error", "rejected"] as const;
+
 // 状态语义色（与明细 Badge 配色一致）：success 绿 / cached 黄 / error 红 / rejected 灰
 const STATUS_COLORS: Record<string, string> = {
   success: "hsl(142 71% 45%)",
@@ -43,167 +72,120 @@ const STATUS_COLORS: Record<string, string> = {
   rejected: "hsl(var(--muted-foreground))",
 };
 
-// 快捷维度 chips（RANGE_OPTIONS + 自定义）：label/title/desc 复用 RANGE_OPTIONS
-const RANGE_CHOICES: Array<{ value: UsageRange | "custom"; label: string }> = [
-  ...RANGE_OPTIONS.map(({ value, label }) => ({ value, label })),
-  { value: "custom", label: "Custom" },
-];
-
 export default function UsagePage() {
   const { user } = useSession();
   const isAdmin = user?.role === "admin";
   const isMobile = useIsMobile();
 
-  // ===== 筛选状态（点击 Apply 后才写入查询） =====
-  const [fromDraft, setFromDraft] = useState(daysAgoParam(30));
-  const [toDraft, setToDraft] = useState(toDateParam(new Date()));
-  const [keyIdDraft, setKeyIdDraft] = useState("");
-  const [modelDraft, setModelDraft] = useState("");
-  const [userIdDraft, setUserIdDraft] = useState("");
-  const [groupBy, setGroupBy] = useState<UsageGroupBy>("date");
-  // 快捷维度：today/yesterday/last14/last30 与自定义（custom=from/to+groupBy）互斥
-  const [range, setRange] = useState<UsageRange | "custom">("last30");
+  // ===== 筛选（即选即查：无草稿态，控件直接写这里） =====
+  const [range, setRange] = useState<UsageRange | "custom">("today");
+  // Custom 区间：默认最近 30 天（先给可用初值，切到 Custom 即有结果）；两端都可被清空
+  const [from, setFrom] = useState(() => daysAgoParam(30));
+  const [to, setTo] = useState(() => toDateParam(new Date()));
+  const [keyId, setKeyId] = useState<number | undefined>(undefined);
+  const [userId, setUserId] = useState<number | undefined>(undefined);
+  // 明细状态筛选：只提交给明细查询（D3）
+  const [status, setStatus] = useState<"all" | "success" | "error" | "cached" | "rejected">("all");
   // 时区快照与查询参数同源（模块加载时计算一次；窗口边界与桶构建共用）
   const tzOffsetMin = useMemo(() => getTzOffsetMin(), []);
-  // 桶窗口时刻快照：与发起查询同时刻；切换 range/应用筛选时刷新（否则跨本地午夜
-  // 后 useMemo 重算取新 Date.now() → 桶窗口偏移一天，与后端窗口错位）
+  // 桶窗口时刻快照：必须与发起查询同时刻。后端在请求时刻自取 Date.now()，
+  // 前端若跨本地午夜后 useMemo 重算取新快照，桶窗口会整体偏移一天、与后端错位。
   const [nowMs, setNowMs] = useState(() => Date.now());
-  // 明细状态筛选：仅过滤 request_logs（明细 + hour/status 聚合）；date/model 聚合不受影响
-  const [status, setStatus] = useState<"all" | "success" | "error" | "cached" | "rejected">("all");
-
-  const [filters, setFilters] = useState<{
-    from: string | undefined;
-    to: string | undefined;
-    keyId: number | undefined;
-    model: string | undefined;
-    userId: number | undefined;
-  }>({ from: daysAgoParam(30), to: toDateParam(new Date()), keyId: undefined, model: undefined, userId: undefined });
-
   const [offset, setOffset] = useState(0);
 
   const keysQuery = useKeys();
   const usersQuery = useUsers(isAdmin ? { limit: 100 } : { limit: 1, enabled: false });
 
-  const isRangeMode = range !== "custom";
-  const queryParams: UsageParams = {
-    // 快捷维度模式：range+tzOffsetMin 优先（后端忽略 from/to/groupBy）；自定义模式照常
-    ...(isRangeMode ? { range, tzOffsetMin } : { from: filters.from, to: filters.to, groupBy }),
-    keyId: filters.keyId,
-    model: filters.model,
+  const report = useUsageReport({
+    isAdmin,
+    range,
+    // 清空的端点按「不限」处理（原生 date 输入可被清空；传 "" 会被 schema 判为非法日期）
+    from: from || undefined,
+    to: to || undefined,
+    tzOffsetMin,
+    keyId,
+    userId,
     status: status === "all" ? undefined : status,
     limit: LIMIT,
     offset,
+  });
+
+  /** 筛选变更统一入口：刷新桶窗口快照 + 回第一页。
+   *  判据是「这一改会不会让**图表三路**重取」（Time / API key / User 在图表查询键里，会）。
+   *  分页与状态筛选只重取明细（status 不在图表键里），走这里反而会让前端桶窗口脱离
+   *  后端**已取**窗口：跨本地午夜时桶键整体偏移一天，`buildRangeSeries` 按桶键查不到值 → 图整片归零。
+   *  故这两条路径只 `setOffset(0)`（沿用旧页 status 的处置）。 */
+  const updateFilters = () => {
+    setNowMs(Date.now());
+    setOffset(0);
   };
 
-  // 两个 hook 始终调用（React Hooks 规则），仅启用其一
-  const meQuery = useUsage(isAdmin ? { ...queryParams, enabled: false } : queryParams);
-  const adminQuery = useAdminUsage(
-    isAdmin ? { ...queryParams, userId: filters.userId } : { ...queryParams, enabled: false },
+  // range 模式的窗口值（custom 时 undefined）：查 RANGE_OPTIONS 与建桶都要窄化后的类型
+  const usageRange: UsageRange | undefined = range === "custom" ? undefined : range;
+  const rangeMeta = usageRange ? RANGE_OPTIONS.find((o) => o.value === usageRange) : undefined;
+
+  // 两行柱状图：range 模式共用同一套固定桶公式（桶边界必须逐桶对齐），custom 模式按天后端已排序
+  const requestsSeries = useMemo(() => {
+    if (usageRange) {
+      return buildRangeSeries(report.buckets, usageRange, tzOffsetMin, nowMs, "requests");
+    }
+    return report.buckets
+      .filter((agg) => agg.group !== null)
+      .map((agg) => ({ label: formatShortDate(agg.group ?? ""), value: agg.requests }));
+  }, [usageRange, report.buckets, tzOffsetMin, nowMs]);
+
+  const costSeries = useMemo(() => {
+    if (usageRange) {
+      return buildRangeSeries(report.buckets, usageRange, tzOffsetMin, nowMs, "cost");
+    }
+    return report.buckets
+      .filter((agg) => agg.group !== null)
+      .map((agg) => ({ label: formatShortDate(agg.group ?? ""), value: agg.cost }));
+  }, [usageRange, report.buckets, tzOffsetMin, nowMs]);
+
+  // 模型成本环形图：Top5 + Other models。颜色在这里配（series.ts 不引 .tsx，见其文件头），
+  // Other 用 muted 灰 —— 它不是某个模型，不该占用调色板语义色。
+  const modelSeries = useMemo(
+    () =>
+      buildModelCostSeries(report.byModel).map((datum, index) => ({
+        ...datum,
+        color: datum.isOther
+          ? "hsl(var(--muted-foreground))"
+          : (CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))"),
+      })),
+    [report.byModel],
   );
-  const usageQuery = isAdmin ? adminQuery : meQuery;
 
-  const { aggregates, details, total } = useMemo(() => {
-    const data = usageQuery.data;
-    return {
-      aggregates: data?.aggregates ?? [],
-      details: data?.details ?? [],
-      total: data?.total ?? 0,
-    };
-  }, [usageQuery.data]);
+  // 状态环形图：固定四段 + 后端只返回有数据的组，缺项补 0
+  const statusSeries = useMemo(
+    () =>
+      STATUS_ORDER.map((s) => ({
+        label: s,
+        value: report.byStatus.find((agg) => agg.group === s)?.requests ?? 0,
+        color: STATUS_COLORS[s] ?? "hsl(var(--primary))",
+      })),
+    [report.byStatus],
+  );
 
-  const applyFilters = () => {
-    setFilters({
-      from: fromDraft || undefined,
-      to: toDraft || undefined,
-      keyId: keyIdDraft ? Number(keyIdDraft) : undefined,
-      model: modelDraft || undefined,
-      userId: userIdDraft ? Number(userIdDraft) : undefined,
-    });
-    setNowMs(Date.now());
-    setOffset(0);
-  };
+  // 区间说明（custom 模式）：端点可被清空，空端用省略号占位而不是空串（" – "）
+  const rangeEdge = (value: string) => (value ? formatDateOnly(value) : "…");
+  const periodDesc = from || to ? `${rangeEdge(from)} – ${rangeEdge(to)}` : "All time";
+  const requestsTitle = usageRange ? (rangeMeta?.title ?? "Requests") : "Requests per day";
+  const requestsDesc = usageRange ? (rangeMeta?.desc ?? "") : periodDesc;
+  const costTitle = usageRange ? (rangeMeta?.costTitle ?? "Cost") : "Cost per day";
+  const costDesc = usageRange ? (rangeMeta?.costDesc ?? "") : periodDesc;
 
-  const resetFilters = () => {
-    setFromDraft(daysAgoParam(30));
-    setToDraft(toDateParam(new Date()));
-    setKeyIdDraft("");
-    setModelDraft("");
-    setUserIdDraft("");
-    setGroupBy("date");
-    setRange("last30");
-    setStatus("all");
-    setFilters({ from: daysAgoParam(30), to: toDateParam(new Date()), keyId: undefined, model: undefined, userId: undefined });
-    setNowMs(Date.now());
-    setOffset(0);
-  };
-
-  const switchGroupBy = (next: UsageGroupBy) => {
-    setGroupBy(next);
-    setOffset(0);
-  };
-
-  const switchRange = (next: UsageRange | "custom") => {
-    setRange(next);
-    // 切换窗口 = 新查询时刻：同步刷新桶窗口快照（跨午夜不错位）
-    setNowMs(Date.now());
-    setOffset(0);
-  };
+  // Custom 触发器文案：两端都未选时给提示文案，只选一端时另一端用省略号
+  const customRangeLabel = from || to ? `${from || "…"} – ${to || "…"}` : "Time range";
 
   const keys = keysQuery.data?.items ?? [];
   const users = usersQuery.data?.items ?? [];
-
-  const chartData = useMemo(() => {
-    if (isRangeMode) {
-      // 快捷维度：固定桶（24/24/14/30），缺数据补 0；color 供 BarChart/DonutChart 统一类型
-      return buildRangeSeries(aggregates, range, tzOffsetMin, nowMs).map((point, index) => ({
-        ...point,
-        color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
-      }));
-    }
-    if (groupBy === "model") {
-      return aggregates
-        .filter((agg) => agg.group !== null)
-        .map((agg, index) => ({
-          label: agg.group ?? "unknown",
-          value: agg.cost,
-          color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
-        }));
-    }
-    if (groupBy === "status") {
-      // 后端只返回有数据的桶；补 0 段，donut 颜色语义稳定
-      return (["success", "cached", "error", "rejected"] as const)
-        .map((s) => ({
-          label: s,
-          value: aggregates.find((agg) => agg.group === s)?.requests ?? 0,
-          color: STATUS_COLORS[s] ?? "hsl(var(--primary))",
-        }));
-    }
-    return aggregates
-      .filter((agg) => agg.group !== null)
-      .map((agg, index) => ({
-        label: formatShortDate(agg.group ?? ""),
-        value: agg.requests,
-        color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
-      }));
-  }, [aggregates, groupBy, isRangeMode, nowMs, range, tzOffsetMin]);
-
-  const rangeMeta = isRangeMode ? RANGE_OPTIONS.find((o) => o.value === range) : undefined;
-  const chartTitle = isRangeMode
-    ? (rangeMeta?.title ?? "Requests")
-    : groupBy === "date"
-      ? "Requests per day"
-      : groupBy === "model"
-        ? "Cost by model"
-        : "Requests by status";
-  const chartDesc = isRangeMode
-    ? (rangeMeta?.desc ?? "")
-    : `${formatDateOnly(filters.from ?? "")} – ${formatDateOnly(filters.to ?? "")}`;
 
   return (
     <PageContainer>
       <PageHeader title="Usage" description="Request volumes, costs and request details" />
 
-      {/* 筛选栏 */}
+      {/* 筛选栏：三个控件一行（Time → API key → User），变更即查 */}
       <Card className="mb-6">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
@@ -212,45 +194,83 @@ export default function UsagePage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            {RANGE_CHOICES.map((option) => (
-              <Button
-                key={option.value}
-                variant={range === option.value ? "default" : "outline"}
-                size="sm"
-                onClick={() => switchRange(option.value)}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="usage-range">Time</Label>
+              <Select
+                id="usage-range"
+                value={range}
+                onChange={(e) => {
+                  setRange(e.target.value as UsageRange | "custom");
+                  updateFilters();
+                }}
               >
-                {option.label}
-              </Button>
-            ))}
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="space-y-2">
-              <Label htmlFor="usage-from">From</Label>
-              <Input
-                id="usage-from"
-                type="date"
-                value={fromDraft}
-                disabled={isRangeMode}
-                onChange={(e) => setFromDraft(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="usage-to">To</Label>
-              <Input
-                id="usage-to"
-                type="date"
-                value={toDraft}
-                disabled={isRangeMode}
-                onChange={(e) => setToDraft(e.target.value)}
-              />
+                {RANGE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+                <option value="custom">Custom</option>
+              </Select>
+              {/* Custom 的区间选择收进浮层，触发器留在 Time 单元格内（不是第四个控件） */}
+              {range === "custom" ? (
+                <Popover
+                  panel={RANGE_POPOVER_PANEL}
+                  panelLabel="Custom time range"
+                  // 可访问名必须**包含**可见文本（WCAG 2.5.3 Label in Name）：
+                  // 只写 "Custom time range" 会让语音控制用户念不出屏幕上的日期区间
+                  triggerLabel={`Custom time range: ${customRangeLabel}`}
+                  triggerClassName={buttonVariants({
+                    variant: "outline",
+                    className: "w-full justify-start font-normal",
+                  })}
+                  trigger={
+                    <>
+                      <CalendarDays aria-hidden="true" />
+                      <span className="truncate">{customRangeLabel}</span>
+                    </>
+                  }
+                >
+                  {/* From/To 允许逆序（用户先改 From 再改 To）：不做本地校验拦截 ——
+                      拦截会与「即选即查」冲突（改了没反应），后端 gte/lte 自然返回空集 + 空态。 */}
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="usage-from">From</Label>
+                      <Input
+                        id="usage-from"
+                        type="date"
+                        value={from}
+                        onChange={(e) => {
+                          setFrom(e.target.value);
+                          updateFilters();
+                        }}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="usage-to">To</Label>
+                      <Input
+                        id="usage-to"
+                        type="date"
+                        value={to}
+                        onChange={(e) => {
+                          setTo(e.target.value);
+                          updateFilters();
+                        }}
+                      />
+                    </div>
+                  </div>
+                </Popover>
+              ) : null}
             </div>
             <div className="space-y-2">
               <Label htmlFor="usage-key">API key</Label>
               <Select
                 id="usage-key"
-                value={keyIdDraft}
-                onChange={(e) => setKeyIdDraft(e.target.value)}
+                value={keyId === undefined ? "" : String(keyId)}
+                onChange={(e) => {
+                  setKeyId(e.target.value ? Number(e.target.value) : undefined);
+                  updateFilters();
+                }}
               >
                 <option value="">All keys</option>
                 {keys.map((k) => (
@@ -260,22 +280,16 @@ export default function UsagePage() {
                 ))}
               </Select>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="usage-model">Model</Label>
-              <Input
-                id="usage-model"
-                placeholder="e.g. gpt-4o"
-                value={modelDraft}
-                onChange={(e) => setModelDraft(e.target.value)}
-              />
-            </div>
             {isAdmin ? (
-              <div className="space-y-2 sm:col-span-2 lg:col-span-4">
-                <Label htmlFor="usage-user">User (admin)</Label>
+              <div className="space-y-2">
+                <Label htmlFor="usage-user">User</Label>
                 <Select
                   id="usage-user"
-                  value={userIdDraft}
-                  onChange={(e) => setUserIdDraft(e.target.value)}
+                  value={userId === undefined ? "" : String(userId)}
+                  onChange={(e) => {
+                    setUserId(e.target.value ? Number(e.target.value) : undefined);
+                    updateFilters();
+                  }}
                 >
                   <option value="">All users</option>
                   {users.map((u) => (
@@ -287,87 +301,99 @@ export default function UsagePage() {
               </div>
             ) : null}
           </div>
-          <div className="mt-4 flex items-center gap-2">
-            <Button onClick={applyFilters}>Apply</Button>
-            <Button variant="outline" onClick={resetFilters}>
-              <RefreshCw aria-hidden="true" />
-              Reset
-            </Button>
-            {isAdmin ? null : (
-              <span className="text-xs text-muted-foreground">
-                Showing usage for your account only.
-              </span>
-            )}
-          </div>
+          {isAdmin ? null : (
+            <p className="mt-4 text-xs text-muted-foreground">
+              Showing usage for your account only.
+            </p>
+          )}
         </CardContent>
       </Card>
 
-      {/* 图表 */}
-      <div className="mb-6 flex flex-wrap items-center gap-2">
-        <span className="text-sm text-muted-foreground">Group by</span>
-        <Button
-          variant={groupBy === "date" ? "default" : "outline"}
-          size="sm"
-          disabled={isRangeMode}
-          onClick={() => switchGroupBy("date")}
-        >
-          Date
-        </Button>
-        <Button
-          variant={groupBy === "model" ? "default" : "outline"}
-          size="sm"
-          disabled={isRangeMode}
-          onClick={() => switchGroupBy("model")}
-        >
-          Model
-        </Button>
-        <Button
-          variant={groupBy === "status" ? "default" : "outline"}
-          size="sm"
-          disabled={isRangeMode}
-          onClick={() => switchGroupBy("status")}
-        >
-          Status
-        </Button>
-        {isRangeMode ? (
-          <span className="text-xs text-muted-foreground">Quick ranges use fixed date buckets</span>
-        ) : null}
-      </div>
-
-      {usageQuery.isLoading ? (
-        <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">
+      {/* 图表：成本行在上、请求行在下（A4/A3），各 2/3 柱状图 + 1/3 环形图。
+          grid 显式 grid-cols-1 起步：BarChart 首帧用 FALLBACK_WIDTH=640 兜底，
+          不显式写单列会让窄屏先被撑开再被测量锁死（frontend/components.md 响应式契约）。 */}
+      {report.isLoading ? (
+        <div className="mb-6 flex h-64 items-center justify-center text-sm text-muted-foreground">
           Loading…
         </div>
-      ) : usageQuery.isError ? (
-        <ErrorState message={usageQuery.error.message} onRetry={() => usageQuery.refetch()} />
+      ) : report.isError ? (
+        <div className="mb-6">
+          <ErrorState message={report.error?.message} onRetry={report.refetch} />
+        </div>
       ) : (
-        <Card className="mb-6">
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div>
-              <CardTitle>{chartTitle}</CardTitle>
-              <CardDescription>{chartDesc}</CardDescription>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {!isRangeMode && aggregates.length === 0 ? (
-              <EmptyState title="No usage in this period" description="Try widening the date range or clearing filters." />
-            ) : isRangeMode || groupBy === "date" ? (
-              <BarChart data={chartData} height={240} formatValue={formatNumber} />
-            ) : groupBy === "status" ? (
-              <DonutChart data={chartData} formatValue={formatNumber} />
-            ) : (
-              <DonutChart data={chartData} formatValue={formatUsd} />
-            )}
-          </CardContent>
-        </Card>
+        <>
+          <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle>{costTitle}</CardTitle>
+                <CardDescription>{costDesc}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {report.buckets.length === 0 ? (
+                  <EmptyState
+                    title="No usage in this period"
+                    description="Try widening the date range or clearing filters."
+                  />
+                ) : (
+                  <BarChart data={costSeries} height={240} formatValue={formatUsd} />
+                )}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Cost by model</CardTitle>
+                <CardDescription>Top 5 models plus combined others</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {modelSeries.length === 0 ? (
+                  <EmptyState title="No usage in this period" />
+                ) : (
+                  <DonutChart data={modelSeries} formatValue={formatUsd} />
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle>{requestsTitle}</CardTitle>
+                <CardDescription>{requestsDesc}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {report.buckets.length === 0 ? (
+                  <EmptyState
+                    title="No usage in this period"
+                    description="Try widening the date range or clearing filters."
+                  />
+                ) : (
+                  <BarChart data={requestsSeries} height={240} formatValue={formatNumber} />
+                )}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Requests by status</CardTitle>
+                <CardDescription>Share of request outcomes</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {report.byStatus.length === 0 ? (
+                  <EmptyState title="No usage in this period" />
+                ) : (
+                  <DonutChart data={statusSeries} formatValue={formatNumber} />
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </>
       )}
 
-      {/* 明细 */}
+      {/* 明细：status 筛选只作用于这一路查询（图表不受影响） */}
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle>Request details</CardTitle>
-            <CardDescription>{formatNumber(total)} total</CardDescription>
+            <CardDescription>{formatNumber(report.total)} total</CardDescription>
           </div>
           <div className="flex items-center gap-2">
             <Select
@@ -376,6 +402,8 @@ export default function UsagePage() {
               value={status}
               onChange={(e) => {
                 setStatus(e.target.value as typeof status);
+                // 只回第一页，**不**刷新桶窗口快照：status 不在图表三路的查询键里，
+                // 图表不会重取（见 updateFilters 的判据注释）。
                 setOffset(0);
               }}
               className="w-36"
@@ -389,7 +417,21 @@ export default function UsagePage() {
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          {details.length === 0 ? (
+          {report.detailsLoading ? (
+            // 明细单独一路查询：翻页 / 筛状态时只有它在加载，不能连图表一起显示加载态，
+            // 也不能把「正在加载」显示成「没有请求」
+            <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
+              Loading…
+            </div>
+          ) : report.detailsError ? (
+            <div className="px-6 pb-6">
+              <ErrorState
+                title="Failed to load request details"
+                message={report.detailsError.message}
+                onRetry={report.refetch}
+              />
+            </div>
+          ) : report.details.length === 0 ? (
             <div className="px-6 pb-6">
               <EmptyState title="No requests found" />
             </div>
@@ -409,7 +451,7 @@ export default function UsagePage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {details.map((detail) => (
+                    {report.details.map((detail) => (
                       <TableRow key={detail.id}>
                         <TableCell className="whitespace-nowrap text-muted-foreground">
                           {isMobile
@@ -449,7 +491,7 @@ export default function UsagePage() {
               </div>
               <div className="mt-4 flex flex-wrap items-center justify-between gap-2 px-6 pb-6">
                 <span className="text-sm text-muted-foreground">
-                  Showing {offset + 1}–{offset + details.length} of {total}
+                  Showing {offset + 1}–{offset + report.details.length} of {report.total}
                 </span>
                 <div className="flex gap-2">
                   <Button
@@ -463,7 +505,7 @@ export default function UsagePage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    disabled={offset + LIMIT >= total}
+                    disabled={offset + LIMIT >= report.total}
                     onClick={() => setOffset(offset + LIMIT)}
                   >
                     Next

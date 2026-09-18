@@ -2,8 +2,9 @@
 // 约定：from/to 为 YYYY-MM-DD（含当日，UTC 日界，与 usage_daily.date 口径一致）；
 // 时间戳统一 ISO 字符串（type-safety spec）；响应格式 { aggregates, details, total, limit, offset }（M6 前端消费）。
 // range/tzOffsetMin（08-31-usage-stats-dimensions）：预设快捷窗口（今日/昨日/最近14天/最近30天，
-// 含今日，本地时区日界），优先于 from/to/groupBy（宽松处理不报错）；tzOffsetMin = 客户端时区偏移分钟
-// （UTC+8 → 480，±840 校验，缺省 0 = UTC）。
+// 含今日，本地时区日界），优先于 from/to（宽松处理不报错）；groupBy=model|status 在 range 窗口内
+// 分组、date|hour|未传 仍走固定分桶（09-14 批次 A 收窄，原「range 忽略 groupBy」已不成立）；
+// tzOffsetMin = 客户端时区偏移分钟（UTC+8 → 480，±840 校验，缺省 0 = UTC）。
 import { z } from "zod";
 
 export const usageGroupBySchema = z.enum(["date", "model", "hour", "status"]);

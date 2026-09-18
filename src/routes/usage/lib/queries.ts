@@ -147,6 +147,18 @@ const AGG_COLUMNS = {
   cost: sql<number>`coalesce(sum(${usageDaily.cost}), 0)`,
 };
 
+/**
+ * 聚合查询入口。
+ *
+ * range 与 groupBy 的组合规则（09-14 批次 A 收窄，原为「range 优先于 from/to/groupBy 全忽略」）：
+ * - `range` 存在时仍**优先于 from/to**（窗口由 resolveRangeWindow 决定，from/to 宽松忽略不报错）；
+ * - `groupBy=model|status` 在该本地时区窗口内分组（从 request_logs 实时聚合）；
+ * - `groupBy=date|hour|未传` 仍走**固定分桶**（24 小时桶 / 14·30 天桶），行为零改动。
+ *
+ * 为什么要收窄：Usage 页改造后同时需要「时间桶」与「模型分组」「状态分组」三种聚合，
+ * 而 groupBy 是单值参数、一次请求只能给一种；每种聚合各发一次请求即解决，
+ * 且响应体形状零改动（design §2 的方案 (c)）。
+ */
 export async function fetchUsageAggregates(
   db: Db,
   filters: UsageFilters,
@@ -158,6 +170,27 @@ export async function fetchUsageAggregates(
       filters.range,
       filters.tzOffsetMin ?? 0,
     );
+    // 窗口内的第二维度聚合（09-14 批次 A，design §3）：模型/状态在该窗口内分组。
+    // 取 request_logs 而非 usage_daily：窗口是**本地时区**的连续时间窗，而 usage_daily
+    // 的主键是 UTC 日（toDateKey），用它表达本地窗口需在两端各做一次日界换算、边缘必然错位。
+    // 既有的 groupBy=hour 与 groupBy=status 分支同样取自 request_logs，本扩展与它们同源同口径。
+    // `and()` 会过滤掉 undefined（requestLogsWhere 无过滤条件时返回 undefined），故无需判空。
+    if (groupBy === "model" || groupBy === "status") {
+      const groupCol = groupBy === "model" ? requestLogs.model : requestLogs.status;
+      const rows = await db
+        .select({
+          group: groupCol,
+          requests: sql<number>`count(*)`,
+          tokensIn: sql<number>`coalesce(sum(${requestLogs.promptTokens}), 0)`,
+          tokensOut: sql<number>`coalesce(sum(${requestLogs.completionTokens}), 0)`,
+          cost: sql<number>`coalesce(sum(${requestLogs.cost}), 0)`,
+        })
+        .from(requestLogs)
+        .where(and(requestLogsWhere(filters), gte(requestLogs.createdAt, start), lt(requestLogs.createdAt, end)))
+        .groupBy(groupCol)
+        .orderBy(asc(groupCol));
+      return rows;
+    }
     const modifier = tzOffsetModifier(filters.tzOffsetMin ?? 0);
     // createdAt 为秒（drizzle timestamp mode），直接作 unixepoch 时间戳；
     // 分桶键 = 偏移后本地时间（小时 "YYYY-MM-DDTHH:00:00Z" / 天 "YYYY-MM-DD"，Z 仅为格式标记）

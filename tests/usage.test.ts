@@ -603,7 +603,9 @@ describe("range 快捷维度（08-31-usage-stats-dimensions）", () => {
     expect(badRange.status).toBe(400);
   });
 
-  it("range 存在时 from/to/groupBy 宽松忽略（不报错，窗口以 range 为准）", async () => {
+  // 标题精确到维度：range 只是忽略 from/to 与**分桶类** groupBy（date/hour）；
+  // groupBy=model|status 已收窄为「在该窗口内分组」（见下方同 describe 的新用例）。
+  it("range 存在时 from/to 宽松忽略、groupBy=date 仍走分桶（不报错，窗口以 range 为准）", async () => {
     const userId = await setupUser("range-ignore@test.dev", 10);
     const { keyId } = await setupKey(userId);
     const tz = 480;
@@ -619,6 +621,101 @@ describe("range 快捷维度（08-31-usage-stats-dimensions）", () => {
     expect(body.success).toBe(true);
     expect(body.aggregates.map((a) => a.group)).toContain(hourKey(localToday + 6 * 3600_000, tz));
     expect(body.total).toBe(1);
+  });
+
+  // ---- range × groupBy=model|status（09-14 批次 A：窗口内第二维度聚合）----
+  // 上面一条用例锁的是 groupBy=date（仍是分桶）的宽松忽略；下面这组锁的是新收窄的规则：
+  // model|status 不再被 range 忽略，而是在**该窗口内**分组（design §3）。
+
+  it("range=today&groupBy=model：窗口内按模型分组，窗口外行不入组", async () => {
+    const userId = await setupUser("range-model@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 480;
+    const localToday = localStart(tz);
+    await seedLogs(userId, keyId, [
+      { label: "a", ms: localToday + 2 * 3600_000, model: "gpt-4o" },
+      { label: "b", ms: localToday + 3 * 3600_000, model: "gpt-4o" },
+      { label: "c", ms: localToday + 4 * 3600_000, model: "gpt-4o-mini" },
+      { label: "d", ms: localToday - 3600_000, model: "gpt-4o" }, // 本地昨日 23:00（窗口外）
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson(`/api/me/usage?range=today&tzOffsetMin=${tz}&groupBy=model`, cookie);
+    expect(body.success).toBe(true);
+    // 分组键是模型名而非时间桶 —— 这条断言同时证伪「range 忽略 groupBy」的旧行为
+    expect(body.aggregates.map((a) => a.group)).toEqual(["gpt-4o", "gpt-4o-mini"]);
+    const byGroup = new Map(body.aggregates.map((a) => [a.group, a]));
+    expect(byGroup.get("gpt-4o")?.requests).toBe(2); // 窗口外那条不计入
+    expect(byGroup.get("gpt-4o")?.tokensIn).toBe(20);
+    expect(byGroup.get("gpt-4o")?.cost).toBeCloseTo(0.002, 12);
+    expect(byGroup.get("gpt-4o-mini")?.requests).toBe(1);
+    // groupBy 不影响明细：同窗口 3 条
+    expect(body.total).toBe(3);
+  });
+
+  it("range=today&groupBy=model：窗口内无数据 → 空集（窗口外行绝不入组）", async () => {
+    const userId = await setupUser("range-model-empty@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 480;
+    const localToday = localStart(tz);
+    await seedLogs(userId, keyId, [
+      { label: "only-yesterday", ms: localToday - 3600_000, model: "gpt-4o" },
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson(`/api/me/usage?range=today&tzOffsetMin=${tz}&groupBy=model`, cookie);
+    expect(body.aggregates).toHaveLength(0);
+    expect(body.total).toBe(0);
+  });
+
+  it("range=today&groupBy=status：窗口内按状态分组，四状态各一桶", async () => {
+    const userId = await setupUser("range-status-group@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 480;
+    const localToday = localStart(tz);
+    const db = createDb(env);
+    const seed = (hoursOffset: number, status: string, model: string | null) => ({
+      userId,
+      keyId,
+      model,
+      promptTokens: 10,
+      completionTokens: 5,
+      cost: status === "rejected" ? 0 : 0.001,
+      status,
+      createdAt: new Date(localToday + hoursOffset * 3600_000),
+    });
+    await db.insert(requestLogs).values([
+      seed(2, "success", "gpt-4o"),
+      seed(3, "error", "gpt-4o"),
+      seed(4, "cached", "gpt-4o-mini"),
+      seed(5, "rejected", null), // 无归属行（model IS NULL）也计入状态分组
+      seed(-1, "success", "gpt-4o"), // 本地昨日（窗口外）
+    ]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson(`/api/me/usage?range=today&tzOffsetMin=${tz}&groupBy=status`, cookie);
+    expect(body.aggregates).toHaveLength(4);
+    const byGroup = new Map(body.aggregates.map((a) => [a.group, a]));
+    expect(byGroup.get("success")?.requests).toBe(1); // 窗口外那条不计入
+    expect(byGroup.get("error")?.requests).toBe(1);
+    expect(byGroup.get("cached")?.requests).toBe(1);
+    expect(byGroup.get("rejected")?.requests).toBe(1);
+    expect(byGroup.get("rejected")?.cost).toBe(0);
+    expect(body.total).toBe(4);
+  });
+
+  it("range=today 不带 groupBy：仍返回小时桶（缺省路径零改动，AC8 回归锁）", async () => {
+    const userId = await setupUser("range-default-bucket@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const tz = 480;
+    const localToday = localStart(tz);
+    await seedLogs(userId, keyId, [{ label: "t", ms: localToday + 6 * 3600_000, model: "gpt-4o" }]);
+
+    const cookie = sessionCookie(await createSession(userId));
+    const body = await getJson(`/api/me/usage?range=today&tzOffsetMin=${tz}`, cookie);
+    // 对照组：同一批数据在 groupBy=model 下键是 "gpt-4o"，缺省路径下必须是小时桶键
+    expect(body.aggregates.map((a) => a.group)).toEqual([hourKey(localToday + 6 * 3600_000, tz)]);
+    expect(body.aggregates[0]?.group).not.toBe("gpt-4o");
   });
 });
 
