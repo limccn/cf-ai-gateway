@@ -320,7 +320,7 @@ export default function UsersPage() {
             </div>
           ) : items.length === 0 ? (
             <div className="mt-4">
-              <EmptyState title="No users match" description="Adjust the filters and try again." />
+              <EmptyState title="No users match" />
             </div>
           ) : (
             <div className="mt-4 overflow-x-auto">

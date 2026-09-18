@@ -370,9 +370,7 @@ export default function ModelsPage() {
               <EmptyState
                 title={items.length === 0 ? "No price entries yet" : "No models match"}
                 description={
-                  items.length === 0
-                    ? "Add model prices before usage can be billed."
-                    : "Try a different search."
+                  items.length === 0 ? "Add model prices before usage can be billed." : undefined
                 }
               />
             </div>

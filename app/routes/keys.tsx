@@ -1,6 +1,13 @@
 // /keys — 密钥管理（M6 6.3）：CRUD 表格；创建时明文仅展示一次；
 // 更新（名称/限流/缓存）、吊销、删除均带确认。
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { Ban, Copy, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { z } from "zod";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
@@ -11,6 +18,7 @@ import { useDeleteKey } from "@/modules/keys/hooks/use-delete-key";
 import type { CreateKeyOutput, KeyResponse } from "@/modules/keys/types";
 import { formatDateTime } from "@/lib/format";
 import { copyToClipboard } from "@/lib/clipboard";
+import { cn } from "@/lib/utils";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
@@ -326,53 +334,244 @@ function PlaintextDialog({ result, onClose }: PlaintextDialogProps) {
 
 // ============= Quick start =============
 
-/** 列表上方的接入说明：base URL（同源 /v1）可点击复制；示例 key 用占位符引导。 */
-function QuickStart() {
-  const baseUrl = typeof window !== "undefined" ? `${window.location.origin}/v1` : "";
-  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
-  const [copyError, setCopyError] = useState<string | null>(null);
+/** 一种入站协议的「开始方式」。
+ * **三者的 base URL 并不相同**，这正是本卡片要传达的关键差异：OpenAI 两条挂 `/v1`，
+ * Anthropic 挂 `/anthropic` —— 官方 Anthropic SDK 会自己把 `/v1/messages` 接到 baseURL 后面，
+ * 所以它的 baseURL 只到 `/anthropic`。与 README「SDK baseURL conventions」一节同源。 */
+interface ProtocolGuide {
+  /** 分段控件上的标签 */
+  label: string;
+  /** base URL 路径后缀（与当前 origin 拼接） */
+  basePath: string;
+  /** 主端点（相对 base URL），作为示例的说明文字 */
+  endpoint: string;
+  /** curl 开始方式；入参为该协议的完整 base URL */
+  curl: (base: string) => string;
+  /** 官方 SDK 开始方式；入参为该协议的完整 base URL */
+  sdk: (base: string) => string;
+  /** 该协议最易踩的一点（README 已记载的行为差异） */
+  note: string;
+}
 
-  const handleCopyUrl = async () => {
-    const ok = await copyToClipboard(baseUrl);
-    if (ok) {
-      setCopiedUrl(baseUrl);
-      setCopyError(null);
-      setTimeout(() => setCopiedUrl((c) => (c === baseUrl ? null : c)), 2000);
-    } else {
-      setCopyError("Copy failed — clipboard is unavailable. Select the URL manually.");
+/** 首项单独具名：`noUncheckedIndexedAccess` 下 `PROTOCOL_GUIDES[0]` 也是可空的，
+ * 具名后可作为索引兜底的值。 */
+const CHAT_COMPLETIONS_GUIDE: ProtocolGuide = {
+  label: "Chat Completions",
+  basePath: "/v1",
+  endpoint: "POST /chat/completions",
+  curl: (base) => `curl ${base}/chat/completions \\
+  -H "Authorization: Bearer sk-xxxxxxxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "gpt-5.6-sol", "messages": [{"role": "user", "content": "Hello"}]}'`,
+  sdk: (base) => `const openai = new OpenAI({ apiKey: "sk-xxxxxxxx", baseURL: "${base}" });
+await openai.chat.completions.create({ model: "gpt-5.6-sol", messages: [{ role: "user", content: "Hello" }] });`,
+  note: 'Set "stream": true for SSE; the stream ends with data: [DONE].',
+};
+
+const PROTOCOL_GUIDES: ProtocolGuide[] = [
+  CHAT_COMPLETIONS_GUIDE,
+  {
+    label: "Responses",
+    basePath: "/v1",
+    endpoint: "POST /responses",
+    curl: (base) => `curl ${base}/responses \\
+  -H "Authorization: Bearer sk-xxxxxxxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "gpt-5.6-sol", "input": "Hello"}'`,
+    sdk: (base) => `const openai = new OpenAI({ apiKey: "sk-xxxxxxxx", baseURL: "${base}" });
+await openai.responses.create({ model: "gpt-5.6-sol", input: "Hello" });`,
+    note: 'input takes a plain string or an array of input items; "stream": true returns SSE with no [DONE] terminator.',
+  },
+  {
+    label: "Anthropic Messages",
+    basePath: "/anthropic",
+    endpoint: "POST /v1/messages",
+    curl: (base) => `curl ${base}/v1/messages \\
+  -H "x-api-key: sk-xxxxxxxx" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "claude-sonnet-5", "max_tokens": 1024, "messages": [{"role": "user", "content": "Hello"}]}'`,
+    sdk: (base) => `const anthropic = new Anthropic({ apiKey: "sk-xxxxxxxx", baseURL: "${base}" });
+await anthropic.messages.create({ model: "claude-sonnet-5", max_tokens: 1024, messages: [{ role: "user", content: "Hello" }] });`,
+    note: "max_tokens is required by the Messages API; the SDK sends x-api-key and anthropic-version for you.",
+  },
+];
+
+/** 等宽代码块 + Copy 按钮。每个实例自持复制态：切换协议时面板整体卸载重建，
+ * 「Copied」不会跨协议残留。 */
+interface CopyBlockProps {
+  /** 小节标题。与 Copy **同排**，代码块因此能独占整行宽度 ——
+   * 若把 Copy 放在代码块旁边，窄屏下会被挤到只剩 ~180px，curl 截成 `-H "Authorizati` 不可读。 */
+  label: ReactNode;
+  value: string;
+  /** 剪贴板不可用时的提示语（须说清下一步怎么办） */
+  errorHint: string;
+  /** 多行示例用 pre + 横向滚动；单行 base URL 用 code + 强制折行 */
+  multiline?: boolean;
+}
+
+function CopyBlock({ label, value, errorHint, multiline = false }: CopyBlockProps) {
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const resetTimer = useRef<number | null>(null);
+
+  // 卸载时清掉复位定时器，避免离开页面后仍触发 setState
+  useEffect(
+    () => () => {
+      if (resetTimer.current !== null) {
+        window.clearTimeout(resetTimer.current);
+      }
+    },
+    [],
+  );
+
+  const handleCopy = async () => {
+    // 与 PlaintextDialog 同款降级（Clipboard API → execCommand）；失败给出可见反馈而非静默
+    const ok = await copyToClipboard(value);
+    if (!ok) {
+      setError(errorHint);
+      return;
     }
+    setError(null);
+    setCopied(true);
+    if (resetTimer.current !== null) {
+      window.clearTimeout(resetTimer.current);
+    }
+    resetTimer.current = window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+        <p className="text-sm font-medium leading-none">{label}</p>
+        <Button variant="outline" size="sm" onClick={handleCopy}>
+          <Copy aria-hidden="true" />
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+      <div className="rounded-md border bg-muted/50 p-3">
+        {multiline ? (
+          <pre className="overflow-x-auto font-mono text-xs leading-relaxed">{value}</pre>
+        ) : (
+          <code className="block break-all font-mono text-sm">{value}</code>
+        )}
+      </div>
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+/** 接入说明：三种协议各自的 base URL + curl / 官方 SDK 开始方式，用分段控件切换。
+ * 默认停在最常用的 Chat Completions。 */
+function QuickStart() {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const [activeIndex, setActiveIndex] = useState(0);
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const guide = PROTOCOL_GUIDES[activeIndex] ?? CHAT_COMPLETIONS_GUIDE;
+  const baseUrl = `${origin}${guide.basePath}`;
+
+  /** ARIA tabs 键盘约定：左右方向键循环、Home/End 跳首尾。必须与下面的 roving tabIndex
+   * 配套 —— 只加 role="tab" 而不实现方向键，屏幕阅读器会报「标签页」但按键无反应。 */
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const last = PROTOCOL_GUIDES.length - 1;
+    let next: number;
+    if (event.key === "ArrowRight") {
+      next = index === last ? 0 : index + 1;
+    } else if (event.key === "ArrowLeft") {
+      next = index === 0 ? last : index - 1;
+    } else if (event.key === "Home") {
+      next = 0;
+    } else if (event.key === "End") {
+      next = last;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    setActiveIndex(next);
+    tabRefs.current[next]?.focus();
   };
 
   return (
     <Card className="mb-6">
       <CardHeader>
         <CardTitle>Quick start</CardTitle>
+        <CardDescription>
+          Point an OpenAI- or Anthropic-compatible client at the gateway with a key from the list
+          above.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="space-y-2">
-          <Label htmlFor="quickstart-base-url">Base URL</Label>
-          <div className="flex items-start gap-2">
-            <div className="flex-1 rounded-md border bg-muted/50 p-3" id="quickstart-base-url">
-              <code className="block break-all font-mono text-sm">{baseUrl}</code>
-            </div>
-            <Button variant="outline" onClick={handleCopyUrl}>
-              <Copy aria-hidden="true" />
-              {copiedUrl === baseUrl ? "Copied" : "Copy"}
-            </Button>
-          </div>
-          {copyError ? <p className="text-xs text-destructive">{copyError}</p> : null}
+        <div
+          role="tablist"
+          aria-label="Protocol"
+          className="flex flex-wrap gap-1 rounded-md border p-1"
+        >
+          {PROTOCOL_GUIDES.map((item, index) => (
+            <button
+              key={item.label}
+              ref={(node) => {
+                tabRefs.current[index] = node;
+              }}
+              type="button"
+              role="tab"
+              id={`quickstart-tab-${index}`}
+              aria-selected={index === activeIndex}
+              aria-controls="quickstart-panel"
+              tabIndex={index === activeIndex ? 0 : -1}
+              onClick={() => setActiveIndex(index)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
+              className={cn(
+                // 窄屏三块放不下同一行（400px 下内容盒仅 ~239px，三个标签合计 ~399px），必然换行。
+                // max-sm:flex-auto 让换行后的每块各自撑满本行 —— 等宽的竖列，而不是参差的散按钮。
+                // 不能用 flex-1：它把 basis 设为 0，三块反而会挤进同一行再等分，文字被压爆。
+                "rounded px-3 py-1.5 text-sm font-medium transition-colors max-sm:flex-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                index === activeIndex
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+              )}
+            >
+              {item.label}
+            </button>
+          ))}
         </div>
-        <div className="space-y-2">
-          <Label>Example request</Label>
-          <div className="rounded-md border bg-muted/50 p-3">
-            <pre className="overflow-x-auto font-mono text-xs leading-relaxed">{`curl ${baseUrl}/chat/completions \\
-  -H "Authorization: Bearer sk-xxxxxxxx" \\
-  -H "Content-Type: application/json" \\
-  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'`}</pre>
-          </div>
+
+        <div
+          role="tabpanel"
+          id="quickstart-panel"
+          aria-labelledby={`quickstart-tab-${activeIndex}`}
+          className="space-y-4"
+        >
+          <CopyBlock
+            label="Base URL"
+            value={baseUrl}
+            errorHint="Copy failed — clipboard is unavailable. Select the URL manually."
+          />
+
+          <CopyBlock
+            label={
+              <>
+                Example request{" "}
+                <span className="font-normal text-muted-foreground">{guide.endpoint}</span>
+              </>
+            }
+            value={guide.curl(baseUrl)}
+            multiline
+            errorHint="Copy failed — clipboard is unavailable. Select the command manually."
+          />
+
+          <CopyBlock
+            label="Official SDK"
+            value={guide.sdk(baseUrl)}
+            multiline
+            errorHint="Copy failed — clipboard is unavailable. Select the snippet manually."
+          />
+
+          <p className="text-xs text-muted-foreground">{guide.note}</p>
           <p className="text-xs text-muted-foreground">
-            Replace <code className="font-mono">sk-xxxxxxxx</code> with your key — the full key is
-            shown only once, right after you create it.
+            Replace <code className="font-mono">sk-xxxxxxxx</code> with a key — the full secret is
+            shown only once, right after you create it. Model names above are examples;{" "}
+            <code className="font-mono">GET /v1/models</code> lists the ones a key can route.
           </p>
         </div>
       </CardContent>
@@ -417,13 +616,10 @@ export default function KeysPage() {
         }
       />
 
-      <QuickStart />
-
       <Card className="mb-6">
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle>API keys</CardTitle>
-            <CardDescription>Create and manage gateway keys for your account</CardDescription>
           </div>
           {items.length > 0 ? (
             <div className="relative w-40 shrink-0">
@@ -455,9 +651,7 @@ export default function KeysPage() {
               <EmptyState
                 title={items.length === 0 ? "No keys yet" : "No keys match"}
                 description={
-                  items.length === 0
-                    ? "Create your first API key to start making requests."
-                    : "Try a different search."
+                  items.length === 0 ? "Create your first API key to start making requests." : undefined
                 }
               />
             </div>
@@ -533,6 +727,8 @@ export default function KeysPage() {
           )}
         </CardContent>
       </Card>
+
+      <QuickStart />
 
       <KeyFormDialog
         open={createOpen || editing !== null}

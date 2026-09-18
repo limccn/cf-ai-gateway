@@ -564,9 +564,7 @@ export default function ProvidersPage() {
               <EmptyState
                 title={items.length === 0 ? "No providers yet" : "No providers match"}
                 description={
-                  items.length === 0
-                    ? "Add an upstream provider to start routing requests."
-                    : "Try a different search."
+                  items.length === 0 ? "Add an upstream provider to start routing requests." : undefined
                 }
               />
             </div>

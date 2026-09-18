@@ -1,6 +1,6 @@
 // 图表可读性回归锁（随 task 09-14-admin-ui-adjustments-2 批次 B 入库）：
 //
-//   锁三条**渲染契约**（都是「不报错、只是看起来不对」的一类缺陷，纯函数单测覆盖不到，
+//   锁四条**渲染契约**（都是「不报错、只是看起来不对」的一类缺陷，纯函数单测覆盖不到，
 //   页面也没有 DOM 测试环境，只能用真实浏览器量测）：
 //     ① x 轴刻度密度（AC15）：刻度数恒落 [4,6] 且**首尾桶必有标签**。
 //        旧实现 `labelEvery = barWidth < 20 ? 2 : 1` 是**按柱宽**定密度 —— 24 桶 @1440 时
@@ -23,6 +23,13 @@
 //        都纳入视口清单 —— 断点被改回 lg 时它会立刻红。
 //     ③ 数值格式（AC16）：Cost 柱顶标签保留且小数位 ≤ 3；tokens 柱顶走紧凑格式；
 //        图例数值**永不截断**（可以截名字，不能截数字）。
+//     ④ 柱图与同排环图等高（AC18，2026-09-18 追加）：三张柱状图由 240 降到 152，与环形图的
+//        `size` 同值。锁法是「= 152」+「= 环图实际渲染高度」两条互补，只在 1440 断言
+//        （1280~1439 环图会被图例挤小、本就不同高，是使用方接受的权衡，不是回归）。
+//
+//   **刻度文字的 y 不写死**：它是各图自身 `height − 8`（usage 与 dashboard 传的高度不同），
+//   故在 readCharts 里按图从 DOM 现算。写死会静默把 tickY 指空 → 一个刻度都取不到、
+//   断言全红却全是假红（2026-09-18 改高度时正是靠这条避免的）。
 //
 //   刻度期望值与容器宽联动：`tickCount = clamp(floor(usedWidth / 80), 4, 6)`，故脚本先读
 //   实测容器宽再算期望下标，而不是写死——写死会在换视口/改卡片内边距时变成假红。
@@ -72,15 +79,18 @@ if (!chromium) {
   process.exit(2);
 }
 
-const BASE = process.env.BASE_URL ?? "http://localhost:5174";
+// 默认端口与仓库其余 15 个 scripts/*.mjs 一致（2026-09-18 订正：本文件曾是唯一写 5174 的，
+// 而 `npm run dev` 与 `.dev.vars` 的 BETTER_AUTH_URL 都是 5173 —— 那是条**跑不通**的默认值）。
+const BASE = process.env.BASE_URL ?? "http://localhost:5173";
 
 /** 与 bar-chart.tsx 保持一致（契约值，改了要同步）。 */
 const MIN_TICKS = 4;
 const MAX_TICKS = 6;
 const MIN_TICK_SPACING = 80;
-/** usage 页三张柱状图都传 height={240}，刻度文字画在 y = height - 8。 */
-const BAR_HEIGHT = 240;
-const TICK_Y = BAR_HEIGHT - 8;
+/** usage 页柱状图高度（= 同排环形图的 size，见 usage.tsx 的 CHART_ROW_SIZE）。
+ *  刻度文字的 y **不**由它推：那是各图自身 height − 8，在 readCharts 里从 DOM 读（见下），
+ *  否则改高度会静默把 tickY 指空 —— 一个刻度都取不到，断言全红却全是假红。 */
+const EXPECTED_BAR_HEIGHT = 152;
 
 /** 与 app/lib/format.ts 的 formatNumberCompact 保持同一 Intl 选项（逐桶精确比对的基准）。 */
 const compactFmt = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
@@ -122,7 +132,7 @@ const check = (name, ok, detail) => {
 /** 页面上取三行卡片的量测快照（全部用结构查询，不靠 class —— class 会随样式重构漂移）。 */
 const readCharts = () =>
   page.evaluate(
-    ({ tickY }) => {
+    () => {
       const out = [];
       for (const heading of document.querySelectorAll("h3")) {
         const card = heading.closest("div.rounded-lg");
@@ -135,9 +145,13 @@ const readCharts = () =>
           const wrapper = barsSvg.parentElement;
           const rects = [...barsSvg.querySelectorAll("g > rect")];
           const texts = [...barsSvg.querySelectorAll("text")];
+          // 刻度文字画在 `y = 该图自身 height − 8`（bar-chart.tsx）。按图现算而非写死常量：
+          // usage 页与 dashboard 传的高度不同，将来再调也不会把刻度判空（写死即假红）。
+          const tickY = Number(barsSvg.getAttribute("height")) - 8;
           const tickTexts = texts.filter((t) => Number(t.getAttribute("y")) === tickY);
           const valueTexts = texts.filter((t) => Number(t.getAttribute("y")) !== tickY);
           const gs = [...barsSvg.querySelectorAll("g")];
+          entry.height = Number(barsSvg.getAttribute("height"));
           entry.barCount = rects.length;
           entry.barWidth = rects.length ? Number(rects[0].getAttribute("width")) : 0;
           entry.firstBarCenter = rects.length ? Number(rects[0].getAttribute("x")) + entry.barWidth / 2 : 0;
@@ -155,6 +169,8 @@ const readCharts = () =>
           entry.titles = gs.map((g) => g.querySelector("title")?.textContent ?? "");
         } else if (donutSvg) {
           entry.kind = "donut";
+          // 环图 svg 的 height = **实际渲染尺寸**（`size` 是上限，窄端会被图例挤小）
+          entry.donutSize = Number(donutSvg.getAttribute("height"));
           entry.wrapWidth = donutSvg.parentElement.clientWidth;
           const ul = card.querySelector("ul");
           entry.ulWidth = ul.clientWidth;
@@ -186,7 +202,6 @@ const readCharts = () =>
       }
       return out;
     },
-    { tickY: TICK_Y },
   );
 
 /** 期望刻度下标（与 bar-chart.tsx 的 pickTickIndices 同式；n / k 由实测推导）。 */
@@ -216,11 +231,52 @@ page.on("response", async (res) => {
   }
 });
 
-await page.goto(`${BASE}/login`, { waitUntil: "networkidle" });
-await page.fill("#login-email", "admin@local.dev");
-await page.fill("#login-password", "local-dev-pass-123");
-await page.click('button[type="submit"]');
-await page.waitForFunction(() => !location.pathname.startsWith("/login"));
+try {
+  // goto 也放进 try：端口没人监听时它会先抛 ERR_CONNECTION_REFUSED，若留在外面，
+  // 下面「诊断探测本身失败」那条分支就永远走不到（写了却不可达的分支 = 死代码）。
+  await page.goto(`${BASE}/login`, { waitUntil: "networkidle" });
+  await page.fill("#login-email", "admin@local.dev");
+  await page.fill("#login-password", "local-dev-pass-123");
+  await page.click('button[type="submit"]');
+  // 注意签名是 (pageFunction, arg, options) —— **arg 在第二位**。写成 waitForFunction(fn, { timeout })
+  // 会把 options 当 arg 传进去，超时静默保持默认 30s（2026-09-18 实测踩到：日志里报 30000ms）。
+  await page.waitForFunction(() => !location.pathname.startsWith("/login"), undefined, {
+    timeout: 15000,
+  });
+} catch (err) {
+  // 失败必须说人话。BASE 与 `.dev.vars` 的 BETTER_AUTH_URL **端口**不一致时，服务端回 403
+  // INVALID_ORIGIN —— 两个 `http://localhost:<port>` 只有端口不同，Better Auth 也视为不同 origin。
+  // 原实现只表现为 30s 超时，**看起来像「测试用户不存在」**，与真实原因毫无关系（2026-09-18 踩到，
+  // 当时真去库里确认了 admin@local.dev 存在，方向完全错）。
+  // 诊断用无凭据的假账号打一次：真原因是 origin 时它**同样**回 403 INVALID_ORIGIN，
+  // 而「用户不存在」类问题在它这里只会是 4xx 凭据错 —— 两者可据此区分，不必再猜。
+  const diag = await page
+    .evaluate(async () => {
+      const res = await fetch("/api/auth/sign-in/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: "diagnostic@invalid", password: "diagnostic" }),
+      });
+      return { status: res.status, body: (await res.text()).slice(0, 200) };
+    })
+    .catch(() => null);
+  let hint;
+  if (diag?.body.includes("INVALID_ORIGIN")) {
+    hint =
+      "  服务端回 403 INVALID_ORIGIN —— **origin 校验拒绝**，不是「用户不存在」。\n" +
+      "  服务端只接受 `.dev.vars` 里 BETTER_AUTH_URL 指定的那个 origin；端口不同即不同 origin。\n" +
+      "  跑法：BASE_URL=<与 BETTER_AUTH_URL 一致的值> node scripts/verify-chart-readability.mjs\n";
+  } else if (diag) {
+    hint =
+      `  诊断探测回 ${diag.status} ${diag.body}（非 origin 问题）—— 检查 dev server 是否在跑、` +
+      "测试用户是否存在（npm run seed:users）。\n";
+  } else {
+    hint = `  诊断探测本身失败 —— dev server 大概没在 ${BASE} 上跑。\n`;
+  }
+  console.error(`登录失败（BASE=${BASE}）—— 未能进入已登录态。\n${hint}  原始错误：${String(err).split("\n")[0]}\n`);
+  await browser.close();
+  process.exit(1);
+}
 await page.goto(`${BASE}/usage`, { waitUntil: "networkidle" });
 await page.waitForSelector('svg[aria-label="Usage bar chart"]', { timeout: 15000 });
 
@@ -290,6 +346,28 @@ for (const vp of VIEWPORTS) {
       chart.ticks.some((t) => Math.abs(t.x - chart.lastBarCenter) < 0.75),
       `末桶中心 x=${chart.lastBarCenter.toFixed(1)}`,
     );
+  }
+
+  // ── AC18（2026-09-18 追加）：柱状图高度 = 同排环形图高度 ──
+  // 用户裁决把三张柱状图从 240 降到与环图同高，这两条是该裁决的锁。**两条互补**：
+  //   ① 「= 152」把具体高度钉住；
+  //   ② 「= 环形图渲染高度」锁的是用户要的**效果**（两侧都从 DOM 量）。
+  // 只留②不够：将来两边一起漂移（例如又被一起改回 240）它照样 PASS，裁决本身就锁不住了。
+  // 只留①也不够：环图若单方面缩小，柱图仍会脱离契约而①不响。
+  //
+  // 为何只在 1440 断言：环图的 `size` 是**上限**，1280~1439 会被图例挤小
+  // （实测 1366 → 146.3、1280 → 117.7），该段「同高」本就不成立 —— 这是使用方
+  // 明确接受的权衡（理由与实测数见 usage.tsx 的 CHART_ROW_SIZE 注释），不是回归。
+  if (vp.width === 1440) {
+    const pairs = [["Cost", costBar, modelDonut], ["Requests", reqBar, statusDonut], ["Tokens", tokBar, tokDonut]];
+    for (const [label, bar, donut] of pairs) {
+      if (bar?.kind !== "bar") continue;
+      check(`${tag} ${label} 柱状图高度 = ${EXPECTED_BAR_HEIGHT}（降高裁决值）`,
+        bar.height === EXPECTED_BAR_HEIGHT, `实测 ${bar.height}`);
+      check(`${tag} ${label} 柱状图高度 = 环形图渲染高度`,
+        donut?.kind === "donut" && bar.height === donut.donutSize,
+        `柱图 ${bar.height} vs 环图 ${donut?.kind === "donut" ? donut.donutSize : "缺失"}`);
+    }
   }
 
   // ── 用户原话的那一例：24 桶窄端 = 4 个 = 00:00 / 08:00 / 15:00 / 23:00 ──
