@@ -72,32 +72,75 @@ function bucketLabel(key: string, granularity: "hour" | "day"): string {
   return `${key.slice(5, 7)}-${key.slice(8, 10)}`;
 }
 
-/** 快捷维度按钮定义（dashboard 与 usage 页共用；usage 页另加 Custom 选项）。 */
-export const RANGE_OPTIONS: Array<{ value: UsageRange; label: string; title: string; desc: string }> = [
-  { value: "today", label: "Today", title: "Requests today", desc: "Hourly request count (local timezone)" },
-  { value: "yesterday", label: "Yesterday", title: "Requests yesterday", desc: "Hourly request count (local timezone)" },
-  { value: "last14", label: "Last 14 days", title: "Requests per day", desc: "Daily request count over the last 14 days" },
-  { value: "last30", label: "Last 30 days", title: "Requests per day", desc: "Daily request count over the last 30 days" },
+/** 快捷窗口定义（dashboard 与 usage 页共用；usage 页另加 Custom 选项）。
+ * usage 页改造后有两张柱状图（请求 / 成本），故每个窗口各配一组标题说明：
+ * `title`/`desc` 给请求卡，`costTitle`/`costDesc` 给成本卡（09-14 批次 A，新增字段不动既有字段）。 */
+export const RANGE_OPTIONS: Array<{
+  value: UsageRange;
+  label: string;
+  title: string;
+  desc: string;
+  costTitle: string;
+  costDesc: string;
+}> = [
+  {
+    value: "today",
+    label: "Today",
+    title: "Requests today",
+    desc: "Hourly request count (local timezone)",
+    costTitle: "Cost today",
+    costDesc: "Hourly cost (local timezone)",
+  },
+  {
+    value: "yesterday",
+    label: "Yesterday",
+    title: "Requests yesterday",
+    desc: "Hourly request count (local timezone)",
+    costTitle: "Cost yesterday",
+    costDesc: "Hourly cost (local timezone)",
+  },
+  {
+    value: "last14",
+    label: "Last 14 days",
+    title: "Requests per day",
+    desc: "Daily request count over the last 14 days",
+    costTitle: "Cost per day",
+    costDesc: "Daily cost over the last 14 days",
+  },
+  {
+    value: "last30",
+    label: "Last 30 days",
+    title: "Requests per day",
+    desc: "Daily request count over the last 30 days",
+    costTitle: "Cost per day",
+    costDesc: "Daily cost over the last 30 days",
+  },
 ];
+
+/** 柱状图取值维度：同一套桶窗口，两张柱子图各取一列（请求数 / 成本）。 */
+export type SeriesMetric = "requests" | "cost";
 
 /**
  * 快捷维度系列：固定桶数（24/24/14/30），缺数据补 0。
+ * metric 决定取桶里的哪一列：请求柱状图取 `requests`，成本柱状图取 `cost`（09-14 批次 A）——
+ * 共用同一条窗口公式是刻意的，两图的桶边界必须逐桶对齐。
  * nowMs 必传：必须与发起查询时同源快照（组件 state），否则页面跨本地午夜后
  * useMemo 重算会取新 Date.now() → 桶窗口整体偏移一天，与后端窗口错位。
- * 调用方在 range 切换/筛选应用时刷新快照（usage.tsx switchRange/applyFilters）。
+ * 调用方（usage.tsx updateFilters）在每次筛选变更时刷新快照。
  */
 export function buildRangeSeries(
   aggregates: UsageAggregate[],
   range: UsageRange,
   tzOffsetMin: number,
   nowMs: number,
+  metric: SeriesMetric = "requests",
 ): { label: string; value: number }[] {
   const shape = RANGE_SHAPES[range];
   const startMs = dayStartUtcDaysAgo(nowMs, tzOffsetMin, shape.daysAgo);
   const byKey = new Map<string, number>();
   for (const agg of aggregates) {
     if (agg.group !== null) {
-      byKey.set(agg.group, agg.requests);
+      byKey.set(agg.group, metric === "cost" ? agg.cost : agg.requests);
     }
   }
   return Array.from({ length: shape.count }, (_, i) => {
