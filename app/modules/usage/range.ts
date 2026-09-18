@@ -73,8 +73,9 @@ function bucketLabel(key: string, granularity: "hour" | "day"): string {
 }
 
 /** 快捷窗口定义（dashboard 与 usage 页共用；usage 页另加 Custom 选项）。
- * usage 页改造后有两张柱状图（请求 / 成本），故每个窗口各配一组标题说明：
- * `title`/`desc` 给请求卡，`costTitle`/`costDesc` 给成本卡（09-14 批次 A，新增字段不动既有字段）。 */
+ * usage 页有三张柱状图（请求 / 成本 / tokens），故每个窗口各配一组标题说明：
+ * `title`/`desc` 给请求卡，`costTitle`/`costDesc` 给成本卡（09-14 批次 A），
+ * `tokensTitle`/`tokensDesc` 给 tokens 卡（09-14 批次 B）—— 都是新增字段，不动既有字段。 */
 export const RANGE_OPTIONS: Array<{
   value: UsageRange;
   label: string;
@@ -82,6 +83,8 @@ export const RANGE_OPTIONS: Array<{
   desc: string;
   costTitle: string;
   costDesc: string;
+  tokensTitle: string;
+  tokensDesc: string;
 }> = [
   {
     value: "today",
@@ -90,6 +93,8 @@ export const RANGE_OPTIONS: Array<{
     desc: "Hourly request count (local timezone)",
     costTitle: "Cost today",
     costDesc: "Hourly cost (local timezone)",
+    tokensTitle: "Tokens today",
+    tokensDesc: "Hourly token usage, input + output (local timezone)",
   },
   {
     value: "yesterday",
@@ -98,6 +103,8 @@ export const RANGE_OPTIONS: Array<{
     desc: "Hourly request count (local timezone)",
     costTitle: "Cost yesterday",
     costDesc: "Hourly cost (local timezone)",
+    tokensTitle: "Tokens yesterday",
+    tokensDesc: "Hourly token usage, input + output (local timezone)",
   },
   {
     value: "last14",
@@ -106,6 +113,8 @@ export const RANGE_OPTIONS: Array<{
     desc: "Daily request count over the last 14 days",
     costTitle: "Cost per day",
     costDesc: "Daily cost over the last 14 days",
+    tokensTitle: "Tokens per day",
+    tokensDesc: "Daily token usage, input + output over the last 14 days",
   },
   {
     value: "last30",
@@ -114,16 +123,30 @@ export const RANGE_OPTIONS: Array<{
     desc: "Daily request count over the last 30 days",
     costTitle: "Cost per day",
     costDesc: "Daily cost over the last 30 days",
+    tokensTitle: "Tokens per day",
+    tokensDesc: "Daily token usage, input + output over the last 30 days",
   },
 ];
 
-/** 柱状图取值维度：同一套桶窗口，两张柱子图各取一列（请求数 / 成本）。 */
-export type SeriesMetric = "requests" | "cost";
+/** 柱状图取值维度：同一套桶窗口，三张柱子图各取一列（请求数 / 成本 / tokens）。 */
+export type SeriesMetric = "requests" | "cost" | "tokens";
+
+/** 按 metric 从聚合行取对应列。tokens 取「输入 + 输出」，与 tokens 环形图两段之和同口径。 */
+function metricValue(agg: UsageAggregate, metric: SeriesMetric): number {
+  if (metric === "cost") {
+    return agg.cost;
+  }
+  if (metric === "tokens") {
+    return agg.tokensIn + agg.tokensOut;
+  }
+  return agg.requests;
+}
 
 /**
  * 快捷维度系列：固定桶数（24/24/14/30），缺数据补 0。
- * metric 决定取桶里的哪一列：请求柱状图取 `requests`，成本柱状图取 `cost`（09-14 批次 A）——
- * 共用同一条窗口公式是刻意的，两图的桶边界必须逐桶对齐。
+ * metric 决定取桶里的哪一列：请求柱状图取 `requests`，成本柱状图取 `cost`（09-14 批次 A），
+ * tokens 柱状图取 `tokensIn + tokensOut`（09-14 批次 B）—— 共用同一条窗口公式是刻意的，
+ * 三图的桶边界必须逐桶对齐。
  * nowMs 必传：必须与发起查询时同源快照（组件 state），否则页面跨本地午夜后
  * useMemo 重算会取新 Date.now() → 桶窗口整体偏移一天，与后端窗口错位。
  * 调用方（usage.tsx updateFilters）在每次筛选变更时刷新快照。
@@ -140,7 +163,7 @@ export function buildRangeSeries(
   const byKey = new Map<string, number>();
   for (const agg of aggregates) {
     if (agg.group !== null) {
-      byKey.set(agg.group, metric === "cost" ? agg.cost : agg.requests);
+      byKey.set(agg.group, metricValue(agg, metric));
     }
   }
   return Array.from({ length: shape.count }, (_, i) => {

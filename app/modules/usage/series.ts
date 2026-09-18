@@ -50,3 +50,43 @@ export function buildModelCostSeries(
   }
   return top;
 }
+
+/** tokens 切分环形的段（09-14 批次 B）：用户裁决不做 cached 迁移，故只有 input / output 两段。 */
+export interface TokenSplitDatum {
+  label: "Input" | "Output";
+  value: number;
+}
+
+/**
+ * 按窗口内 tokens 归属构造环形图数据：恰两段（input / output）。
+ *
+ * 数据源是**时间桶聚合**（`report.buckets`）—— 时间桶必有键，不存在 `buildModelCostSeries`
+ * 要过滤的 `group === null`（那说的是 rejected 行无模型归属），故此处**不做**该过滤：
+ * 桶内 tokens 都是真实消耗，漏计反而错。
+ *
+ * 为什么不是三段（input / cached input / output）：`cachedTokens` 贯穿计费链路但**从未落库**
+ * （`request_logs` / `usage_daily` 无该列、`usageEventSchema` 无该字段、两处 `insert(requestLogs)`
+ * 均丢弃，它只被 `calcCost` 用来算折扣价），用户 2026-09-18 裁决本批次不做迁移。
+ * 「两段之和 = 窗口总 tokens」恒成立，与 tokens 柱状图逐桶求和同口径。
+ *
+ * 将来补第三段时的**互斥拆分**：cachedTokens 是 promptTokens 的**子集**，故必须是
+ * 「非缓存输入 = promptTokens − cachedTokens／缓存输入 = cachedTokens／输出 = completionTokens」，
+ * 与 input 并列相加会超过总量。
+ *
+ * 空输入 / 全零 → `[]`（页面据此显示空态，而不是渲染一个空环形）。
+ */
+export function buildTokenSplitSeries(aggregates: UsageAggregate[]): TokenSplitDatum[] {
+  let input = 0;
+  let output = 0;
+  for (const agg of aggregates) {
+    input += agg.tokensIn;
+    output += agg.tokensOut;
+  }
+  if (input + output <= 0) {
+    return [];
+  }
+  return [
+    { label: "Input", value: input },
+    { label: "Output", value: output },
+  ];
+}
