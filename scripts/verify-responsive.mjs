@@ -88,74 +88,86 @@ for (const vp of VIEWPORTS) {
   await ctx.close();
 }
 
-// ---- AC3 图表全宽（三端 dashboard）----
-// 环境性判据同 AC5：dashboard 在「窗口内 0 请求」时渲染 EmptyState 而非图表（dashboard.tsx
-// `totals.requests === 0` 分支），本机未 seed 用量数据时属**环境性空缺** → 显式 SKIP；
-// 但「有数据却没图表」或「既无图表也无空态/错误态」仍判 FAIL —— 不掩盖真实回归。
-// 注意「有数据」不能只靠空态判断：空态与「图表分支被改坏」在 DOM 上同形（都是 EmptyState），
-// 故另取页内数据表（最近请求列表，同窗口 filters，details 非空即渲染）作为数据信号 ——
-// 空态与数据表并存 ⇒ 判 FAIL（构造性验证见本任务执行纪要）。
+// ---- AC3 图表：dashboard 三栏小图（批次 J 重写，2026-09-18）----
+// 旧断言针对「一张 2/3 宽的请求柱图 + Recent requests 明细表」，两者**都已被批次 J 删除**，
+// 断言若不动就会停在废弃结构上（与本文件 AC4/AC5 两次「断言停在废弃契约」同型）。改判据：
+//   · 原「页内有数据」的独立信号取自明细表（`main table`）—— 表没了，该分流分支成死代码；
+//   · 新 dashboard 的三张柱图**恒渲染**：桶窗口是固定 24/24/14/30 槽、缺数据补 0，
+//     BarChart 里 `data.length === 0` 那条空态分支永不触发 ⇒「无图空态」这一档不再存在，
+//     无图只剩「加载中 / 报错 / 真回归」三种可能，故不再有 SKIP 通道。
+// 三条断言：① 三图齐备；② 每图铺满其卡片（无 640 fallback 残留）；
+// ③ **柱图不横向溢出** —— 本批最容易被静默破坏的不变量：卡片内容盒只有 214~307px 而桶有
+//    24~30 个，常规柱宽/间距（10px 柱 + 8px 间距，30 桶要 532px）必然撑出内部滚动条；
+//    那正是 BarChart 新增 `dense` 模式要解决的问题，删掉 dense 这条立刻红（已构造性验证：
+//    摘掉 dense → 三图齐报 scroll=532/307）。
+//
+// **③ 的判别力不是一蹴而就的**（2026-09-18 实录）：dense 首版的柱宽下限取 6px（照 1440 三栏的
+//    307px 内容盒定的），pc/tablet 全绿、**唯独 mobile 红**（scroll=238/214）—— 375 下宽度链是
+//    375 −64(图标栏 w-16) −15(经典滚动条) −32(px-4) −48(CardContent p-6) −2(border) = **214px**，
+//    30 桶连柱带距只有 214/30 ≈ 7px 可用。修法不是把下限调到 5（那只盖住 214 这一档，换更窄
+//    视口又犯），而是 dense 下限取 1 ⇒ 柱宽 = floor(slot) ⇒ 恒有 n*柱宽 + (n-1)*间距 ≤ 容器宽
+//    ⇒ 溢出**构造上不可能**。已扫描 1440→280 共 11 档视口实测零溢出（脚本
+//    scripts/ui-audit/measure-dash-mobile.mjs）。故本条同时是全视口的回归锁。
 for (const vp of VIEWPORTS) {
   const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height }, storageState: STATE });
   const page = await ctx.newPage();
   await page.goto(BASE + "/", { waitUntil: "networkidle", timeout: 45000 }).catch(() => {});
-  // 等三者之一出现再判定，避免把慢加载误判成页面异常
+  // 等柱图或错误态出现再判定，避免把慢加载误判成页面异常
   await page
     .waitForFunction(
       () =>
         document.querySelector('svg[aria-label="Usage bar chart"]') ||
-        document.querySelector("main .rounded-lg .border-dashed") ||
         document.querySelector('main [role="alert"]'),
       { timeout: 15000 },
     )
     .catch(() => {});
   await page.waitForTimeout(1200);
   const r = await page.evaluate(() => {
-    const svg = document.querySelector('svg[aria-label="Usage bar chart"]');
-    if (!svg) {
-      return {
-        noChart: true,
-        empty: Boolean(document.querySelector("main .rounded-lg .border-dashed")),
-        error: Boolean(document.querySelector('main [role="alert"]')),
-        // 独立「页内有数据」信号：最近请求卡片与图表同窗口同 filters，details 非空即渲染 <table>。
-        // 单看空态无法区分「真无数据」与「数据在、图表分支被改坏」——两者都长成 EmptyState，
-        // 故加这一条：有数据却无图表 → FAIL，不让 SKIP 变成兜底黑洞。
-        dataShown: Boolean(document.querySelector("main table")),
-      };
+    const svgs = [...document.querySelectorAll('svg[aria-label="Usage bar chart"]')];
+    if (svgs.length === 0) {
+      return { noChart: true, error: Boolean(document.querySelector('main [role="alert"]')) };
     }
-    const card = svg.closest(".rounded-lg");
     return {
       noChart: false,
-      svgW: Math.round(svg.getBoundingClientRect().width),
-      cardW: card ? Math.round(card.getBoundingClientRect().width) : null,
+      charts: svgs.map((svg) => {
+        // svg 的父元素就是 BarChart 的 `w-full overflow-x-auto` 包裹层（bar-chart.tsx）
+        const wrap = svg.parentElement;
+        const card = svg.closest(".rounded-lg");
+        return {
+          svgW: Math.round(svg.getBoundingClientRect().width),
+          cardW: card ? Math.round(card.getBoundingClientRect().width) : null,
+          wrapW: wrap.clientWidth,
+          wrapScrollW: wrap.scrollWidth,
+        };
+      }),
     };
   });
   if (r.noChart) {
-    if (r.error) {
-      check(`AC3 ${vp.name} 图表存在`, false, "ErrorState（页面报错，非环境性）");
-    } else if (r.dataShown) {
-      // 页内已有数据（最近请求列表有行）却无图表：空态只是表象，按真实回归处理
-      check(
-        `AC3 ${vp.name} 图表存在`,
-        false,
-        "有数据（最近请求列表有行）却无图表 —— 疑似图表分支/数据口径回归",
-      );
-    } else if (r.empty) {
-      skip(`AC3 ${vp.name} 图表`, "dashboard EmptyState：窗口内 0 请求，无图表可断言（环境性）");
-    } else {
-      check(`AC3 ${vp.name} 图表存在`, false, "既无图表也无 EmptyState/ErrorState（页面异常）");
-    }
-  } else {
-    const pad = 48; // Card p-6 ×2
-    const contentW = r.cardW - pad;
-    // 无 640 fallback 残留（B1 根因）：窄容器（<640）下不允许固定 640；且图表铺满卡片
-    // （柱宽下限允许小幅超出容器，内部滚动属有意设计，页面级溢出由 AC1 兜底）
-    const noFallback = contentW >= 640 || r.svgW < 640;
     check(
-      `AC3 ${vp.name} 图表全宽无 fallback`,
-      r.cardW !== null && noFallback && r.svgW >= contentW - 8,
-      `svg=${r.svgW} card=${r.cardW}`,
+      `AC3 ${vp.name} 三张柱图齐备`,
+      false,
+      r.error
+        ? "ErrorState（页面报错，非环境性）"
+        : "既无柱图也无 ErrorState —— 加载未完成或图表分支回归",
     );
+  } else {
+    check(`AC3 ${vp.name} 三张柱图齐备（Spend/Requests/Tokens）`, r.charts.length === 3,
+      `实测 ${r.charts.length} 张`);
+    for (const [i, c] of r.charts.entries()) {
+      const contentW = (c.cardW ?? 0) - 48; // Card p-6 ×2
+      // 无 640 fallback 残留（B1 根因）：窄容器（<640）下不允许固定 640；且图表铺满卡片
+      const noFallback = contentW >= 640 || c.svgW < 640;
+      check(
+        `AC3 ${vp.name} 图${i + 1} 全宽无 fallback`,
+        c.cardW !== null && noFallback && c.svgW >= contentW - 8,
+        `svg=${c.svgW} card=${c.cardW}`,
+      );
+      check(
+        `AC3 ${vp.name} 图${i + 1} 不横向溢出（三栏小图 dense 生效）`,
+        c.wrapScrollW <= c.wrapW + 1,
+        `scroll=${c.wrapScrollW}/${c.wrapW}`,
+      );
+    }
   }
   await ctx.close();
 }

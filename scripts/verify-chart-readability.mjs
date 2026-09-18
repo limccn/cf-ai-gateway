@@ -21,7 +21,7 @@
 //        缺陷同源。修法是把 usage 页三分栏推到 xl（1280，内容盒实测 259.7px），1024~1279
 //        退回单列。故本组新增「图例实得 ≥ 118 且序列名未压成 0 宽」断言，并把 1024 与 1280
 //        都纳入视口清单 —— 断点被改回 lg 时它会立刻红。
-//     ③ 数值格式（AC16）：Cost 柱顶标签小数位 ≤ 3；tokens 柱顶走紧凑格式；
+//     ③ 数值格式（AC16）：Spend 柱顶标签小数位 ≤ 3；tokens 柱顶走紧凑格式；
 //        图例数值**永不截断**（可以截名字，不能截数字）。
 //        **批次 H 订正**：柱顶标签的**有无**改锁「严格由柱宽阈值 14 决定」这条不变量。
 //        原先只在标签**存在**时校验格式、不存在时打一行「既有降级规则，非本批改动」放行 ——
@@ -319,18 +319,18 @@ for (const vp of VIEWPORTS) {
   const tag = `[${vp.name}]`;
 
   // ── AC12：三行卡片齐备（成本 / 请求 / tokens） ──
-  const costBar = byTitle("Cost today");
+  const costBar = byTitle("Spend today");
   const reqBar = byTitle("Requests today");
   const tokBar = byTitle("Tokens today");
-  const modelDonut = byTitle("Cost by model");
+  const modelDonut = byTitle("Spend by model");
   const statusDonut = byTitle("Requests by status");
   const tokDonut = byTitle("Tokens by direction");
-  check(`${tag} 三张柱状图齐备（Cost/Requests/Tokens today）`, [costBar, reqBar, tokBar].every((c) => c?.kind === "bar"),
+  check(`${tag} 三张柱状图齐备（Spend/Requests/Tokens today）`, [costBar, reqBar, tokBar].every((c) => c?.kind === "bar"),
     [costBar, reqBar, tokBar].map((c) => c?.kind ?? "missing").join("/"));
   check(`${tag} 三张环形图齐备（模型/状态/tokens）`, [modelDonut, statusDonut, tokDonut].every((c) => c?.kind === "donut"),
     [modelDonut, statusDonut, tokDonut].map((c) => c?.kind ?? "missing").join("/"));
 
-  for (const [label, chart] of [["Cost", costBar], ["Requests", reqBar], ["Tokens", tokBar]]) {
+  for (const [label, chart] of [["Spend", costBar], ["Requests", reqBar], ["Tokens", tokBar]]) {
     if (chart?.kind !== "bar") continue;
 
     // ── AC15：刻度数落 [4,6]，首尾桶必有标签 ──
@@ -377,7 +377,7 @@ for (const vp of VIEWPORTS) {
   // 的下限获胜 → 环图落 80、图例保住 118（AC17 已锁）。这是「图例可读优先」的既有取舍，
   // 但**不跳过**——改为显式断言它停在 80：跳过会让「某天它变成 120（下限被改）」无人知道。
   {
-    const pairs = [["Cost", costBar, modelDonut], ["Requests", reqBar, statusDonut], ["Tokens", tokBar, tokDonut]];
+    const pairs = [["Spend", costBar, modelDonut], ["Requests", reqBar, statusDonut], ["Tokens", tokBar, tokDonut]];
     for (const [label, bar, donut] of pairs) {
       if (bar?.kind !== "bar") continue;
       check(`${tag} ${label} 柱状图高度 = ${EXPECTED_BAR_HEIGHT}（降高裁决值）`,
@@ -402,7 +402,7 @@ for (const vp of VIEWPORTS) {
   }
 
   // ── AC17：环形图与图例并排（y 区间重叠 + 环图在左） ──
-  for (const [label, donut] of [["Cost by model", modelDonut], ["Requests by status", statusDonut], ["Tokens by direction", tokDonut]]) {
+  for (const [label, donut] of [["Spend by model", modelDonut], ["Requests by status", statusDonut], ["Tokens by direction", tokDonut]]) {
     if (donut?.kind !== "donut") continue;
     // 这条是**布局不变量**，不是外观偏好：容器一旦窄于「环图下限 + 图例保底 + 间距」，
     // `max(MIN_SIZE, …)` 的下限就会推翻「先给图例留够」的预算，图例被压破
@@ -425,7 +425,7 @@ for (const vp of VIEWPORTS) {
       donut.legend.filter((d) => d.title !== d.label).map((d) => d.label).join(",") || "全部一致");
     check(`${tag} ${label}：长名走截断而非撑破（overflow-x: hidden）`, donut.legend.every((d) => d.overflowX === "hidden"),
       donut.legend.map((d) => d.overflowX).join(","));
-    if (vp.width === 1440 && label === "Cost by model") {
+    if (vp.width === 1440 && label === "Spend by model") {
       console.log(`      · 图例截断情况：${donut.legend.map((d) => `${d.label}${d.labelTruncated ? "(截断)" : ""}`).join(", ")}`);
     }
   }
@@ -443,15 +443,15 @@ for (const vp of VIEWPORTS) {
     // 全 0 时无论多宽都不渲染标签（bar-chart 的 `datum.value > 0` 条件），此时阈值不变量不适用。
     const hasPositive = titleValues.some((v) => Number(v.replace(/[$,]/g, "")) > 0);
     if (!hasPositive) {
-      console.log(`      · Cost 全桶为 0，柱顶标签本就不渲染（与柱宽无关），跳过 AC16`);
+      console.log(`      · Spend 全桶为 0，柱顶标签本就不渲染（与柱宽无关），跳过 AC16`);
     } else {
       const hasLabels = costBar.values.length > 0;
       const wideEnough = costBar.barWidth >= COST_LABEL_MIN_BAR_WIDTH;
-      check(`${tag} Cost 柱顶标签有无 = 柱宽阈值 ${COST_LABEL_MIN_BAR_WIDTH}（柱宽 ${costBar.barWidth}）`,
+      check(`${tag} Spend 柱顶标签有无 = 柱宽阈值 ${COST_LABEL_MIN_BAR_WIDTH}（柱宽 ${costBar.barWidth}）`,
         hasLabels === wideEnough, `标签${hasLabels ? "有" : "无"} vs 阈值判定${wideEnough ? "该有" : "该降级"}`);
       const source = hasLabels ? costBar.values : titleValues;
       const bad = source.filter((v) => !/^\$[\d,]+\.\d{1,3}$/.test(v));
-      check(`${tag} Cost 数值（${hasLabels ? "柱顶" : "tooltip"}）全为 $x.yz(≤3 位)`, bad.length === 0,
+      check(`${tag} Spend 数值（${hasLabels ? "柱顶" : "tooltip"}）全为 $x.yz(≤3 位)`, bad.length === 0,
         bad.length ? `不合式：${bad.join(",")}` : `共 ${source.length} 个：${source.slice(0, 4).join(" ")}…`);
     }
   }

@@ -60,6 +60,18 @@ export const usageOutputSchema = z.object({
   offset: z.number().int(),
 });
 
+/** GET /api/me/usage/lifetime 的输出：账户累计消费（全时段，不分页、无筛选）。
+ *  **刻意不并进 usageOutputSchema**：那份 schema 是 /api/me/usage 与 /api/admin/usage 的**共享契约**
+ *  （dashboard、usage 页、既有单测与 stg E2E 都在消费它，见 app/modules/usage/hooks/use-usage-report.ts
+ *  开头），改形状 = 全链路契约迁移；且 admin 端 userId 可缺省（那时求和的语义变成全员合计，与本端点
+ *  的「单账户累计」根本不是一回事）。故独立端点、独立 schema。
+ *  字段名沿用后端既有 `cost` 词汇（用户 2026-09-18 裁决：spend/cost 的用词统一只作用于**用户可见文案**，
+ *  不动后端字段与表；面向用户的措辞在前端统一成 spend）。 */
+export const lifetimeCostOutputSchema = z.object({
+  success: z.literal(true),
+  totalCost: z.number(),
+});
+
 // ============= 类型导出 =============
 
 export type UsageGroupBy = z.infer<typeof usageGroupBySchema>;
@@ -69,3 +81,4 @@ export type AdminUsageQuery = z.infer<typeof adminUsageQuerySchema>;
 export type UsageAggregate = z.infer<typeof usageAggregateSchema>;
 export type UsageDetail = z.infer<typeof usageDetailSchema>;
 export type UsageOutput = z.infer<typeof usageOutputSchema>;
+export type LifetimeCostOutput = z.infer<typeof lifetimeCostOutputSchema>;

@@ -219,7 +219,9 @@ export default function UsagePage() {
   const periodDesc = from || to ? `${rangeEdge(from)} – ${rangeEdge(to)}` : "All time";
   const requestsTitle = usageRange ? (rangeMeta?.title ?? "Requests") : "Requests per day";
   const requestsDesc = usageRange ? (rangeMeta?.desc ?? "") : periodDesc;
-  const costTitle = usageRange ? (rangeMeta?.costTitle ?? "Cost") : "Cost per day";
+  // 用词统一为 spend（批次 J，2026-09-18）：字段名 `costTitle` 保留 —— 用户裁决只改**用户可见文案**，
+  // 不动后端字段与表；改字段名属纯 churn，且会与后端 `cost` 字段名分叉。
+  const costTitle = usageRange ? (rangeMeta?.costTitle ?? "Spend") : "Spend per day";
   const costDesc = usageRange ? (rangeMeta?.costDesc ?? "") : periodDesc;
   const tokensTitle = usageRange ? (rangeMeta?.tokensTitle ?? "Tokens") : "Tokens per day";
   const tokensDesc = usageRange ? (rangeMeta?.tokensDesc ?? "") : periodDesc;
@@ -232,7 +234,7 @@ export default function UsagePage() {
 
   return (
     <PageContainer>
-      <PageHeader title="Usage" description="Request volumes, costs and request details" />
+      <PageHeader title="Usage" description="Request volumes, spend and request details" />
 
       {/* 筛选栏：三个控件一行（Time → API key → User），变更即查 */}
       <Card className="mb-6">
@@ -394,7 +396,7 @@ export default function UsagePage() {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle>Cost by model</CardTitle>
+                <CardTitle>Spend by model</CardTitle>
                 <CardDescription>Top 5 models plus combined others</CardDescription>
               </CardHeader>
               <CardContent>
@@ -529,7 +531,7 @@ export default function UsagePage() {
                       <TableHead className="hidden sm:table-cell">Key</TableHead>
                       <TableHead>Model</TableHead>
                       <TableHead>Tokens</TableHead>
-                      <TableHead>Cost</TableHead>
+                      <TableHead>Spend</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead className="hidden md:table-cell">Latency</TableHead>
                     </TableRow>
