@@ -77,6 +77,20 @@ const STATUS_COLORS: Record<string, string> = {
   rejected: "hsl(var(--muted-foreground))",
 };
 
+/** 三行卡的「柱状图高度」与「环形图 size」共用同一值 —— 同一行内两者等高是**刻意的视觉契约**
+ *  （2026-09-18 用户裁决：柱状图原为 240，比同排环图高出一大截）。抽成一个常量是为了让
+ *  「柱高 = 环图尺寸」这件事只有一个来源，将来改高度不会只改一边。
+ *
+ *  为什么取 152：环形图的 `size` 是**上限**而非定值（donut-chart.tsx 按容器宽反算
+ *  `min(size, max(80, 内容盒 − 118 − 24))`）。桌面 1/3 卡内容盒实测 302px → 算得 160 > 152，
+ *  上限先生效，故 ≥1440 时环图**恒渲染成 152**；而本页在最大宽度容器下 1920/1600/1440 三档的
+ *  内容盒完全相同（实测 726 / 350），1440 起即进入稳态，没有更宽的档会再变。
+ *  1280~1439 环图会被图例挤小（实测 1366 → 146.3、1280 → 117.7），这段柱图保持 152、略高于环图：
+ *  1366（常见笔记本宽）仅差 5.7px 不可辨，1280 上差 34px。若将来要连这一段也严格等高，
+ *  得让柱高随环图的**实际渲染尺寸**联动（跨卡测量 / 提升到页面级派生），当前刻意不做 ——
+ *  为一档边缘宽度引入跨组件耦合不划算，权衡与实测数见任务 implement.md。 */
+const CHART_ROW_SIZE = 152;
+
 export default function UsagePage() {
   const { user } = useSession();
   const isAdmin = user?.role === "admin";
@@ -367,12 +381,9 @@ export default function UsagePage() {
               </CardHeader>
               <CardContent>
                 {report.buckets.length === 0 ? (
-                  <EmptyState
-                    title="No usage in this period"
-                    description="Try widening the date range or clearing filters."
-                  />
+                  <EmptyState title="No usage in this period" />
                 ) : (
-                  <BarChart data={costSeries} height={240} formatValue={formatUsdShort} />
+                  <BarChart data={costSeries} height={CHART_ROW_SIZE} formatValue={formatUsdShort} />
                 )}
               </CardContent>
             </Card>
@@ -385,7 +396,7 @@ export default function UsagePage() {
                 {modelSeries.length === 0 ? (
                   <EmptyState title="No usage in this period" />
                 ) : (
-                  <DonutChart data={modelSeries} formatValue={formatUsdShort} size={152} />
+                  <DonutChart data={modelSeries} formatValue={formatUsdShort} size={CHART_ROW_SIZE} />
                 )}
               </CardContent>
             </Card>
@@ -399,12 +410,9 @@ export default function UsagePage() {
               </CardHeader>
               <CardContent>
                 {report.buckets.length === 0 ? (
-                  <EmptyState
-                    title="No usage in this period"
-                    description="Try widening the date range or clearing filters."
-                  />
+                  <EmptyState title="No usage in this period" />
                 ) : (
-                  <BarChart data={requestsSeries} height={240} formatValue={formatNumber} />
+                  <BarChart data={requestsSeries} height={CHART_ROW_SIZE} formatValue={formatNumber} />
                 )}
               </CardContent>
             </Card>
@@ -417,7 +425,7 @@ export default function UsagePage() {
                 {report.byStatus.length === 0 ? (
                   <EmptyState title="No usage in this period" />
                 ) : (
-                  <DonutChart data={statusSeries} formatValue={formatNumber} size={152} />
+                  <DonutChart data={statusSeries} formatValue={formatNumber} size={CHART_ROW_SIZE} />
                 )}
               </CardContent>
             </Card>
@@ -434,13 +442,10 @@ export default function UsagePage() {
               </CardHeader>
               <CardContent>
                 {report.buckets.length === 0 ? (
-                  <EmptyState
-                    title="No usage in this period"
-                    description="Try widening the date range or clearing filters."
-                  />
+                  <EmptyState title="No usage in this period" />
                 ) : (
                   // 柱顶标签用紧凑格式：token 数是百万量级，完整写法在 24/30 桶下会互相重叠
-                  <BarChart data={tokensSeries} height={240} formatValue={formatNumberCompact} />
+                  <BarChart data={tokensSeries} height={CHART_ROW_SIZE} formatValue={formatNumberCompact} />
                 )}
               </CardContent>
             </Card>
@@ -454,7 +459,7 @@ export default function UsagePage() {
                   <EmptyState title="No usage in this period" />
                 ) : (
                   // 图例空间充裕，用精确值（紧凑格式会让两段之和看起来对不上总量）
-                  <DonutChart data={tokenSplitSeries} formatValue={formatNumber} size={152} />
+                  <DonutChart data={tokenSplitSeries} formatValue={formatNumber} size={CHART_ROW_SIZE} />
                 )}
               </CardContent>
             </Card>
