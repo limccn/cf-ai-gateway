@@ -1,5 +1,7 @@
 // /billing — 账单页（M6 6.3 + M8）：余额卡片 + 管理员代充/扣减 + 真实流水表
 // （GET /api/me/transactions，分页 + type 过滤；无伪造数据）。
+// 批次 I（2026-09-18）：type 下拉从流水表 header 移入 Ledger summary 卡（替换该卡的
+// 「Types: recharge / usage / …」静态行）—— 该卡由只读摘要变成可操作的筛选器。
 import { useState, type FormEvent } from "react";
 import { CreditCard, Wallet } from "lucide-react";
 import { z } from "zod";
@@ -158,11 +160,29 @@ export default function BillingPage() {
               <span className="text-muted-foreground">Total transactions</span>
               <span className="font-medium">{formatNumber(total)}</span>
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">Types</span>
-              <span className="font-mono text-xs">
-                recharge / usage / adjust / signup_bonus / email_verify_bonus
-              </span>
+            {/* 类型筛选（批次 I）：原是本卡的一行静态罗列
+                「Types | recharge / usage / adjust / signup_bonus / email_verify_bonus」，
+                现改为承接流水表原先那个下拉 —— 该卡因此从「只读摘要」变成**可操作的筛选器**，
+                选中的类型即时作用于下方流水表（即选即查，与 usage 页同一范式）。
+                竖排全宽而非「标签 + 右侧下拉」并排：本卡在 lg 起是 1/3 列，内容盒仅 ~215px，
+                并排的 w-40 下拉会与标签一起把行挤爆。 */}
+            <div className="space-y-2">
+              <Label htmlFor="billing-type" className="block font-normal text-muted-foreground">
+                Transaction type
+              </Label>
+              <Select
+                id="billing-type"
+                value={typeFilter}
+                onChange={(e) => switchTypeFilter(e.target.value as TypeFilter)}
+                className="w-full"
+              >
+                <option value="all">All types</option>
+                <option value="recharge">Recharge</option>
+                <option value="usage">Usage</option>
+                <option value="adjust">Adjustment</option>
+                <option value="signup_bonus">Signup bonus</option>
+                <option value="email_verify_bonus">Email verified bonus</option>
+              </Select>
             </div>
           </CardContent>
         </Card>
@@ -170,29 +190,9 @@ export default function BillingPage() {
 
       {/* 流水表 */}
       <Card className="mt-6">
-        <CardHeader className="flex-col items-start gap-3 space-y-0 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <CardTitle>Transactions</CardTitle>
-            <CardDescription>{formatNumber(total)} total</CardDescription>
-          </div>
-          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-            <Label htmlFor="billing-type" className="sr-only">
-              Transaction type
-            </Label>
-            <Select
-              id="billing-type"
-              value={typeFilter}
-              onChange={(e) => switchTypeFilter(e.target.value as TypeFilter)}
-              className="w-40"
-            >
-              <option value="all">All types</option>
-              <option value="recharge">Recharge</option>
-              <option value="usage">Usage</option>
-              <option value="adjust">Adjustment</option>
-              <option value="signup_bonus">Signup bonus</option>
-              <option value="email_verify_bonus">Email verified bonus</option>
-            </Select>
-          </div>
+        <CardHeader>
+          <CardTitle>Transactions</CardTitle>
+          <CardDescription>{formatNumber(total)} total</CardDescription>
         </CardHeader>
         <CardContent className="p-0">
           {transactionsQuery.isLoading ? (

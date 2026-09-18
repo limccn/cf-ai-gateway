@@ -1,5 +1,9 @@
-// /keys — 密钥管理（M6 6.3）：CRUD 表格；创建时明文仅展示一次；
-// 更新（名称/限流/缓存）、吊销、删除均带确认。
+// /keys — 密钥管理（M6 6.3）：Key 表格；创建时明文仅展示一次；更新（名称/限流/缓存）、吊销带确认。
+//
+// **本页无删除**（2026-09-18 用户裁决）：Key 与系统绑定过深（request_logs / usage_daily 的外键
+// ON DELETE no action），删除会带来意外问题，故全局取消删除能力，只保留**不可恢复的 revoke**。
+// admin 可查询指定用户的 Key 并 revoke（后端 findAuthorizedKey 的 admin 分支 + listKeysQuerySchema
+// 的 userId 早已支持，这里补的是前端入口）。
 import {
   useEffect,
   useRef,
@@ -8,13 +12,14 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { Ban, Copy, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Ban, Copy, Pencil, Plus, Search } from "lucide-react";
 import { z } from "zod";
+import { useSession } from "@/hooks/use-session";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
 import { useCreateKey } from "@/modules/keys/hooks/use-create-key";
 import { useUpdateKey } from "@/modules/keys/hooks/use-update-key";
 import { useRevokeKey } from "@/modules/keys/hooks/use-revoke-key";
-import { useDeleteKey } from "@/modules/keys/hooks/use-delete-key";
+import { useUsers } from "@/modules/users/hooks/use-users";
 import type { CreateKeyOutput, KeyResponse } from "@/modules/keys/types";
 import { formatDateTime } from "@/lib/format";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -25,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -582,15 +588,26 @@ function QuickStart() {
 // ============= 页面 =============
 
 export default function KeysPage() {
-  const keysQuery = useKeys();
+  const { user } = useSession();
+  const isAdmin = user?.role === "admin";
+
+  // admin 视角切换：undefined = 自己（后端对 admin 的「不过滤」语义是**全部用户**，
+  // 见 list.ts 的 `if (role === "admin" && query.userId)` —— 故选「我自己的 Key」要显式传自己的 id）。
+  const [ownerFilter, setOwnerFilter] = useState<"me" | number>("me");
+  const usersQuery = useUsers(isAdmin ? { limit: 100 } : { limit: 1, enabled: false });
+  const users = usersQuery.data?.items ?? [];
+
+  // 仅在 admin 选中「他人」时才带 userId；member 传了也会被后端忽略（强制自身）
+  const viewingUserId = isAdmin && ownerFilter !== "me" ? ownerFilter : undefined;
+  const viewingOther = viewingUserId !== undefined;
+
+  const keysQuery = useKeys({ userId: viewingUserId });
   const revokeKey = useRevokeKey();
-  const deleteKey = useDeleteKey();
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<KeyResponse | null>(null);
   const [created, setCreated] = useState<CreateKeyOutput | null>(null);
   const [revoking, setRevoking] = useState<KeyResponse | null>(null);
-  const [deleting, setDeleting] = useState<KeyResponse | null>(null);
 
   const items = keysQuery.data?.items ?? [];
 
@@ -607,35 +624,73 @@ export default function KeysPage() {
     <PageContainer>
       <PageHeader
         title="API keys"
-        description="Create and manage gateway keys for your account"
+        description={
+          isAdmin
+            ? "Create and manage gateway keys; revoke is permanent and cannot be undone"
+            : "Create and manage gateway keys for your account"
+        }
         actions={
-          <Button onClick={() => setCreateOpen(true)}>
-            <Plus aria-hidden="true" />
-            Create key
-          </Button>
+          // 浏览他人 Key 时不提供「Create key」：后端 create 恒把 Key 建在**当前登录者**名下，
+          // 在「正在看别人」的语境下点它会得到一个挂在自己名下、却以为建给了对方的 Key。
+          viewingOther ? undefined : (
+            <Button onClick={() => setCreateOpen(true)}>
+              <Plus aria-hidden="true" />
+              Create key
+            </Button>
+          )
         }
       />
 
       <Card className="mb-6">
-        <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardHeader className="flex-col items-start gap-3 space-y-0 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle>API keys</CardTitle>
+            {viewingOther ? (
+              <CardDescription>
+                Viewing keys of{" "}
+                {/* UserResponse.id 是 string（userResponseSchema 把整型 id 序列化成字符串），
+                    而 keys 的 userId 是 number —— 必须显式转换，否则恒 find 不到、回落成 user #N。 */}
+                {users.find((u) => Number(u.id) === viewingUserId)?.name ?? `user #${viewingUserId}`}.
+                Revoke is permanent; new keys are always created under your own account.
+              </CardDescription>
+            ) : null}
           </div>
-          {items.length > 0 ? (
-            <div className="relative w-40 shrink-0">
-              <Search
-                className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <Input
-                aria-label="Search keys"
-                className="pl-9"
-                placeholder="Search"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-            </div>
-          ) : null}
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+            {isAdmin ? (
+              <div className="w-full sm:w-56">
+                <Label htmlFor="keys-owner" className="sr-only">
+                  Key owner
+                </Label>
+                <Select
+                  id="keys-owner"
+                  value={ownerFilter === "me" ? "me" : String(ownerFilter)}
+                  onChange={(e) => setOwnerFilter(e.target.value === "me" ? "me" : Number(e.target.value))}
+                >
+                  <option value="me">My keys</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name} ({u.email})
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            ) : null}
+            {items.length > 0 ? (
+              <div className="relative w-full shrink-0 sm:w-40">
+                <Search
+                  className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <Input
+                  aria-label="Search keys"
+                  className="pl-9"
+                  placeholder="Search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+            ) : null}
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           {keysQuery.isLoading ? (
@@ -708,16 +763,6 @@ export default function KeysPage() {
                         >
                           <Ban aria-hidden="true" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="text-destructive hover:text-destructive"
-                          onClick={() => setDeleting(key)}
-                          aria-label={`Delete ${key.name}`}
-                          title="Delete"
-                        >
-                          <Trash2 aria-hidden="true" />
-                        </Button>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -754,8 +799,9 @@ export default function KeysPage() {
         title="Revoke key"
         description={
           <>
-            Revoke <strong>{revoking?.name}</strong> ({revoking?.prefix})? Existing requests
-            with this key will be rejected. This cannot be undone.
+            Revoke <strong>{revoking?.name}</strong> ({revoking?.prefix})? Requests with this key
+            will be rejected immediately. Revoking is <strong>permanent</strong> — a revoked key
+            cannot be restored or deleted, so its usage history stays attributed to it.
           </>
         }
         confirmLabel="Revoke"
@@ -765,32 +811,6 @@ export default function KeysPage() {
           if (revoking) {
             revokeKey.mutate(revoking.id, {
               onSuccess: () => setRevoking(null),
-            });
-          }
-        }}
-      />
-
-      <ConfirmDialog
-        open={deleting !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setDeleting(null);
-          }
-        }}
-        title="Delete key"
-        description={
-          <>
-            Permanently delete <strong>{deleting?.name}</strong> ({deleting?.prefix})? Usage
-            history is retained.
-          </>
-        }
-        confirmLabel="Delete"
-        destructive
-        busy={deleteKey.isPending}
-        onConfirm={() => {
-          if (deleting) {
-            deleteKey.mutate(deleting.id, {
-              onSuccess: () => setDeleting(null),
             });
           }
         }}
