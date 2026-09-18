@@ -1,4 +1,4 @@
-// /usage — 用量报表页（09-14 批次 A 改造）：筛选即选即查，成本 / 请求两行图表卡
+// /usage — 用量报表页（09-14 批次 A 改造）：筛选即选即查，成本 / 请求 / tokens 三行图表卡
 // （各 2/3 柱状图 + 1/3 环形图）+ 明细分页表格。
 //
 // 与旧版的差别（裁决理由见任务 design.md）：
@@ -8,8 +8,11 @@
 //   - 时间维度收成一个下拉（默认 Today，含 Custom）：Custom 的 From/To 收进 Popover，
 //     关闭时只留一行文本触发器，不再占满整行两个输入框；模型筛选入口移除
 //     （model 只作聚合维度；后端参数保留，属契约面）；
-//   - 图表从「一个可切维度的大图」改为两张固定维度的卡：groupBy 是单值参数、
+//   - 图表从「一个可切维度的大图」改为三张固定维度的卡：groupBy 是单值参数、
 //     一次请求只能给一种聚合，故四路查询在 use-usage-report 里编排；
+//   - 三张柱状图共用同一套桶窗口（buildRangeSeries 按 metric 取列），tokens 取
+//     `tokensIn + tokensOut`；tokens 环形图是同批聚合的 input / output 两段切分
+//     （cached 未落库，见 modules/usage/series.ts，2026-09-18 用户裁决不做迁移）；
 //   - 状态筛选只作用于明细查询（D3）：图表不随它变化，也修掉「range 模式筛状态会连带
 //     改变柱状图、custom 模式不会」的既存不一致。
 import { useMemo, useState } from "react";
@@ -17,7 +20,7 @@ import { CalendarDays, Filter } from "lucide-react";
 import type { UsageRange } from "@/modules/usage/types";
 import { useUsageReport } from "@/modules/usage/hooks/use-usage-report";
 import { buildRangeSeries, getTzOffsetMin, RANGE_OPTIONS } from "@/modules/usage/range";
-import { buildModelCostSeries } from "@/modules/usage/series";
+import { buildModelCostSeries, buildTokenSplitSeries } from "@/modules/usage/series";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
 import { useUsers } from "@/modules/users/hooks/use-users";
 import { useSession } from "@/hooks/use-session";
@@ -28,8 +31,10 @@ import {
   formatDateTime,
   formatDateTimeShort,
   formatNumber,
+  formatNumberCompact,
   formatShortDate,
   formatUsd,
+  formatUsdShort,
   toDateParam,
 } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
@@ -124,7 +129,8 @@ export default function UsagePage() {
   const usageRange: UsageRange | undefined = range === "custom" ? undefined : range;
   const rangeMeta = usageRange ? RANGE_OPTIONS.find((o) => o.value === usageRange) : undefined;
 
-  // 两行柱状图：range 模式共用同一套固定桶公式（桶边界必须逐桶对齐），custom 模式按天后端已排序
+  // 三张柱状图（请求 / 成本 / tokens）：range 模式共用同一套固定桶公式（桶边界必须逐桶对齐），
+  // custom 模式按天后端已排序
   const requestsSeries = useMemo(() => {
     if (usageRange) {
       return buildRangeSeries(report.buckets, usageRange, tzOffsetMin, nowMs, "requests");
@@ -143,6 +149,19 @@ export default function UsagePage() {
       .map((agg) => ({ label: formatShortDate(agg.group ?? ""), value: agg.cost }));
   }, [usageRange, report.buckets, tzOffsetMin, nowMs]);
 
+  // tokens 柱状图：取「输入 + 输出」，与 tokens 环形图两段之和同口径（09-14 批次 B）
+  const tokensSeries = useMemo(() => {
+    if (usageRange) {
+      return buildRangeSeries(report.buckets, usageRange, tzOffsetMin, nowMs, "tokens");
+    }
+    return report.buckets
+      .filter((agg) => agg.group !== null)
+      .map((agg) => ({
+        label: formatShortDate(agg.group ?? ""),
+        value: agg.tokensIn + agg.tokensOut,
+      }));
+  }, [usageRange, report.buckets, tzOffsetMin, nowMs]);
+
   // 模型成本环形图：Top5 + Other models。颜色在这里配（series.ts 不引 .tsx，见其文件头），
   // Other 用 muted 灰 —— 它不是某个模型，不该占用调色板语义色。
   const modelSeries = useMemo(
@@ -154,6 +173,17 @@ export default function UsagePage() {
           : (CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))"),
       })),
     [report.byModel],
+  );
+
+  // tokens 切分环形图：input / output 两段（D7 —— cachedTokens 未落库，本批次不做三段）。
+  // 顺序由 buildTokenSplitSeries 固定，颜色在页面层按下标配（series.ts 不引 .tsx，见其文件头）。
+  const tokenSplitSeries = useMemo(
+    () =>
+      buildTokenSplitSeries(report.buckets).map((datum, index) => ({
+        ...datum,
+        color: CHART_COLORS[index % CHART_COLORS.length] ?? "hsl(var(--primary))",
+      })),
+    [report.buckets],
   );
 
   // 状态环形图：固定四段 + 后端只返回有数据的组，缺项补 0
@@ -174,6 +204,8 @@ export default function UsagePage() {
   const requestsDesc = usageRange ? (rangeMeta?.desc ?? "") : periodDesc;
   const costTitle = usageRange ? (rangeMeta?.costTitle ?? "Cost") : "Cost per day";
   const costDesc = usageRange ? (rangeMeta?.costDesc ?? "") : periodDesc;
+  const tokensTitle = usageRange ? (rangeMeta?.tokensTitle ?? "Tokens") : "Tokens per day";
+  const tokensDesc = usageRange ? (rangeMeta?.tokensDesc ?? "") : periodDesc;
 
   // Custom 触发器文案：两端都未选时给提示文案，只选一端时另一端用省略号
   const customRangeLabel = from || to ? `${from || "…"} – ${to || "…"}` : "Time range";
@@ -311,7 +343,12 @@ export default function UsagePage() {
 
       {/* 图表：成本行在上、请求行在下（A4/A3），各 2/3 柱状图 + 1/3 环形图。
           grid 显式 grid-cols-1 起步：BarChart 首帧用 FALLBACK_WIDTH=640 兜底，
-          不显式写单列会让窄屏先被撑开再被测量锁死（frontend/components.md 响应式契约）。 */}
+          不显式写单列会让窄屏先被撑开再被测量锁死（frontend/components.md 响应式契约）。
+          三分栏用 **xl（1280）而非 lg（1024）**：lg 正好也是侧栏出现的断点，两者叠加会把 1/3
+          列压到内容盒 **174px**（实测 1024），而环形图并排的宽度预算是
+          `MIN_SIZE(80) + LEGEND_MIN_WIDTH(118) + gap(24) = 222px` —— 174 < 222 时下限获胜，
+          图例被压到 70px、序列名 0 宽（**名字完全不可见**）。1280 起内容盒 ≈253px > 222，
+          预算成立；1024~1279 退回单列堆叠（与平板同形态），不再有坏带。 */}
       {report.isLoading ? (
         <div className="mb-6 flex h-64 items-center justify-center text-sm text-muted-foreground">
           Loading…
@@ -322,8 +359,8 @@ export default function UsagePage() {
         </div>
       ) : (
         <>
-          <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
-            <Card className="lg:col-span-2">
+          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <Card className="xl:col-span-2">
               <CardHeader>
                 <CardTitle>{costTitle}</CardTitle>
                 <CardDescription>{costDesc}</CardDescription>
@@ -335,7 +372,7 @@ export default function UsagePage() {
                     description="Try widening the date range or clearing filters."
                   />
                 ) : (
-                  <BarChart data={costSeries} height={240} formatValue={formatUsd} />
+                  <BarChart data={costSeries} height={240} formatValue={formatUsdShort} />
                 )}
               </CardContent>
             </Card>
@@ -348,14 +385,14 @@ export default function UsagePage() {
                 {modelSeries.length === 0 ? (
                   <EmptyState title="No usage in this period" />
                 ) : (
-                  <DonutChart data={modelSeries} formatValue={formatUsd} />
+                  <DonutChart data={modelSeries} formatValue={formatUsdShort} size={152} />
                 )}
               </CardContent>
             </Card>
           </div>
 
-          <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
-            <Card className="lg:col-span-2">
+          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <Card className="xl:col-span-2">
               <CardHeader>
                 <CardTitle>{requestsTitle}</CardTitle>
                 <CardDescription>{requestsDesc}</CardDescription>
@@ -380,7 +417,44 @@ export default function UsagePage() {
                 {report.byStatus.length === 0 ? (
                   <EmptyState title="No usage in this period" />
                 ) : (
-                  <DonutChart data={statusSeries} formatValue={formatNumber} />
+                  <DonutChart data={statusSeries} formatValue={formatNumber} size={152} />
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* tokens 行（B1）：柱状图取「输入 + 输出」总量，环形图按 input / output 两段切分。
+              环形图数据源是 buckets（时间桶）—— 时间桶必有键，故不适用 model 那套 null 组过滤；
+              两段之和恒等于柱状图各桶之和（AC13/AC14）。 */}
+          <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <Card className="xl:col-span-2">
+              <CardHeader>
+                <CardTitle>{tokensTitle}</CardTitle>
+                <CardDescription>{tokensDesc}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {report.buckets.length === 0 ? (
+                  <EmptyState
+                    title="No usage in this period"
+                    description="Try widening the date range or clearing filters."
+                  />
+                ) : (
+                  // 柱顶标签用紧凑格式：token 数是百万量级，完整写法在 24/30 桶下会互相重叠
+                  <BarChart data={tokensSeries} height={240} formatValue={formatNumberCompact} />
+                )}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Tokens by direction</CardTitle>
+                <CardDescription>Input and output share</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {tokenSplitSeries.length === 0 ? (
+                  <EmptyState title="No usage in this period" />
+                ) : (
+                  // 图例空间充裕，用精确值（紧凑格式会让两段之和看起来对不上总量）
+                  <DonutChart data={tokenSplitSeries} formatValue={formatNumber} size={152} />
                 )}
               </CardContent>
             </Card>
