@@ -151,6 +151,47 @@ export const deleteProviderOutputSchema = z.object({
   success: z.literal(true),
 });
 
+// ============= 协议探测（批次 N，2026-09-21）=============
+
+/**
+ * 探测的三种协议 —— **唯一来源**。顺序即 UI 展示顺序。
+ *
+ * 放在这里而不是 `lib/probe.ts`：本模块是前后端共用的契约层（前端也要用它 parse 探测结果），
+ * 而 `lib/probe.ts` 是服务端实现。字面量写两份的代价不是「啰嗦」而是**漂移在运行时才炸** ——
+ * 加了第四种协议却漏改 zod 枚举时，typecheck 全绿、前端 parse 报错。
+ * 服务端 `lib/probe.ts` 只从这里取类型。
+ */
+export const PROBE_PROTOCOLS = [
+  "openai-chat",
+  "openai-responses",
+  "anthropic-messages",
+] as const;
+
+export const probeProtocolSchema = z.enum(PROBE_PROTOCOLS);
+
+export const providerProbeResultSchema = z.object({
+  protocol: probeProtocolSchema,
+  label: z.string(),
+  /** 实际请求的 URL（密钥只在 header 里，故回显安全）。 */
+  url: z.string(),
+  ok: z.boolean(),
+  /** 网络层失败（DNS/连接/超时）时为 null —— 此时没有 HTTP 状态可言。 */
+  status: z.number().int().nullable(),
+  statusText: z.string().nullable(),
+  ttfbMs: z.number().int(),
+  totalMs: z.number().int(),
+  error: z.string().nullable(),
+});
+
+export const testProviderOutputSchema = z.object({
+  success: z.literal(true),
+  /** 探测所用的上游模型名（provider 映射表的第一个值）。 */
+  model: z.string(),
+  /** 本次探测实际使用的超时（= min(provider 配置值 ?? 60s, 30s 上限)，随响应回传以免成为隐藏的谎）。 */
+  timeoutMs: z.number().int(),
+  probes: z.array(providerProbeResultSchema),
+});
+
 // ============= 类型导出 =============
 
 export type ProviderType = z.infer<typeof providerTypeSchema>;
@@ -158,3 +199,6 @@ export type ThinkingMode = z.infer<typeof thinkingModeSchema>;
 export type CreateProviderInput = z.infer<typeof createProviderInputSchema>;
 export type UpdateProviderInput = z.infer<typeof updateProviderInputSchema>;
 export type ProviderResponse = z.infer<typeof providerResponseSchema>;
+export type ProbeProtocol = z.infer<typeof probeProtocolSchema>;
+export type ProviderProbeResult = z.infer<typeof providerProbeResultSchema>;
+export type TestProviderOutput = z.infer<typeof testProviderOutputSchema>;
