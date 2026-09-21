@@ -73,10 +73,10 @@ git branch -d feat/<name>                          # ⑤ 删除
 
 ## 环境与配置（env 三分类）
 
-> 全量：`.trellis/spec/governance/config-inventory.md`（含 20 个 RENDER-ENV token 清单）。
+> 全量：`.trellis/spec/governance/config-inventory.md`（RENDER-ENV token 清单，2026-09-21 实测 38 个）。
 
 1. **真实 secret**（`BETTER_AUTH_SECRET` / `GITHUB_CLIENT_SECRET` / `GATEWAY_SECRET_KEY`）→ 本地 `.dev.vars`、生产 `wrangler secret put`。**禁止出现在 wrangler.toml / 代码 / 文档值中**。
-2. **PII 与环境差异值**（`GITHUB_ALLOWED_EMAILS` / `BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `REQUEST_LOG_RETENTION_DAYS` / `API_KEY_PREFIX`）→ wrangler.toml `[vars]` 渲染烘焙，值在 `.dev.vars` / 部署 shell export；缺失即 fail-fast。
+2. **PII 与环境差异值**（`GITHUB_ALLOWED_EMAILS` / `BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `REQUEST_LOG_RETENTION_DAYS` / `API_KEY_PREFIX`）→ wrangler.toml `[vars]` 渲染烘焙，值在 `.dev.vars` / 部署 shell export；缺失即 fail-fast。**策略开关**（`CACHE_ENABLED` / `EMAIL_VERIFICATION_ENABLED` / `EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED` 等）走同一机制，缺省一律**关闭**（fail-closed）。
 3. **基础设施资源 ID**（D1 database_id、KV id、Queue 名、worker 名、自定义域名）→ toml 字面量，经 `wrangler.toml.template` 模板 token（`WORKER_NAME` / `DOMAIN` / `D1_DB_*` / `KV_ID` / `QUEUE_NAME` + `STAGING_*`）渲染管理。
 
 **关键坑（2026-08-26 实测）**：wrangler 4.x **不解析 `{KEY}` 占位符**——`[vars]` 值必须在构建期烘焙真实值（`npm run render:config`），否则占位符字面量进运行时。渲染脚本仅读白名单键、缺键 fail-fast、值含本地占位特征（localhost/placeholder-/@example.com）时 WARN。

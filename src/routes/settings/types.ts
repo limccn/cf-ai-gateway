@@ -22,6 +22,12 @@ export const runtimeSettingsSchema = z.object({
   emailVerifyBonusAmount: z.number().nonnegative(),
   /** 邮箱验证功能总开关（EMAIL_VERIFICATION_ENABLED env；缺省 false = 休眠）。 */
   emailVerificationEnabled: z.boolean(),
+  /**
+   * 账户安全总开关（EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED env；缺省 false）。
+   * false = 邮件注册的账户（有 credential 凭据行）不能提升为 admin —— 管理画面据此置灰提升操作，
+   * 与 PATCH /api/users/:id 的 403 门控取**同一个判据**（src/lib/admin-promotion-policy.ts）。
+   */
+  emailAccountAdminPromotionEnabled: z.boolean(),
 });
 
 export const settingsOutputSchema = z.object({

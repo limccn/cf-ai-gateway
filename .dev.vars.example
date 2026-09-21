@@ -63,6 +63,10 @@ API_KEY_PREFIX=sk-
 # EMAIL_VERIFY_BONUS_AMOUNT=5
 # 邮箱验证功能总开关（缺省 false = 休眠：不发验证信、不发验证赠金、前端不展示验证入口）
 # EMAIL_VERIFICATION_ENABLED=false
+# 账户安全总开关（09-21-email-admin-promotion-switch）：缺省 false = 邮件注册的账户（有 credential
+# 凭据行）永远不能提升为 admin —— PATCH /api/users/:id 对该形态 403，管理画面置灰提升操作。
+# 只拦新提升：降级、停用、以及已是 admin 的幂等重写不受影响。设 true/1/yes/on 才允许提升。
+# EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED=false
 # ---- staging 环境 [vars] 独立值（--env staging 渲染时覆盖顶层同名键；与 STAGING_* infra 键同源管理） ----
 STAGING_BETTER_AUTH_URL=https://stg-router.lmlh.net
 STAGING_GITHUB_CLIENT_ID=replace-me-github-client-id
@@ -79,6 +83,8 @@ STAGING_API_KEY_PREFIX=sk-
 # STAGING_SIGNUP_BONUS_AMOUNT=0
 # STAGING_EMAIL_VERIFY_BONUS_AMOUNT=0
 # STAGING_EMAIL_VERIFICATION_ENABLED=false
+# staging 账户安全总开关（缺省与顶层同为 false = 邮件注册账户不可提升为 admin）
+# STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED=false
 # 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
 # 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
 # SEED_USERS=

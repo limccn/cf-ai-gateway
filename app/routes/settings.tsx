@@ -60,6 +60,12 @@ function toSettingRows(settings: RuntimeSettings): SettingRow[] {
       description:
         "When disabled, verification emails are not sent and the email verification bonus is unreachable.",
     },
+    {
+      key: "email_account_admin_promotion_enabled",
+      value: settings.emailAccountAdminPromotionEnabled ? "enabled" : "disabled",
+      description:
+        "When disabled, accounts registered with an email credential cannot be promoted to admin on this deployment (accounts that are already admins are unaffected).",
+    },
   ];
 }
 
@@ -111,9 +117,9 @@ export default function SettingsPage() {
           <div className="mt-4 flex items-start gap-2 rounded-md border border-muted bg-muted/40 p-3 text-sm text-muted-foreground">
             <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
             <p>
-              These values are compile-time constants — there is no runtime update endpoint
-              (PATCH /api/admin/settings is not implemented; see the known deviations in the
-              README).
+              These values are applied at deploy time (code constants or environment
+              configuration) — there is no runtime update endpoint (PATCH /api/admin/settings
+              is not implemented; see the known deviations in the README).
             </p>
           </div>
         </CardContent>

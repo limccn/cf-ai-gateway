@@ -29,7 +29,7 @@ const OUTPUT_PATH = join(ROOT, "wrangler.toml");
 const DOT_VARS = join(ROOT, ".dev.vars");
 const DOT_VARS_STAGING = join(ROOT, ".dev.vars.staging");
 
-// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（36 键）。
+// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（38 键）。
 // 计数口径 = 本集合元素个数（非模板 {TOKEN} 出现次数，同一 token 会在多处复用）。
 // 顶层 [vars] 运行时配置（BETTER_AUTH_URL 等）与 infra 键同策略烘焙——wrangler 4.x 不解析
 // {KEY}，值必须在构建期就位。本地默认值（localhost / 占位）来自 .dev.vars，仅用于本地 dev
@@ -61,6 +61,7 @@ const TOKENS = new Set([
   "SIGNUP_BONUS_AMOUNT",
   "EMAIL_VERIFY_BONUS_AMOUNT",
   "EMAIL_VERIFICATION_ENABLED",
+  "EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED",
   // [env.staging.vars]：STAGING_* 独立键，与 infra 键同源管理（--env staging 渲染）。
   "STAGING_API_KEY_PREFIX",
   "STAGING_BETTER_AUTH_URL",
@@ -73,6 +74,7 @@ const TOKENS = new Set([
   "STAGING_SIGNUP_BONUS_AMOUNT",
   "STAGING_EMAIL_VERIFY_BONUS_AMOUNT",
   "STAGING_EMAIL_VERIFICATION_ENABLED",
+  "STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED",
 ]);
 
 /** 本地占位特征：命中即 WARN（仅提醒，不 fail——本地 dev 渲染本来就该是这些值）。 */
@@ -99,6 +101,10 @@ const DEFAULT_VALUES = {
   STAGING_SIGNUP_BONUS_AMOUNT: "5",
   STAGING_EMAIL_VERIFY_BONUS_AMOUNT: "5",
   STAGING_EMAIL_VERIFICATION_ENABLED: "false",
+  // 账户安全总开关缺省（09-21-email-admin-promotion-switch）：**"false" 就是缺省语义**
+  // （缺省即禁止邮件注册账户提升为 admin）。DEFAULT 必须非空，否则缺配置会触发下面的 fail-fast。
+  EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED: "false",
+  STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED: "false",
 };
 
 // 解析 .dev.vars：KEY=VALUE 行 + # 注释 + 双/单引号剥离（手写解析，零依赖）。

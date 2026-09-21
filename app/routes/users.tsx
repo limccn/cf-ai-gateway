@@ -4,6 +4,7 @@ import {
   Check,
   Copy,
   Search,
+  ShieldAlert,
   ShieldMinus,
   ShieldPlus,
   Trash2,
@@ -17,7 +18,14 @@ import { useUpdateUser } from "@/modules/users/hooks/use-update-user";
 import { useDeleteUser } from "@/modules/users/hooks/use-delete-user";
 import { useInvites } from "@/modules/users/hooks/use-invites";
 import { useCreateInvite } from "@/modules/users/hooks/use-create-invite";
+import { useSettings } from "@/modules/settings/hooks/use-settings";
 import type { UserResponse } from "@/modules/users/types";
+// 与写边界**同一个**判据模块（零依赖，不牵入服务端依赖链；理由见该文件头）
+import {
+  ADMIN_PROMOTION_BLOCKED_REASON,
+  ADMIN_PROMOTION_POLICY_NOTICE,
+  shouldBlockAdminPromotion,
+} from "../../src/lib/admin-promotion-policy";
 import { formatDateTime, formatUsd } from "@/lib/format";
 import { copyToClipboard } from "@/lib/clipboard";
 import { PageContainer } from "@/components/layout/page-container";
@@ -59,6 +67,7 @@ export default function UsersPage() {
   const [offset, setOffset] = useState(0);
   const usersQuery = useUsers({ ...filters, limit: 50, offset });
   const invitesQuery = useInvites();
+  const settingsQuery = useSettings();
   const updateUser = useUpdateUser();
   const deleteUser = useDeleteUser();
   const createInvite = useCreateInvite();
@@ -98,6 +107,26 @@ export default function UsersPage() {
 
   const items = usersQuery.data?.items ?? [];
   const invites = invitesQuery.data?.items ?? [];
+
+  // ===== 账户安全总开关（09-21-email-admin-promotion-switch）=====
+  // 判据与写边界是**同一个函数**，故「画面灰掉的行」与「API 会拒的请求」在构造上不可能漂移。
+  // `=== true` 是刻意的 fail-closed：设置查询未就绪或失败一律按「关闭」处理 —— 不留
+  // 「看起来能点、点下去才发现打不开」的窗口（开关开启的部署上，首帧短暂置灰是这条取舍的代价）。
+  const promotionEnabled =
+    settingsQuery.data?.settings.emailAccountAdminPromotionEnabled === true;
+  /** 本页被政策拦下的行（开关关闭 + 邮件注册 + 当前 member）。空集 = 不渲染页面级说明。 */
+  const blockedPromotionIds = new Set(
+    items
+      .filter((item) =>
+        shouldBlockAdminPromotion({
+          promotionEnabled,
+          requestedRole: item.role === "admin" ? "member" : "admin",
+          currentRole: item.role,
+          targetHasEmailCredential: item.emailRegistered,
+        }),
+      )
+      .map((item) => item.id),
+  );
 
   // ===== Invite codes 客户端分页（后端上限 100 条，切片在客户端完成） =====
   const maxInvitePage = Math.max(0, Math.ceil(invites.length / INVITE_PAGE_SIZE) - 1);
@@ -328,6 +357,14 @@ export default function UsersPage() {
             <Button onClick={applyFilters}>Apply</Button>
           </div>
 
+          {/* 开关关闭且本页确有被拦的行时才出现（空集 = 这个部署上没人受影响，不必打扰） */}
+          {blockedPromotionIds.size > 0 ? (
+            <div className="mt-4 flex items-start gap-2 rounded-md border border-muted bg-muted/40 p-3 text-sm text-muted-foreground">
+              <ShieldAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+              <p>{ADMIN_PROMOTION_POLICY_NOTICE}</p>
+            </div>
+          ) : null}
+
           {usersQuery.isLoading ? (
             <p className="mt-4 text-sm text-muted-foreground">Loading users…</p>
           ) : usersQuery.isError ? (
@@ -356,6 +393,9 @@ export default function UsersPage() {
                     const isSelf = sessionUser?.id === item.id;
                     const isBusy = updateUser.isPending && updateUser.variables?.id === item.id;
                     const isDeleteBusy = deleteUser.isPending && deleteUser.variables === item.id;
+                    // 本行是否被账户安全政策拦下（与写边界同一判据；置灰**不是**隐藏原因：
+                    // 可及名与 title 都带上为什么，页面级说明另有一份 —— AC12/AC15）
+                    const promotionBlocked = blockedPromotionIds.has(item.id);
                     return (
                       <TableRow key={item.id}>
                         <TableCell>
@@ -379,7 +419,7 @@ export default function UsersPage() {
                             <Button
                               variant="ghost"
                               size="icon"
-                              disabled={isBusy || isSelf}
+                              disabled={isBusy || isSelf || promotionBlocked}
                               onClick={() =>
                                 updateUser.mutate({
                                   id: item.id,
@@ -389,11 +429,21 @@ export default function UsersPage() {
                               aria-label={
                                 isSelf
                                   ? "You cannot change your own role"
-                                  : item.role === "admin"
-                                    ? `Demote ${item.name} to member`
-                                    : `Promote ${item.name} to admin`
+                                  : promotionBlocked
+                                    ? `Promote ${item.name} to admin — ${ADMIN_PROMOTION_BLOCKED_REASON}`
+                                    : item.role === "admin"
+                                      ? `Demote ${item.name} to member`
+                                      : `Promote ${item.name} to admin`
                               }
-                              title={isSelf ? "You cannot change your own role" : item.role === "admin" ? "Demote to member" : "Promote to admin"}
+                              title={
+                                isSelf
+                                  ? "You cannot change your own role"
+                                  : promotionBlocked
+                                    ? ADMIN_PROMOTION_BLOCKED_REASON
+                                    : item.role === "admin"
+                                      ? "Demote to member"
+                                      : "Promote to admin"
+                              }
                             >
                               {item.role === "admin" ? (
                                 <ShieldMinus aria-hidden="true" />

@@ -47,6 +47,12 @@ export const userResponseSchema = z.object({
   status: z.enum(["active", "disabled"]),
   balance: z.number(),
   emailVerified: z.boolean(),
+  /**
+   * 是否为邮件注册的账户（accounts 表有 provider_id='credential' 行）。
+   * 管理画面据它决定提升操作是否置灰 —— 与写边界门控取同一个事实，
+   * 否则会出现「画面能点、API 拒绝」或「画面灰着、API 放行」（09-21-email-admin-promotion-switch）。
+   */
+  emailRegistered: z.boolean(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

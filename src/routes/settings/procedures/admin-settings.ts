@@ -1,7 +1,8 @@
 // GET /api/admin/settings — 当前生效的运行时默认配置（admin 只读，无修改端点）。
 // 数值来自各模块的唯一来源：DEFAULT_CACHE_TTL_SECONDS（schema 默认值）、
 // WINDOW_SECONDS（rate-limit.ts）、parseRetentionDays（cleanup.ts，env 覆盖）、
-// parseBonusAmount / isEmailVerificationEnabled（bonus.ts，env 覆盖）。
+// parseBonusAmount / isEmailVerificationEnabled（bonus.ts，env 覆盖）、
+// isEmailAccountAdminPromotionEnabled（lib/admin-promotion-policy.ts，env 覆盖）。
 // 赠金三项展示解析后的生效值（不是原始 env 字符串），与 requestLogRetentionDays 同口径。
 import type { Hono } from "hono";
 import type { AppEnv } from "../../../types";
@@ -14,6 +15,7 @@ import {
   parseBonusAmount,
 } from "../../../lib/bonus";
 import { parseRetentionDays } from "../../../lib/cleanup";
+import { isEmailAccountAdminPromotionEnabled } from "../../../lib/admin-promotion-policy";
 
 export function adminSettingsRoute(app: Hono<AppEnv>): void {
   app.get("/settings", async (c) => {
@@ -32,6 +34,10 @@ export function adminSettingsRoute(app: Hono<AppEnv>): void {
     const emailVerificationEnabled = isEmailVerificationEnabled(
       c.env.EMAIL_VERIFICATION_ENABLED,
     );
+    const emailAccountAdminPromotionEnabled =
+      isEmailAccountAdminPromotionEnabled(
+        c.env.EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED,
+      );
 
     logger.info("admin_settings_reported", {
       cacheTtlSeconds: DEFAULT_CACHE_TTL_SECONDS,
@@ -40,6 +46,7 @@ export function adminSettingsRoute(app: Hono<AppEnv>): void {
       signupBonusAmount,
       emailVerifyBonusAmount,
       emailVerificationEnabled,
+      emailAccountAdminPromotionEnabled,
     });
 
     return c.json({
@@ -51,6 +58,7 @@ export function adminSettingsRoute(app: Hono<AppEnv>): void {
         signupBonusAmount,
         emailVerifyBonusAmount,
         emailVerificationEnabled,
+        emailAccountAdminPromotionEnabled,
       },
     });
   });

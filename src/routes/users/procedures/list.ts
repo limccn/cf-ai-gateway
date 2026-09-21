@@ -7,6 +7,7 @@ import { users } from "../../../db/schema";
 import { createDb } from "../../../db";
 import { listUsersQuerySchema } from "../types";
 import { toUserResponse } from "../lib/convert";
+import { emailCredentialUserIds } from "../lib/email-credential";
 
 export function listUsersRoute(app: Hono<AppEnv>): void {
   app.get("/", zValidator("query", listUsersQuerySchema), async (c) => {
@@ -42,6 +43,13 @@ export function listUsersRoute(app: Hono<AppEnv>): void {
       .where(where);
     const total = totalRow[0]?.value ?? 0;
 
+    // 邮件注册判据（09-21-email-admin-promotion-switch）：**一次**批量查询回答整页，
+    // 不在 map 里按行走 N 次单查。查询范围 = 本页实际返回的 id（不是全表）。
+    const emailRegisteredIds = await emailCredentialUserIds(
+      db,
+      rows.map((row) => row.id),
+    );
+
     logger.info("users_listed", {
       total,
       limit: query.limit,
@@ -49,7 +57,7 @@ export function listUsersRoute(app: Hono<AppEnv>): void {
     });
     return c.json({
       success: true as const,
-      items: rows.map(toUserResponse),
+      items: rows.map((row) => toUserResponse(row, emailRegisteredIds.has(row.id))),
       total,
       limit: query.limit,
       offset: query.offset,
