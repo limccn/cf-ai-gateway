@@ -4,9 +4,22 @@ import type {
   ProviderType,
   CreateProviderInput,
   UpdateProviderInput,
+  ThinkingMode,
+  ProbeProtocol,
+  ProviderProbeResult,
+  TestProviderOutput,
 } from "../../../src/routes/providers/types";
 
-export type { ProviderResponse, ProviderType, CreateProviderInput, UpdateProviderInput };
+export type {
+  ProviderResponse,
+  ProviderType,
+  CreateProviderInput,
+  UpdateProviderInput,
+  ThinkingMode,
+  ProbeProtocol,
+  ProviderProbeResult,
+  TestProviderOutput,
+};
 
 export interface ListProvidersOutput {
   success: true;

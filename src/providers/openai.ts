@@ -17,6 +17,15 @@ const PATH_BY_KIND: Record<EndpointKind, string> = {
   embeddings: "/embeddings",
 };
 
+/**
+ * 上游端点 URL（尾部斜杠归一 + 按 kind 拼路径）。
+ * 抽成导出函数是为了让**协议探测**（src/routes/providers/lib/probe.ts）与 buildRequest 走
+ * 同一份路径规则 —— 两处各写一遍必然漂移，而漂移的后果是「探测报绿、生产打另一个 URL」。
+ */
+export function openaiEndpointUrl(baseUrl: string, kind: EndpointKind): string {
+  return `${baseUrl.replace(/\/+$/, "")}${PATH_BY_KIND[kind]}`;
+}
+
 /** 网关内部保留键：`_gateway_` 前缀（本地信号，如 Responses include reasoning），
  * 绝不转发给 OpenAI 上游（R4：一处剥离，通用安全；上游白名单构造不感知）。 */
 function stripGatewayReserved(
@@ -71,7 +80,6 @@ function buildRequest(
 ): UpstreamRequest {
   // 上游模型名保留 `[1m]` 后缀（路由映射后缀感知，PRD R1.2）
   const upstreamModel = resolveModelId(cfg.models, req.model).upstream;
-  const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
   let body = applyHttpBody<Record<string, unknown>>(
     stripReasoningRoundtrip(
       stripGatewayReserved({ ...req.body, model: upstreamModel }),
@@ -81,7 +89,7 @@ function buildRequest(
   );
   body = ensureStreamIncludeUsage(body).body;
   return {
-    url: `${baseUrl}${PATH_BY_KIND[req.kind]}`,
+    url: openaiEndpointUrl(cfg.baseUrl, req.kind),
     init: {
       method: "POST",
       headers: buildUpstreamHeaders(

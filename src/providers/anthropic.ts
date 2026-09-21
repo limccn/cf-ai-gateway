@@ -26,6 +26,17 @@ const ANTHROPIC_MESSAGES_PATH = "/v1/messages";
 /** Anthropic 要求 max_tokens 必填；未提供时取此默认值（M4 起按模型默认配置）。 */
 const DEFAULT_MAX_TOKENS = 4096;
 
+/**
+ * 上游 Messages 端点 URL。baseUrl 两种配置风格均兼容：
+ * `https://api.anthropic.com` 或 `https://api.anthropic.com/v1`（与 OpenAI 系配置风格统一时以 /v1 结尾）。
+ * 抽成导出函数是为了让**协议探测**（src/routes/providers/lib/probe.ts）与 buildRequest 走同一份
+ * 路径规则 —— 两处各写一遍必然漂移，而漂移的后果是「探测报绿、生产打另一个 URL」。
+ */
+export function anthropicMessagesUrl(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, "");
+  return `${base}${base.endsWith("/v1") ? "/messages" : ANTHROPIC_MESSAGES_PATH}`;
+}
+
 type JsonObject = Record<string, unknown>;
 
 // ============ 请求转换（OpenAI chat → Anthropic messages） ============
@@ -155,14 +166,8 @@ function buildRequest(
     }
   }
 
-  // baseUrl 两种配置风格均兼容：`https://api.anthropic.com` 或
-  // `https://api.anthropic.com/v1`（与 OpenAI 系配置风格统一时以 /v1 结尾）
-  const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
-  const messagesPath = baseUrl.endsWith("/v1")
-    ? "/messages"
-    : ANTHROPIC_MESSAGES_PATH;
   return {
-    url: `${baseUrl}${messagesPath}`,
+    url: anthropicMessagesUrl(cfg.baseUrl),
     init: {
       method: "POST",
       headers: buildUpstreamHeaders(
