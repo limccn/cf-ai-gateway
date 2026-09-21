@@ -35,6 +35,16 @@
 //        故断言放开到全视口，唯一例外是**手机 375 单列**（内容盒 214 < 环图宽度预算 222）——
 //        那里环图落到 `MIN_SIZE` 下限 80、图例保住 118，是「图例可读优先于两者等高」的既有取舍；
 //        该档不跳过，而是**显式断言它停在 80**，否则「某天它变成 120」会无人知道。
+//     ⑤ 柱图文字**不被裁切**（AC19，2026-09-18 追加；批次 K 修的既有缺陷）：svg 内
+//        每个 `<text>`（x 轴刻度 + 柱顶数值）的渲染矩形必须完整落在 svg 矩形内。
+//        首末桶的柱心距 svg 左右边缘仅 `barWidth/2`，标签以柱心居中时约半个标签宽落到
+//        视口外，被 svg 自身的 `overflow: hidden`（UA 样式表）裁成**残字** —— 375 实测最左
+//        渲染成 `-19`（应 `08-19`）、`00:00` 成 `0:00`；1440 下 `08-22` 左越 10px。
+//        **这条是既有断言集的盲区**：裁切与溢出是**相反**的失败模式，裁切时
+//        `scrollWidth === clientWidth` 恰恰成立 ⇒ 任何基于 scrollWidth 的溢出断言**全盲**
+//        （同一批 stg 画面测试里 33 条零溢出断言全绿，而残字就在屏幕上）。
+//        修法是首桶 `textAnchor="start"`、末桶 `"end"`（`x` 仍取柱心，故上面「首/末桶有标签」
+//        两条读 x 的断言不受影响）；构造性验证把锚点改回 `middle` ⇒ 五档视口齐 FAIL。
 //
 //   **刻度文字的 y 不写死**：它是各图自身 `height − 8`（usage 与 dashboard 传的高度不同），
 //   故在 readCharts 里按图从 DOM 现算。写死会静默把 tickY 指空 → 一个刻度都取不到、
@@ -179,6 +189,24 @@ const readCharts = () =>
             label: t.textContent,
           }));
           entry.values = valueTexts.map((t) => t.textContent);
+          // AC19 的量测源：**每个**文字的渲染矩形 vs svg 自身的矩形。
+          // 不用 scrollWidth 那套 —— svg 是 `overflow: hidden`（UA 样式表），被裁的部分
+          // 不产生滚动条，`scrollWidth === clientWidth` 恰恰**成立**，溢出断言全盲
+          // （本批缺陷正是这么溜过既有 266 条断言的）。越界量取**带符号的浮点数**，
+          // 不做四舍五入 —— 阈值判在 0.5px 上，取整会把 0.4px 的越界抹成 0。
+          // 四个方向一律「越界为正」：左/上是 svg 减文字，右/下是文字减 svg。
+          const svgRect = barsSvg.getBoundingClientRect();
+          entry.textBoxes = texts.map((t) => {
+            const r = t.getBoundingClientRect();
+            return {
+              label: t.textContent,
+              isTick: Number(t.getAttribute("y")) === tickY,
+              overLeft: svgRect.left - r.left,
+              overRight: r.right - svgRect.right,
+              overTop: svgRect.top - r.top,
+              overBottom: r.bottom - svgRect.bottom,
+            };
+          });
           // <title> 恒存在（数值标签在柱宽过窄时会降级为 tooltip），故它是**无损读数**的来源
           entry.titles = gs.map((g) => g.querySelector("title")?.textContent ?? "");
         } else if (donutSvg) {
@@ -359,6 +387,39 @@ for (const vp of VIEWPORTS) {
       `${tag} ${label} 末桶有标签`,
       chart.ticks.some((t) => Math.abs(t.x - chart.lastBarCenter) < 0.75),
       `末桶中心 x=${chart.lastBarCenter.toFixed(1)}`,
+    );
+
+    // ── AC19（2026-09-18 追加，批次 K）：svg 内所有文字完整可见（无裁切） ──
+    // 与上面两条「首/末桶有标签」互补：那两条只问标签**在不在**（读的是 `x` 对齐），
+    // 这条问它**看不看得全**。首末桶的柱心分别距 svg 左右边缘仅 `barWidth/2`，
+    // 标签以柱心居中（middle）时约半个标签宽落到视口外，被 svg 自身的
+    // `overflow: hidden`（UA 样式表，computed 实测确认）裁掉 —— 不报错、不溢出、
+    // 不换行，只是文字**少了一截**：375 下最左渲染成 `-19`（应 `08-19`）、
+    // `00:00` 渲染成 `0:00`；1440 下同样存在（`08-22` 左越 10px）。
+    //
+    // **为什么既有断言全绿而缺陷仍在**：裁切与溢出是**相反的失败模式** ——
+    // 溢出时 `scrollWidth > clientWidth`，裁切时二者恰恰**相等**（多余部分被吃掉了，
+    // 不产生滚动条）。故这条必须**逐元素量矩形**，任何基于 scrollWidth 的写法都对它全盲。
+    // 柱顶数值标签与刻度同画在柱心（同一处 `x + barWidth/2`），同源同风险，一并纳入 ——
+    // 当前数据恰好让首个非零桶落在中间才没暴露，换一天的数据就会露出来。
+    //
+    // 阈值 0.5px 是给亚像素渲染留的余量（实测越界量在 1~11px，判别力不受影响）。
+    const CLIP_TOL = 0.5;
+    const clippedTexts = chart.textBoxes.filter(
+      (b) =>
+        b.overLeft > CLIP_TOL || b.overRight > CLIP_TOL || b.overTop > CLIP_TOL || b.overBottom > CLIP_TOL,
+    );
+    check(
+      `${tag} ${label} svg 内 ${chart.textBoxes.length} 个文字（刻度+柱顶）完整可见，无被裁残字`,
+      clippedTexts.length === 0,
+      clippedTexts.length
+        ? clippedTexts
+            .map(
+              (b) =>
+                `"${b.label}"${b.isTick ? "(刻度)" : "(柱顶)"} 左越${b.overLeft.toFixed(1)} 右越${b.overRight.toFixed(1)} 上越${b.overTop.toFixed(1)} 下越${b.overBottom.toFixed(1)}`,
+            )
+            .join("; ")
+        : `柱宽 ${chart.barWidth}，全在界内`,
     );
   }
 

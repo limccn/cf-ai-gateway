@@ -82,6 +82,25 @@ function pickTickIndices(n: number, k: number): Set<number> {
   );
 }
 
+/**
+ * 首末柱上文字的锚点：柱心居中对**中间桶**没问题，对**首末桶**必然越界 ——
+ * 首桶柱心在 `barWidth/2`，居中后约半个标签宽落在 svg 左边之外；末桶柱心在
+ * `totalWidth − barWidth/2`，同理落在右边之外。而 svg 有 UA 样式表的
+ * `svg { overflow: hidden }`，越界部分**被裁掉且不产生滚动条**，于是标签变成残字
+ * （2026-09-18 stg 实测：375 下最左渲染成 `-19`，本应 `08-19`；`00:00` 渲染成 `0:00`）。
+ * 这类缺陷在「零横向溢出」断言眼里是**全绿**的 —— 溢出与裁切是相反的失败模式
+ * （裁切时 scrollWidth 恰恰等于 clientWidth）。见 memory `overflow-assertions-miss-clipping`。
+ *
+ * 首桶 `start` / 末桶 `end` 让标签整体落回视口内，**且 x 仍是柱心不变** ——
+ * verify-chart-readibility 的「首桶/末桶有标签」读的就是 x 对齐，故不受影响。
+ * 中间桶保持 `middle`（左右都有余量，居中才是对的）。
+ */
+function labelAnchor(index: number, n: number): "start" | "middle" | "end" {
+  if (index === 0) return "start";
+  if (index === n - 1) return "end";
+  return "middle";
+}
+
 export function BarChart({
   data,
   height = 200,
@@ -145,6 +164,10 @@ export function BarChart({
           const barHeight = Math.max(ratio * chartHeight, datum.value > 0 ? 2 : 0);
           const x = index * (barWidth + barGap);
           const y = VALUE_SPACE + chartHeight - barHeight;
+          // 柱顶数值标签与 x 轴刻度**同源同风险**：都画在柱心 `x + barWidth/2` 上，
+          // 故首末柱同样会被 svg 裁掉半个标签宽（只是当前数据恰好让首个非零桶落在中间
+          // 才没暴露）。同一套锚点规则一并处理，免得「换一天的数据就露出来」。
+          const anchor = labelAnchor(index, n);
           return (
             <g key={datum.label}>
               <title>
@@ -162,7 +185,7 @@ export function BarChart({
                 <text
                   x={x + barWidth / 2}
                   y={y - 5}
-                  textAnchor="middle"
+                  textAnchor={anchor}
                   fontSize="10"
                   fill="hsl(var(--muted-foreground))"
                 >
@@ -173,7 +196,7 @@ export function BarChart({
                 <text
                   x={x + barWidth / 2}
                   y={height - 8}
-                  textAnchor="middle"
+                  textAnchor={anchor}
                   fontSize="10"
                   fill="hsl(var(--muted-foreground))"
                 >
