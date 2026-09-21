@@ -93,7 +93,7 @@ export function UserButton({ compact = false }: { compact?: boolean }) {
           Profile
         </DropdownMenuItem>
         {/* 顺序（R1）：Profile → Change password → 分隔线 → Sign out。
-            改密是条件项（无凭据账号不渲染），见 ChangePasswordMenuItem。 */}
+            改密项**恒常驻**，可用性由判据门控（未就绪 / 无凭据一律置灰），见 ChangePasswordMenuItem。 */}
         <ChangePasswordMenuItem onSelect={() => setChangePasswordOpen(true)} />
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void handleSignOut()}>
@@ -108,7 +108,8 @@ export function UserButton({ compact = false }: { compact?: boolean }) {
 }
 
 /**
- * 账户菜单里的改密入口（09-17-password-menu-and-dialog-overflow，design §3.1/§3.3）。
+ * 账户菜单里的改密入口（09-17-password-menu-and-dialog-overflow §3.1/§3.3；
+ * **09-21 由「占位槽 + 条件渲染」改为「常驻 + 置灰门控」**，见下）。
  *
  * **挂载时机 = 菜单打开时机**（隐含契约，来自 dropdown-menu.tsx 的面板渲染式
  * `{open && pos ? createPortal(…{children}…) : null}` —— children 只在打开时挂载）。
@@ -117,48 +118,33 @@ export function UserButton({ compact = false }: { compact?: boolean }) {
  * **若将来把面板改成常驻挂载，本入口会静默退化成「页面加载即发请求」** —— 改那里必须同步重审本条。
  *
  * 判据唯一真源是服务端下发的 hasPassword（design §4）：前端不得从 provider / 登录方式推导。
- * 解析为 false 与请求失败一律**不渲染入口**（fail-closed），延续既有决策 D5 ——
- * 不做置灰，置灰会引入一个永远不可用的控件。
+ *
+ * **09-21 变更（用户裁决，推翻 09-17 的占位槽与决策 D5「不置灰」）**：本项**无条件渲染**，
+ * 未就绪与不可用一律置灰（`aria-disabled`），就绪且 `hasPassword === true` 才可点击。三点理由：
+ *   ① 位移**彻底**消失 —— 项常驻、菜单高度恒定，其下方 Sign out 在任何时序下都不动。
+ *      09-17 的占位槽只护住了「查询中」这一段；判据最终解析为 false（OAuth 用户）时占位槽连同空间
+ *      一起消失、下方项上移一次，那笔残余位移是当时「不为一次性的、无交互元素参与的上移引入常驻空位」
+ *      的取舍（spec/components.md 的 async-entry-placeholder 原记录）—— 本次由用户改判；
+ *   ② 灰项本身携带信息（「改密在这里，只是现在用不了」）；09-17 的不可见占位盒对用户是**零信息**，
+ *      看起来就只是菜单里少一项；
+ *   ③ 代价是 OAuth 账号会看到一个**永不可用**的项 —— 正是 D5 当初否定的「永远不可用的控件」，
+ *      用户明示接受。
+ *
+ * 失败方向不变（fail-closed）：解析为 false、查询失败、查询中三者都落到**不可点击**，
+ * 绝不出现「默认可点、点下去才发现打不开」—— 死键是可见的，死表单不是。
+ * 刻意**不**为置灰态加「为什么不可用」的 title：本组件区分不了「无密码」与「查询失败」，
+ * 而两者该说的话不同，一句通用文案只会更含糊。
  */
 function ChangePasswordMenuItem({ onSelect }: { onSelect: () => void }) {
   const { data, isPending } = useProfile();
 
-  // 图标 + 文案在占位盒与真实项之间**共用同一份 JSX**：各写一遍必然漂移
-  // （图标尺寸 / 文案改一处漏一处），而 AC4 是拿「逐像素同高」取证的，漂移会直接击穿它。
-  const label = (
-    <>
+  // 唯一判据：查询已就绪 **且** 服务端说有密码。其余一切（查询中 / 解析为 false / 查询失败）都不可用。
+  const enabled = !isPending && data?.profile.hasPassword === true;
+
+  return (
+    <DropdownMenuItem disabled={!enabled} onSelect={onSelect}>
       <KeyRound aria-hidden="true" />
       Change password
-    </>
+    </DropdownMenuItem>
   );
-
-  if (isPending) {
-    // 占位槽：判据未就绪时先占住与真实菜单项**逐像素相同**的一格，就绪后原地替换，
-    // 其下方各项的 y 坐标不动。这里的位移是**正确性问题**而非观感问题 ——
-    // 用户此刻可能正朝 Sign out 移动指针，项一旦下移就是点错项。
-    //
-    // 为什么不能用 <DropdownMenuItem className="invisible">：它带 role="menuitem"，会被
-    // dropdown-menu.tsx 的 moveFocus() 与首焦点 effect 的 querySelectorAll('[role="menuitem"]')
-    // 选中；而 visibility:hidden 的元素上 focus() 是**静默 no-op** —— 方向键落到它上面
-    // 表现为「按了没反应」（焦点没动），用户以为键盘坏了。故占位盒是**无 role 的普通 <div>**，
-    // aria-hidden 亦保证它不进可访问性树。
-    //
-    // 盒类与 DropdownMenuItem 的盒类同源（dropdown-menu.tsx 的 item 类）：**改一处必须改两处**，
-    // 漂移由 AC4 的逐像素高度断言兜底。
-    return (
-      <div
-        aria-hidden="true"
-        className="invisible flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm [&_svg]:size-4"
-      >
-        {label}
-      </div>
-    );
-  }
-
-  // isPending 为假后：hasPassword 非 true（OAuth 形态用户）、或查询失败（data 为 undefined）
-  if (data?.profile.hasPassword !== true) {
-    return null;
-  }
-
-  return <DropdownMenuItem onSelect={onSelect}>{label}</DropdownMenuItem>;
 }

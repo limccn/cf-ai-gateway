@@ -221,11 +221,26 @@ export function DropdownMenu({
 export interface DropdownMenuItemProps {
   /** 选中回调；菜单先关闭并交还焦点，再执行本回调（回调里打开 Dialog 时焦点随之转移）。 */
   onSelect: () => void;
+  /**
+   * 不可用态（2026-09-21）：视觉置灰、点击与 Enter/Space 一律 no-op，**但键仍留在焦点序列里**。
+   *
+   * 刻意**不用原生 `disabled` 属性**：原生 disabled 的元素不可聚焦，而本文件的 `moveFocus()` 与
+   * 首焦点 effect 都是按 `[role="menuitem"]` 选人的 —— `focus()` 在不可聚焦的元素上是**静默
+   * no-op**，于是 ↑/↓ 落到它上面表现为「按了没反应」（焦点没动）。这与本文件顶部记的
+   * `visibility: hidden` 占位盒是**同一个坑**，只是触发条件从「不可见」换成了「不可聚焦」。
+   * `aria-disabled` 则如实告诉辅助技术「这一项不可用」，同时元素仍可获得焦点。
+   */
+  disabled?: boolean;
   className?: string;
   children: ReactNode;
 }
 
-export function DropdownMenuItem({ onSelect, className, children }: DropdownMenuItemProps) {
+export function DropdownMenuItem({
+  onSelect,
+  disabled = false,
+  className,
+  children,
+}: DropdownMenuItemProps) {
   const menu = useContext(DropdownMenuContext);
   if (!menu) {
     throw new Error("DropdownMenuItem must be rendered inside <DropdownMenu>");
@@ -234,12 +249,27 @@ export function DropdownMenuItem({ onSelect, className, children }: DropdownMenu
     <button
       type="button"
       role="menuitem"
+      // 可用时整个属性不输出（`false || undefined`），而不是输出 aria-disabled="false" ——
+      // 前者让「按 aria-disabled 普查菜单」的断言能干净地数出不可用项。
+      aria-disabled={disabled || undefined}
       tabIndex={-1}
       className={cn(
-        "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+        "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none transition-colors [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+        // 可用态：hover 与 focus 都给强调背景（既有行为，一字未改）。
+        // 不可用态：**不给 hover 反馈**（免得看着像能点），但保留半强度的 focus 背景 ——
+        // 键仍可聚焦，若连焦点指示都没有，用户就分不清「焦点不在菜单里」与「焦点停在这一项上」，
+        // 那还是「按了没反应」的观感。
+        disabled
+          ? "cursor-default text-muted-foreground/50 focus:bg-accent/50"
+          : "hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground",
         className,
       )}
       onClick={() => {
+        // aria-disabled 只是语义，**不拦原生 click** —— 拦截必须在这里做。
+        // 不可用时既不关菜单也不执行回调：菜单开着让用户接着选别的项，比关掉更像个「死键」。
+        if (disabled) {
+          return;
+        }
         menu.close(true);
         onSelect();
       }}
