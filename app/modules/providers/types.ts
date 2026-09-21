@@ -8,6 +8,8 @@ import type {
   ProbeProtocol,
   ProviderProbeResult,
   TestProviderOutput,
+  ProviderPingResult,
+  PingProviderOutput,
 } from "../../../src/routes/providers/types";
 
 export type {
@@ -19,6 +21,8 @@ export type {
   ProbeProtocol,
   ProviderProbeResult,
   TestProviderOutput,
+  ProviderPingResult,
+  PingProviderOutput,
 };
 
 export interface ListProvidersOutput {

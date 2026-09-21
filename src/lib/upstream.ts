@@ -35,6 +35,24 @@ export async function fetchUpstream(
 }
 
 /**
+ * 网络层失败（没拿到任何响应头那一类）→ 给管理员看的错误文案。
+ *
+ * **唯一来源**：协议探测（`routes/providers/lib/probe.ts` 的网络分支）与联通性 ping
+ * （`routes/providers/lib/ping.ts`）都走这里 —— 同一个故障必须在两处读起来一模一样，
+ * 否则「Timed out after 10000ms」与「连不上，超时」这种漂移会让人以为是两种毛病。
+ * 正文读取阶段的失败**不**归这里（那条路径有真实状态码与已测到的 TTFB，形态不同）。
+ */
+export function describeFetchFailure(error: unknown, timeoutMs: number): string {
+  if (error instanceof UpstreamTimeoutError) {
+    return `Timed out after ${timeoutMs}ms`;
+  }
+  return error instanceof Error ? error.message : "Unknown network error";
+}
+
+/** 上游错误消息回显上限（防上游把整篇 HTML 错误页塞进 UI）。 */
+export const UPSTREAM_ERROR_MAX_CHARS = 300;
+
+/**
  * 上游非 2xx 响应 → 可读错误消息（OpenAI 风格 `{error:{message}}` 优先提取；
  * 非 JSON 响应退回状态行）。
  */
