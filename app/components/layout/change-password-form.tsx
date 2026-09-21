@@ -1,6 +1,7 @@
 // 修改密码表单（09-17-change-password，design §4）。
 //
-// 只在 Profile 弹窗内、且服务端下发 hasPassword === true 时挂载。本组件**不自己判断**
+// 只在 ChangePasswordDialog 内挂载（09-17 已从 Profile 弹窗搬出）；能走到这一步本身就意味着
+// 服务端下发过 hasPassword === true（菜单项据此才可点击）。本组件**不自己判断**
 // 「这个用户能不能改密码」—— 判据唯一来源是 GET /api/me/profile 的 hasPassword
 // （design §3.2）：前端没有 accounts 表，任何本地推导都会与库漂移，而漂移的两个方向
 // 代价不对称（见 get-profile.ts 文件头）。
