@@ -12,7 +12,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { Ban, Copy, Pencil, Plus, Search } from "lucide-react";
+import { Ban, Check, Copy, Pencil, Plus, Search } from "lucide-react";
 import { z } from "zod";
 import { useSession } from "@/hooks/use-session";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
@@ -21,12 +21,12 @@ import { useUpdateKey } from "@/modules/keys/hooks/use-update-key";
 import { useRevokeKey } from "@/modules/keys/hooks/use-revoke-key";
 import { useUsers } from "@/modules/users/hooks/use-users";
 import type { CreateKeyOutput, KeyResponse } from "@/modules/keys/types";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, formatNumber } from "@/lib/format";
 import { copyToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -323,9 +323,19 @@ function PlaintextDialog({ result, onClose }: PlaintextDialogProps) {
             </p>
           ) : null}
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={handleCopy}>
-              <Copy aria-hidden="true" />
-              {copied ? "Copied" : "Copy"}
+            {/* 只有图标（批次 L，2026-09-21 用户裁决：copy 按钮统一去文字）。
+                与 QuickStart 的 CopyBlock 同款：Check 图标即「已复制」反馈。 */}
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={handleCopy}
+              aria-label={copied ? "Copied" : "Copy key to clipboard"}
+            >
+              {copied ? (
+                <Check className="text-success" aria-hidden="true" />
+              ) : (
+                <Copy aria-hidden="true" />
+              )}
             </Button>
             <Button onClick={onClose}>Done</Button>
           </div>
@@ -403,11 +413,10 @@ await anthropic.messages.create({ model: "claude-sonnet-5", max_tokens: 1024, me
   },
 ];
 
-/** 等宽代码块 + Copy 按钮。每个实例自持复制态：切换协议时面板整体卸载重建，
- * 「Copied」不会跨协议残留。 */
+/** 等宽代码块 + 右上角图标 Copy 按钮。每个实例自持复制态：切换协议时面板整体卸载重建，
+ * 「已复制」不会跨协议残留。 */
 interface CopyBlockProps {
-  /** 小节标题。与 Copy **同排**，代码块因此能独占整行宽度 ——
-   * 若把 Copy 放在代码块旁边，窄屏下会被挤到只剩 ~180px，curl 截成 `-H "Authorizati` 不可读。 */
+  /** 小节标题，**独占一行**（批次 L 起 Copy 已移入代码块内，标题行不再有别的元素）。 */
   label: ReactNode;
   value: string;
   /** 剪贴板不可用时的提示语（须说清下一步怎么办） */
@@ -448,19 +457,30 @@ function CopyBlock({ label, value, errorHint, multiline = false }: CopyBlockProp
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-        <p className="text-sm font-medium leading-none">{label}</p>
-        <Button variant="outline" size="sm" onClick={handleCopy}>
-          <Copy aria-hidden="true" />
-          {copied ? "Copied" : "Copy"}
-        </Button>
-      </div>
-      <div className="rounded-md border bg-muted/50 p-3">
+      <p className="text-sm font-medium leading-none">{label}</p>
+      {/* 代码块 + 内嵌右上角 copy（批次 L，2026-09-21 用户裁决：移入「textarea 表示区域内的
+          右上角与 textarea 融为一体」+「只有图标」）。按钮绝对定位在**代码块内部**——
+          原先它独占标题行右端，等于把动作摆在离被复制内容更远的地方，且窄屏下与长标题抢位置。
+          `pr-9`（36px）给每行右边让出按钮的宽度：按钮占 [右-34, 右-6]，32px 的 `pr-8` 会与
+          `break-all` 的内容**擦边** 2px，故取 36px 留 4px 净空。 */}
+      <div className="relative rounded-md border bg-muted/50 p-3">
         {multiline ? (
-          <pre className="overflow-x-auto font-mono text-xs leading-relaxed">{value}</pre>
+          <pre className="overflow-x-auto pr-9 font-mono text-xs leading-relaxed">{value}</pre>
         ) : (
-          <code className="block break-all font-mono text-sm">{value}</code>
+          <code className="block break-all pr-9 font-mono text-sm">{value}</code>
         )}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleCopy}
+          /* 无可见文字 ⇒ 可访问名只能由 aria-label 提供，且随状态切换：
+             屏幕阅读器重新聚焦时读到的是当前状态，而不是恒定的 "Copy"。
+             h-7/w-7 覆盖 size="icon" 的 h-9/w-9（twMerge 同组后者胜），以贴合代码块的紧凑感。 */
+          aria-label={copied ? "Copied" : "Copy to clipboard"}
+          className="absolute right-1.5 top-1.5 h-7 w-7 text-muted-foreground hover:text-foreground"
+        >
+          {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+        </Button>
       </div>
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </div>
@@ -502,10 +522,9 @@ function QuickStart() {
     <Card className="mb-6">
       <CardHeader>
         <CardTitle>Quick start</CardTitle>
-        <CardDescription>
-          Point an OpenAI- or Anthropic-compatible client at the gateway with a key from the list
-          above.
-        </CardDescription>
+        {/* 副标题已删（批次 L，2026-09-21 用户裁决）：「Point an OpenAI- or Anthropic-compatible
+            client at the gateway with a key from the list above.」—— 标题之下紧接着就是协议分段
+            控件与 base URL，这句话既没给新信息又占一行。 */}
       </CardHeader>
       <CardContent className="space-y-4">
         <div
@@ -514,6 +533,11 @@ function QuickStart() {
           className="flex flex-wrap gap-1 rounded-md border p-1"
         >
           {PROTOCOL_GUIDES.map((item, index) => (
+            /* 用 buttonVariants 而非 <Button>：本控件必须是**真 button 且带 ref**（roving tabIndex
+               的焦点管理要 tabRefs 数组），而 ButtonProps 继承的 ButtonHTMLAttributes 不含 ref。
+               cva 与 <Button> 同源 ⇒ 尺寸/圆角/字号与 dashboard 的 Time Filter 逐字节相同。
+               未选中用 ghost 而非 dashboard 的 outline：外层 tablist 已有边框，outline 会套出双层线；
+               ghost 正是原先手写类名的等效物（无底色 + hover 高亮）。 */
             <button
               key={item.label}
               ref={(node) => {
@@ -528,13 +552,11 @@ function QuickStart() {
               onClick={() => setActiveIndex(index)}
               onKeyDown={(event) => handleTabKeyDown(event, index)}
               className={cn(
+                buttonVariants({ variant: index === activeIndex ? "default" : "ghost", size: "sm" }),
                 // 窄屏三块放不下同一行（400px 下内容盒仅 ~239px，三个标签合计 ~399px），必然换行。
                 // max-sm:flex-auto 让换行后的每块各自撑满本行 —— 等宽的竖列，而不是参差的散按钮。
                 // 不能用 flex-1：它把 basis 设为 0，三块反而会挤进同一行再等分，文字被压爆。
-                "rounded px-3 py-1.5 text-sm font-medium transition-colors max-sm:flex-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                index === activeIndex
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                "max-sm:flex-auto",
               )}
             >
               {item.label}
@@ -645,15 +667,23 @@ export default function KeysPage() {
         <CardHeader className="flex-col items-start gap-3 space-y-0 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle>API keys</CardTitle>
-            {viewingOther ? (
-              <CardDescription>
-                Viewing keys of{" "}
-                {/* UserResponse.id 是 string（userResponseSchema 把整型 id 序列化成字符串），
-                    而 keys 的 userId 是 number —— 必须显式转换，否则恒 find 不到、回落成 user #N。 */}
-                {users.find((u) => Number(u.id) === viewingUserId)?.name ?? `user #${viewingUserId}`}.
-                Revoke is permanent; new keys are always created under your own account.
-              </CardDescription>
-            ) : null}
+            {/* 副标题（批次 L，2026-09-21 用户裁决）：删掉「new keys are always created under your
+                own account.」—— 「Create key 恒建在当前登录者名下」这件事，浏览他人 Key 时**不显示**
+                该按钮（见上方 PageHeader actions）本身已经表达了，再写一句是冗余；
+                同时由「仅 viewingOther 时显示」改为**常显**的 `<N> total. Revoke is permanent.`，
+                与 providers / models 两页的 `x,xxx total` 同一范式。
+                计数取查询返回的 total 而非 items.length —— useKeys 默认 limit=50，Key 多时长度会截断。 */}
+            <CardDescription>
+              {viewingOther
+                ? `Viewing keys of ${
+                    /* UserResponse.id 是 string（userResponseSchema 把整型 id 序列化成字符串），
+                       而 keys 的 userId 是 number —— 必须显式转换，否则恒 find 不到、回落成 user #N。 */
+                    users.find((u) => Number(u.id) === viewingUserId)?.name ?? `user #${viewingUserId}`
+                  }. `
+                : null}
+              {keysQuery.isLoading ? "…" : formatNumber(keysQuery.data?.total ?? 0)} total. Revoke is
+              permanent.
+            </CardDescription>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
             {isAdmin ? (

@@ -45,9 +45,8 @@ interface MetricSpec {
   metric: "requests" | "cost" | "tokens";
   label: string;
   icon: React.ReactNode;
-  /** 柱图卡标题/说明：随窗口变化（"Spend today" / "Spend per day" …），取自 RANGE_OPTIONS。 */
+  /** 柱图卡标题：随窗口变化（"Spend today" / "Spend per day" …），取自 RANGE_OPTIONS。 */
   chartTitle: (option: RangeOption) => string;
-  chartDesc: (option: RangeOption) => string;
   format: (value: number) => string;
 }
 
@@ -59,7 +58,6 @@ const METRICS: MetricSpec[] = [
     label: "Spend",
     icon: <CircleDollarSign className="size-4" />,
     chartTitle: (o) => o.costTitle,
-    chartDesc: (o) => o.costDesc,
     format: formatUsdShort,
   },
   {
@@ -67,7 +65,6 @@ const METRICS: MetricSpec[] = [
     label: "Requests",
     icon: <Zap className="size-4" />,
     chartTitle: (o) => o.title,
-    chartDesc: (o) => o.desc,
     format: formatNumber,
   },
   {
@@ -75,7 +72,6 @@ const METRICS: MetricSpec[] = [
     label: "Tokens",
     icon: <Coins className="size-4" />,
     chartTitle: (o) => o.tokensTitle,
-    chartDesc: (o) => o.tokensDesc,
     format: formatNumberCompact,
   },
 ];
@@ -240,7 +236,13 @@ export default function DashboardPage() {
               <Card className="flex flex-1 flex-col">
                 <CardHeader>
                   <CardTitle>{spec.chartTitle(rangeMeta)}</CardTitle>
-                  <CardDescription>{spec.chartDesc(rangeMeta)}</CardDescription>
+                  {/* 副标题显示**本窗口合计**（批次 L，2026-09-21 用户裁决）。
+                      原副标题是 "Daily request count over the last 30 days" 这类**复述标题**的话
+                      （标题已是 "Requests per day"），按用户「删除冗余的文字描述」改掉。
+                      格式各按本指标现用 format，与上方值卡**同一个数、同一串字符**。 */}
+                  <CardDescription>
+                    {usageQuery.isLoading ? "…" : `${spec.format(total)} total`}
+                  </CardDescription>
                 </CardHeader>
                 <CardContent>
                   {/* dense：本卡内容盒仅 ~270~310px 而桶有 24~30 个，常规柱宽/间距会撑出横向滚动 */}

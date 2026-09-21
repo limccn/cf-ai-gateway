@@ -153,28 +153,30 @@ export default function BillingPage() {
               <CreditCard className="size-4 text-primary" aria-hidden="true" />
               Ledger summary
             </CardTitle>
-            <CardDescription>Totals from your transaction history</CardDescription>
+            <CardDescription>Totals from your history</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">Total transactions</span>
+              <span className="text-muted-foreground">Total</span>
               <span className="font-medium">{formatNumber(total)}</span>
             </div>
             {/* 类型筛选（批次 I）：原是本卡的一行静态罗列
                 「Types | recharge / usage / adjust / signup_bonus / email_verify_bonus」，
                 现改为承接流水表原先那个下拉 —— 该卡因此从「只读摘要」变成**可操作的筛选器**，
                 选中的类型即时作用于下方流水表（即选即查，与 usage 页同一范式）。
-                竖排全宽而非「标签 + 右侧下拉」并排：本卡在 lg 起是 1/3 列，内容盒仅 ~215px，
-                并排的 w-40 下拉会与标签一起把行挤爆。 */}
-            <div className="space-y-2">
-              <Label htmlFor="billing-type" className="block font-normal text-muted-foreground">
-                Transaction type
+                批次 L（2026-09-21）由竖排改回**一行**：标签从 "Transaction type" 缩成 "Type" 后
+                只用 ~28px，本卡最窄处（lg 起 1/3 列，内容盒 ~215px）也放得下 —— 当初竖排是因为
+                长标签 + `w-40` 固定宽下拉会挤爆，前提随标签变短已不成立。下拉取 `flex-1 min-w-0`
+                而非 `w-40`：`min-w-0` 是它在窄列里不被内容顶宽的关键（本仓 grid 老坑的同族）。 */}
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="billing-type" className="shrink-0 font-normal text-muted-foreground">
+                Type
               </Label>
               <Select
                 id="billing-type"
                 value={typeFilter}
                 onChange={(e) => switchTypeFilter(e.target.value as TypeFilter)}
-                className="w-full"
+                className="min-w-0 flex-1"
               >
                 <option value="all">All types</option>
                 <option value="recharge">Recharge</option>

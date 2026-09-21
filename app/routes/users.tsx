@@ -1,6 +1,7 @@
 // /users — 用户管理（M6 6.3，admin）：列表搜索/过滤、角色与状态操作、邀请码管理。
 import { useEffect, useState, type FormEvent } from "react";
 import {
+  Check,
   Copy,
   Search,
   ShieldMinus,
@@ -77,7 +78,7 @@ export default function UsersPage() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteFieldError, setInviteFieldError] = useState<string | null>(null);
   const [createdCode, setCreatedCode] = useState<string | null>(null);
-  /** 最近一次成功复制的邀请码（按卡片显示 "Copied"，2s 复位）。 */
+  /** 最近一次成功复制的邀请码（对应卡片/弹窗的 copy 按钮切成对勾图标，2s 复位）。 */
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   // ===== Invite codes 客户端分页状态（slice 逻辑见 invites 派生区） =====
@@ -203,9 +204,24 @@ export default function UsersPage() {
                         expires {formatDateTime(invite.expiresAt)}
                       </p>
                     </div>
-                    <Button variant="ghost" size="sm" onClick={() => handleCopy(invite.code)} disabled={invite.status !== "active"}>
-                      <Copy aria-hidden="true" />
-                      {copiedCode === invite.code ? "Copied" : "Copy"}
+                    {/* 只有图标（批次 L，2026-09-21 用户裁决：copy 按钮统一去文字）。
+                        一张卡一个按钮、编号还挨着，可访问名必须点名**是哪条**邀请码，
+                        否则屏幕阅读器只报一串同名的 "Copy"。成对复制按钮的新范式见 keys 页。 */}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0"
+                      onClick={() => handleCopy(invite.code)}
+                      disabled={invite.status !== "active"}
+                      aria-label={
+                        copiedCode === invite.code ? "Copied" : `Copy invite code ${invite.code}`
+                      }
+                    >
+                      {copiedCode === invite.code ? (
+                        <Check className="text-success" aria-hidden="true" />
+                      ) : (
+                        <Copy aria-hidden="true" />
+                      )}
                     </Button>
                   </div>
                 ))}
@@ -528,9 +544,17 @@ export default function UsersPage() {
               <code className="block break-all font-mono text-sm">{createdCode}</code>
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => handleCopy(createdCode)}>
-                <Copy aria-hidden="true" />
-                {copiedCode === createdCode ? "Copied" : "Copy"}
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => handleCopy(createdCode)}
+                aria-label={copiedCode === createdCode ? "Copied" : "Copy invite code"}
+              >
+                {copiedCode === createdCode ? (
+                  <Check className="text-success" aria-hidden="true" />
+                ) : (
+                  <Copy aria-hidden="true" />
+                )}
               </Button>
               <Button onClick={() => setCreatedCode(null)}>Done</Button>
             </div>
