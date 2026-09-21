@@ -87,7 +87,12 @@ function bucketLabel(key: string, granularity: "hour" | "day"): string {
  * **用词（批次 J，2026-09-18 用户裁决）**：用户可见文案统一用 **spend**，不再用 cost
  * （原文「全局统一 spend 和 cost 的词语表述，优先使用 spend」）。`costTitle` / `costDesc`
  * 这类**字段名**刻意保留：裁决同时限定「只改用户可见文案，不要动后台和表」，
- * 改字段名属纯 churn，且会与后端 `cost` 字段名分叉。 */
+ * 改字段名属纯 churn，且会与后端 `cost` 字段名分叉。
+ *
+ * **时区说明（批次 L，2026-09-21 用户裁决）**：原本每个 today/yesterday 的描述都缀着
+ * `(local timezone)` —— 三张卡各复述一遍同一件事，是冗余。按用户「所有卡片中有关 local
+ * timezone 的描述直接删除」全部摘掉，改为**每页末尾一条**独立说明（dashboard 早有一条，
+ * usage 页本批补上）。见 app/routes/dashboard.tsx 与 app/routes/usage.tsx 页尾的 `<p>`。 */
 export const RANGE_OPTIONS: Array<{
   value: UsageRange;
   label: string;
@@ -102,21 +107,21 @@ export const RANGE_OPTIONS: Array<{
     value: "today",
     label: "Today",
     title: "Requests today",
-    desc: "Hourly request count (local timezone)",
+    desc: "Hourly request count",
     costTitle: "Spend today",
-    costDesc: "Hourly spend (local timezone)",
+    costDesc: "Hourly spend",
     tokensTitle: "Tokens today",
-    tokensDesc: "Hourly token usage, input + output (local timezone)",
+    tokensDesc: "Hourly token usage, input + output",
   },
   {
     value: "yesterday",
     label: "Yesterday",
     title: "Requests yesterday",
-    desc: "Hourly request count (local timezone)",
+    desc: "Hourly request count",
     costTitle: "Spend yesterday",
-    costDesc: "Hourly spend (local timezone)",
+    costDesc: "Hourly spend",
     tokensTitle: "Tokens yesterday",
-    tokensDesc: "Hourly token usage, input + output (local timezone)",
+    tokensDesc: "Hourly token usage, input + output",
   },
   {
     value: "last14",

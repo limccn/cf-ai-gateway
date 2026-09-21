@@ -1,14 +1,14 @@
 // /models — 模型价格表管理（M6 6.3，admin）：CRUD 表格。
 // 单价单位：USD / 每百万 tokens（与后端 seed.sql 一致）。
 import { useState, type FormEvent } from "react";
-import { Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Info, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { z } from "zod";
 import { useModels } from "@/modules/models/hooks/use-models";
 import { useCreateModel } from "@/modules/models/hooks/use-create-model";
 import { useUpdateModel } from "@/modules/models/hooks/use-update-model";
 import { useDeleteModel } from "@/modules/models/hooks/use-delete-model";
 import type { ModelResponse } from "@/modules/models/types";
-import { formatDateTime, formatUsd } from "@/lib/format";
+import { formatDateTime, formatNumber, formatUsd } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
@@ -334,11 +334,9 @@ export default function ModelsPage() {
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle>Model pricing</CardTitle>
-            <CardDescription>
-              USD per 1M tokens. Arrows show short → long tiers: short = input ≤ 128K tokens,
-              long = input &gt; 128K (longer context bills both input and output at the long
-              rate); cached = input served from cache.
-            </CardDescription>
+            {/* 副标题（批次 L，2026-09-21 用户裁决）：改显合计 `<N> total`；原先那段分层规则说明
+                （短/长档、缓存价）**移到卡片最下方**的单条 information 文本 —— 见 CardContent 末尾。 */}
+            <CardDescription>{formatNumber(items.length)} total</CardDescription>
           </div>
           {items.length > 0 ? (
             <div className="relative w-40 shrink-0">
@@ -434,6 +432,17 @@ export default function ModelsPage() {
               </TableBody>
             </Table>
           )}
+          {/* 分层规则说明（批次 L，2026-09-21 用户裁决：原副标题下沉到卡片最下方、独立成条）。
+              与 settings 页「These values are compile-time constants…」同款信息条。
+              CardContent 是 p-0（表格齐边），故本条的左右下边距得自己给。 */}
+          <div className="mx-6 mb-6 mt-4 flex items-start gap-2 rounded-md border border-muted bg-muted/40 p-3 text-sm text-muted-foreground">
+            <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <p>
+              USD per 1M tokens. Arrows show short → long tiers: short = input ≤ 128K tokens,
+              long = input &gt; 128K (longer context bills both input and output at the long
+              rate); cached = input served from cache.
+            </p>
+          </div>
         </CardContent>
       </Card>
 

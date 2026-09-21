@@ -602,6 +602,13 @@ export default function UsagePage() {
           )}
         </CardContent>
       </Card>
+
+      {/* 时区说明（批次 L，2026-09-21）：原先 today/yesterday 三张卡的描述各缀一句
+          "(local timezone)"，同一件事复述三遍。按用户裁决摘掉，收成**页尾一条**——
+          与 dashboard 页尾同款，两页口径一致。 */}
+      <p className="mt-6 text-xs text-muted-foreground">
+        Quick ranges are bucketed in your local timezone; a custom range uses the dates as picked.
+      </p>
     </PageContainer>
   );
 }

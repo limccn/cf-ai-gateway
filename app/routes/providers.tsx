@@ -10,7 +10,7 @@ import { useUpdateProvider } from "@/modules/providers/hooks/use-update-provider
 import { useDeleteProvider } from "@/modules/providers/hooks/use-delete-provider";
 import type { ProviderResponse } from "@/modules/providers/types";
 import { httpOptionsSchema } from "../../src/routes/providers/types";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, formatNumber } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
@@ -492,6 +492,9 @@ function ProviderFormDialog({ open, onOpenChange, editing }: ProviderFormDialogP
 
 // ============= 页面 =============
 
+/** 每页条数（批次 L，2026-09-21 用户裁决「下方列表做好分页，每页显示 20 条」）。 */
+const PAGE_SIZE = 20;
+
 export default function ProvidersPage() {
   const providersQuery = useProviders();
   const updateProvider = useUpdateProvider();
@@ -515,6 +518,15 @@ export default function ProvidersPage() {
       )
     : items;
 
+  // 分页（批次 L，2026-09-21 用户裁决）：前端内存分页 —— useProviders 一次返回全部
+  // （GET /api/providers 无 limit/offset 参数，返回体也不带 total），过滤同样是内存的，
+  // 故页码与切片都跟着 filtered 走。clamp 而非回写 state：搜索后总数变少时越界页会被钳到末页，
+  // 不回写就少一次渲染，也不会在输入过程中产生「先归零再跳末页」的抖动。
+  const [page, setPage] = useState(0);
+  const maxPage = Math.max(0, Math.ceil(filtered.length / PAGE_SIZE) - 1);
+  const safePage = Math.min(page, maxPage);
+  const pageItems = filtered.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+
   return (
     <PageContainer>
       <PageHeader
@@ -532,7 +544,12 @@ export default function ProvidersPage() {
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle>Providers</CardTitle>
-            <CardDescription>Add and manage upstream providers</CardDescription>
+            {/* 副标题（批次 L，2026-09-21 用户裁决）：原「Add and manage upstream providers」只是
+                复述标题 + 卡片自带搜索框已表达的「可管理」，删掉，改显合计 `<N> total`
+                （与 billing「Transactions」卡、keys/models 同款）。取 items.length 而非
+                filtered.length：这是**本卡收藏总数**，不随搜索框内容跳动；搜索时的可见条数
+                由页尾的 "Showing X–Y of Z" 负责。 */}
+            <CardDescription>{formatNumber(items.length)} total</CardDescription>
           </div>
           {items.length > 0 ? (
             <div className="relative w-40 shrink-0">
@@ -545,7 +562,10 @@ export default function ProvidersPage() {
                 className="pl-9"
                 placeholder="Search"
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setPage(0); // 换了结果集就回第 1 页，否则会停在旧结果的第 N 页上
+                }}
               />
             </div>
           ) : null}
@@ -569,87 +589,117 @@ export default function ProvidersPage() {
               />
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead className="hidden sm:table-cell">Type</TableHead>
-                  <TableHead>Base URL</TableHead>
-                  <TableHead>Key</TableHead>
-                  <TableHead className="hidden md:table-cell">Created</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((provider) => (
-                  <TableRow key={provider.id}>
-                    <TableCell className="font-medium">{provider.name}</TableCell>
-                    <TableCell className="hidden sm:table-cell">
-                      <Badge variant="outline">{provider.type}</Badge>
-                    </TableCell>
-                    <TableCell className="max-w-48 truncate text-muted-foreground" title={provider.baseUrl}>
-                      {provider.baseUrl}
-                    </TableCell>
-                    <TableCell>
-                      <code className="font-mono text-xs text-muted-foreground">
-                        {provider.apiKeyMasked}
-                      </code>
-                    </TableCell>
-                    <TableCell className="hidden text-muted-foreground md:table-cell">
-                      {formatDateTime(provider.createdAt)}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge variant={provider.enabled ? "success" : "muted"}>
-                          {provider.enabled ? "enabled" : "disabled"}
-                        </Badge>
-                        {provider.circuitBroken ? (
-                          <Badge variant="destructive" title={`Circuit open since ${provider.circuitReason}`}>
-                            circuit open ({provider.circuitReason})
-                          </Badge>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Switch
-                          checked={provider.enabled}
-                          onCheckedChange={(next) =>
-                            updateProvider.mutate({ id: provider.id, enabled: next })
-                          }
-                          aria-label={
-                            provider.enabled
-                              ? `Disable ${provider.name}`
-                              : `Enable ${provider.name}`
-                          }
-                          title={provider.enabled ? "Disable provider" : "Enable provider"}
-                        />
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => setEditing(provider)}
-                          aria-label={`Edit ${provider.name}`}
-                          title="Edit"
-                        >
-                          <Pencil aria-hidden="true" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="text-destructive hover:text-destructive"
-                          onClick={() => setDeleting(provider)}
-                          aria-label={`Delete ${provider.name}`}
-                          title="Delete"
-                        >
-                          <Trash2 aria-hidden="true" />
-                        </Button>
-                      </div>
-                    </TableCell>
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead className="hidden sm:table-cell">Type</TableHead>
+                    <TableHead>Base URL</TableHead>
+                    <TableHead>Key</TableHead>
+                    <TableHead className="hidden md:table-cell">Created</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {pageItems.map((provider) => (
+                    <TableRow key={provider.id}>
+                      <TableCell className="font-medium">{provider.name}</TableCell>
+                      <TableCell className="hidden sm:table-cell">
+                        <Badge variant="outline">{provider.type}</Badge>
+                      </TableCell>
+                      <TableCell className="max-w-48 truncate text-muted-foreground" title={provider.baseUrl}>
+                        {provider.baseUrl}
+                      </TableCell>
+                      <TableCell>
+                        <code className="font-mono text-xs text-muted-foreground">
+                          {provider.apiKeyMasked}
+                        </code>
+                      </TableCell>
+                      <TableCell className="hidden text-muted-foreground md:table-cell">
+                        {formatDateTime(provider.createdAt)}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Badge variant={provider.enabled ? "success" : "muted"}>
+                            {provider.enabled ? "enabled" : "disabled"}
+                          </Badge>
+                          {provider.circuitBroken ? (
+                            <Badge variant="destructive" title={`Circuit open since ${provider.circuitReason}`}>
+                              circuit open ({provider.circuitReason})
+                            </Badge>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <Switch
+                            checked={provider.enabled}
+                            onCheckedChange={(next) =>
+                              updateProvider.mutate({ id: provider.id, enabled: next })
+                            }
+                            aria-label={
+                              provider.enabled
+                                ? `Disable ${provider.name}`
+                                : `Enable ${provider.name}`
+                            }
+                            title={provider.enabled ? "Disable provider" : "Enable provider"}
+                          />
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setEditing(provider)}
+                            aria-label={`Edit ${provider.name}`}
+                            title="Edit"
+                          >
+                            <Pencil aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setDeleting(provider)}
+                            aria-label={`Delete ${provider.name}`}
+                            title="Delete"
+                          >
+                            <Trash2 aria-hidden="true" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {/* 分页条：与 users 的邀请码卡、billing 的流水表同一范式（Showing X–Y of Z + Prev/Next）。
+                  仅当超过一页才渲染 —— 条数不足时挂一条恒「Showing 1–N of N」+ 两个禁用按钮是噪音。 */}
+              {filtered.length > PAGE_SIZE ? (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 px-6 pb-6">
+                  <span className="text-sm text-muted-foreground">
+                    Showing {safePage * PAGE_SIZE + 1}–{safePage * PAGE_SIZE + pageItems.length} of{" "}
+                    {filtered.length}
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage === 0}
+                      onClick={() => setPage(safePage - 1)}
+                    >
+                      Prev
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage >= maxPage}
+                      onClick={() => setPage(safePage + 1)}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </>
           )}
         </CardContent>
       </Card>
