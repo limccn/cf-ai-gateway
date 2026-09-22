@@ -75,3 +75,5 @@ EMAIL_VERIFICATION_ENABLED=false
 # ---- 与渲染无关 ----
 # SEED_USERS 只在 .dev.vars（本地 dev）中设置，**staging / 生产都不要设**。
 # 设置它会暴露 POST /api/seed/users 端点。此文件里不要出现该键。
+# 09-22-seed-users-dev-only：它只是**功能开关**（不设即 404），不再是安全边界 ——
+# 生产鉴权路径已无引用点，即使误设也不会让任何邮箱绕过邀请码。

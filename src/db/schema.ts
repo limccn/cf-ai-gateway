@@ -151,9 +151,13 @@ export const inviteCodes = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     code: text("code").notNull().unique(),
-    createdBy: integer("created_by")
-      .notNull()
-      .references(() => users.id),
+    // createdBy **可空**（09-22-seed-users-dev-only，决策 D-F1）：空库里的第一张邀请码
+    // **结构性没有合法签发者** —— dev-only 种子路由（POST /api/seed/users）必须在 signUpEmail
+    // 之前铸码，而此刻目标用户尚不存在，且 users.id 由 D1 自增（generateId: "serial"）无从预知，
+    // FK 又是立即检查 ⇒ 只能留空。生产路径恒有签发者（admin 在管理端发起）。
+    // 该字段不参与任何鉴权：唯一消费方是 delete.ts 的「删用户时顺带清理他发的码」，
+    // NULL 行不匹配该条件、不被清理（仅 dev 会存在，无害）。
+    createdBy: integer("created_by").references(() => users.id),
     usedAt: integer("used_at", { mode: "timestamp" }),
     expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
     createdAt: integer("created_at", { mode: "timestamp" })

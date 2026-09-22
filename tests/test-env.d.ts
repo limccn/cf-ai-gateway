@@ -55,6 +55,13 @@ declare namespace Cloudflare {
      * src/env.d.ts 管不到 cloudflare:test 的 env；漏声明的症状是「运行时能跑、typecheck 报错」）。
      */
     BILLING_QUEUE_NAME?: string;
+    /**
+     * 测试用户种子配置（dev-only）。vitest.config.ts 已 pin 两个固定邮箱；本声明是为了让
+     * tests/seed-users.test.ts 能**逐用例改写它**（09-22-seed-users-dev-only 的 AC-F3 要一个
+     * 「在 SEED_USERS 里、但尚未建号」的邮箱来证明豁免已消失 —— 固定那两个都已被前面的用例建掉，
+     * 会先撞重复邮箱）。与 withSwitch 同一纪律：只在本 isolate 内可见、try/finally 还原。
+     */
+    SEED_USERS?: string;
     /** vitest.config.ts 注入的 drizzle 迁移 SQL（applyD1Migrations 用）。 */
     TEST_MIGRATIONS: D1Migration[];
   }

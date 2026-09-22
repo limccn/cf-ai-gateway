@@ -101,4 +101,7 @@ API_KEY_PREFIX=sk-
 
 # 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
 # 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
+# 09-22-seed-users-dev-only：本变量是**功能开关**，不是安全边界 —— 生产鉴权路径已无引用点
+# （src/lib/auth.ts 不再读它，种子邮箱不再豁免邀请码）；未设置时该路由整体不注册 → 404。
+# 种子用户由路由**自铸一次性邀请码**，走与真实用户完全相同的校验 + 消费链路。
 # SEED_USERS=

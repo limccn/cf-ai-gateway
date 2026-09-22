@@ -33,7 +33,8 @@ export function toUserResponse(user: User, emailRegistered: boolean): UserRespon
 export function toInviteCodeResponse(invite: {
   id: number;
   code: string;
-  createdBy: number;
+  /** 可空（09-22-seed-users-dev-only / D-F1）：dev 种子路由自铸的码无签发者（空库首张码不存在合法发起人）。 */
+  createdBy: number | null;
   createdAt: Date;
   usedAt: Date | null;
   expiresAt: Date;
