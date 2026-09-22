@@ -15,7 +15,9 @@
 # ---- Infra 结构配置（绑定级字段） ----
 # wrangler 绑定级字段（name / routes / D1 / KV / Queue）必须是 toml 字面量，经模板渲染烘焙自本文件。
 # 值从 Cloudflare dashboard 获取（CLAUDE.md §部署要点）：
-#   WORKER_NAME / DOMAIN      -> Workers & Pages 部署名 / 自定义域名
+#   WORKER_NAME / DOMAIN / API_DOMAIN -> Workers & Pages 部署名 / 管理台域名 / 公开 API 域名
+#   LEGACY_DOMAIN             -> 旧域转发源（**只用于 routes 绑定**；中间件按「既不是
+#                                DOMAIN 也不是 API_DOMAIN ⇒ 按路径转发」处理，运行时不读它）
 #   D1_DB_NAME / D1_DB_ID     -> `wrangler d1 create <name> --env staging` 输出
 #   KV_ID                     -> `wrangler kv namespace create CACHE_KV --env staging` 输出
 #   QUEUE_NAME                -> usage 聚合队列名
@@ -23,7 +25,9 @@
 # ⚠ WORKER_NAME **必须与 .dev.vars 的不同**：渲染脚本会 fail-fast（同名意味着 `--env staging`
 #   会部署到生产 worker 上）。
 WORKER_NAME=cf-ai-gateway-staging
-DOMAIN=stg-router.lmlh.net
+DOMAIN=stg-platform.lmlh.net
+API_DOMAIN=stg-api.lmlh.net
+LEGACY_DOMAIN=stg-router.lmlh.net
 D1_DB_NAME=cf-ai-gateway-db-staging
 D1_DB_ID=00000000-0000-0000-0000-000000000000
 KV_ID=00000000000000000000000000000000
@@ -31,11 +35,12 @@ QUEUE_NAME=usage-aggregation-staging
 BILLING_QUEUE_NAME=billing-aggregation-staging
 
 # ---- 运行时配置（[env.staging.vars]） ----
-# ⚠ Cloudflare 平台上 [env.<name>.vars] **不继承**顶层 [vars]（模板里那 14 行不是冗余），
+# ⚠ Cloudflare 平台上 [env.<name>.vars] **不继承**顶层 [vars]（模板里那 15 行不是冗余），
 #   但本文件的键**会**回退到 .dev.vars —— 这两件事方向相反，别混淆：
 #   前者决定"staging 有没有这个变量"，后者决定"它的值先从哪里找"。
 # 前端 origin（部署域名；GitHub OAuth 回调的 origin 必须与之一致）
-BETTER_AUTH_URL=https://stg-router.lmlh.net
+# ⚠ 必须等于管理台域（DOMAIN = stg-platform.lmlh.net）的 origin —— 分流的平台域从本键派生。
+BETTER_AUTH_URL=https://stg-platform.lmlh.net
 # staging 自有的 GitHub OAuth App（与 production 是两个不同的 App；改一个不影响另一个）
 GITHUB_CLIENT_ID=replace-me-github-client-id
 # GitHub OAuth 白名单邮箱（逗号分隔；为空 = 拒绝所有 GitHub 登录，fail-closed）

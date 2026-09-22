@@ -14,15 +14,20 @@
 # ---- Infra 结构配置（模板渲染 token；见 CLAUDE.md §环境与配置） ----
 # wrangler 绑定级字段（name / routes / D1 / KV / Queue）与 [vars] 运行时配置都必须是 toml 字面量
 # （wrangler 4.x 实测不解析 {KEY} 占位符），统一经模板渲染烘焙自本文件。值从 Cloudflare dashboard 获取（CLAUDE.md §部署要点）：
-#   WORKER_NAME / DOMAIN      -> Workers & Pages 部署名 / 自定义域名
+#   WORKER_NAME / DOMAIN / API_DOMAIN -> Workers & Pages 部署名 / 管理台域名 / 公开 API 域名（双域名分流）
+#   LEGACY_DOMAIN             -> 旧域转发源（prod = router.lmlh.net）；**只用于 routes 绑定**，运行时不读该值
 #   D1_DB_NAME / D1_DB_ID     -> `wrangler d1 create <name>` 输出（dashboard 复制 database_id）
 #   KV_ID                     -> `wrangler kv namespace create CACHE_KV` 输出
 #   QUEUE_NAME                -> `wrangler queues create <name>` 创建的队列名（usage 聚合）
 #   BILLING_QUEUE_NAME        -> `wrangler queues create <name>` 创建的延迟计费队列名
 # 注意：部署真实环境时在部署 shell export 同名环境变量覆盖本地占位值（process.env 优先于本文件）。
 # staging 的同名键请写在 .dev.vars.staging（模板见 .dev.vars.staging.example）。
+# LEGACY_DOMAIN 两段各一份（prod = router.lmlh.net / stg = stg-router.lmlh.net）：旧域保留绑定，
+# 由中间件按「host 不属于两类新域 ⇒ 按路径转发」送到本环境的新域，故现存 base_url 零改动继续可用。
 WORKER_NAME=cf-ai-gateway
-DOMAIN=router.lmlh.net
+DOMAIN=platform.lmlh.net
+API_DOMAIN=api.lmlh.net
+LEGACY_DOMAIN=router.lmlh.net
 D1_DB_NAME=cf-ai-gateway-db
 D1_DB_ID=00000000-0000-0000-0000-000000000000
 KV_ID=00000000000000000000000000000000
@@ -33,6 +38,9 @@ BILLING_QUEUE_NAME=billing-aggregation
 # 会话签名密钥（生产必须为随机值，>=32 字符；不要与 GATEWAY_SECRET_KEY 相同）
 BETTER_AUTH_SECRET=local-dev-secret-change-me-0123456789abcdef
 # 前端 origin（本地 vite dev 端口；生产为部署域名）
+# ⚠ 生产 / staging **必须等于管理台域（DOMAIN）的 origin**：分流的平台域是从本键派生的
+#   （`new URL(BETTER_AUTH_URL).hostname`，刻意不新增 PLATFORM_DOMAIN token 以免多一个真源）。
+#   部署 shell 需 export BETTER_AUTH_URL=https://platform.lmlh.net（本地保持 localhost）。
 BETTER_AUTH_URL=http://localhost:5173
 
 # ---- GitHub OAuth ----

@@ -89,25 +89,49 @@ export function countKvOps(prefix: string): {
  *
  * key 取值范围是**白名单**（不是任意键）：只在 vitest.config.ts 里 pin 过、且确实需要逐用例
  * 翻转的键才登记 —— 未被 pin 的键无法保证可写。08-27-email-notification 追加了邮件通道三键
- * （RESEND_API_KEY / EMAIL_ALLOWED_RECIPIENTS / EMAIL_VERIFICATION_ENABLED）。
+ * （RESEND_API_KEY / EMAIL_ALLOWED_RECIPIENTS / EMAIL_VERIFICATION_ENABLED）；
+ * 09-21-dual-domain-split 追加 API_DOMAIN（域名分流的开关，pin "" = 未配置）。
  */
 export async function withSwitch<T>(
   key:
     | "EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED"
     | "EMAIL_VERIFICATION_ENABLED"
     | "RESEND_API_KEY"
-    | "EMAIL_ALLOWED_RECIPIENTS",
+    | "EMAIL_ALLOWED_RECIPIENTS"
+    | "API_DOMAIN",
   value: string | undefined,
   fn: () => Promise<T>,
 ): Promise<T> {
   const original = env[key];
   try {
-    // 四个键在 Cloudflare.Env 里都是 string | undefined（清空 = 复原「未配置」形态），
+    // 这些键在 Cloudflare.Env 里都是 string | undefined（清空 = 复原「未配置」形态），
     // 故这里无需断言
     env[key] = value;
     return await fn();
   } finally {
     env[key] = original;
+  }
+}
+
+/**
+ * 逐用例改写 `BETTER_AUTH_URL`（09-21-dual-domain-split）。
+ *
+ * 为什么不并进上面的 withSwitch：`BETTER_AUTH_URL` 在 Cloudflare.Env 里是**必填 string**
+ * （不是 `string | undefined`），塞进同一个联合类型会让 `env[key] = value` 的类型检查失败。
+ * 分流的**平台域**由它派生（`new URL(BETTER_AUTH_URL).hostname`，见 src/lib/domains.ts），
+ * 故「prod / stg 两套配置产生各自目标域」的判别性用例必须能翻转它。
+ *
+ * 与 withSwitch 同一套纪律：只在本 isolate 内可见、try/finally 还原。
+ * ⚠ 它会同时影响 Better Auth 的 baseURL / trustedOrigins（createAuth 每次请求重建，故是即时生效的）
+ * —— 该函数只在 domain-split.test.ts 里用，且一律在 finally 内还原。
+ */
+export async function withBetterAuthUrl<T>(url: string, fn: () => Promise<T>): Promise<T> {
+  const original = env.BETTER_AUTH_URL;
+  try {
+    env.BETTER_AUTH_URL = url;
+    return await fn();
+  } finally {
+    env.BETTER_AUTH_URL = original;
   }
 }
 

@@ -1,19 +1,22 @@
 // AI API Gateway - Worker 入口。
 // 中间件/路由注册顺序（Hono 按注册顺序匹配）：
 //   1. requestContext（MUST 最先挂载，注入 requestId + logger）
-//   2. zod 校验错误统一中间件（M8：@hono/zod-validator 400 响应统一为 {error:{message}}）
-//   3. GET /api/health（public）
-//   4. /api/auth/*（Better Auth，public）—— 必须先于 requireSession 注册
-//   5. requireSession 挂载 /api/*（未登录 401）
-//   6. 管理面模块路由（/api/users、/api/keys、/api/providers 等）
-//   7. notFound 兜底：/api/* 与 /v1/* 返回 JSON 404；其余路径交给 env.ASSETS 托管
+//   2. domainSplit（双域名分流：按 Host 放行/互跳；未配置 API_DOMAIN 时整体关闭）
+//   3. zod 校验错误统一中间件（M8：@hono/zod-validator 400 响应统一为 {error:{message}}）
+//   4. GET /api/health（public）+ GET /api/config（public）
+//   5. /api/auth/*（Better Auth，public）—— 必须先于 requireSession 注册
+//   6. requireSession 挂载 /api/*（未登录 401）
+//   7. 管理面模块路由（/api/users、/api/keys、/api/providers 等）
+//   8. notFound 兜底：/api/* 与 /v1/* 返回 JSON 404；其余路径交给 env.ASSETS 托管
 //      （M6 前端：SPA index.html + 构建产物；wrangler.toml assets run_worker_first=true）
 // 代理面 /v1/*（M3）：网关 Key 鉴权，独立于会话鉴权，在 requireSession 之前注册（互不冲突）。
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { ZodError } from "zod";
 import { requestContext } from "./middleware/request-context";
+import { domainSplit } from "./middleware/domain-split";
 import { requireSession } from "./middleware/auth";
+import { apiBaseUrl, platformBaseUrl } from "./lib/domains";
 import authRouter from "./routes/auth/router";
 import seedRouter from "./routes/seed/router";
 import usersRouter from "./routes/users/router";
@@ -39,6 +42,11 @@ const app = new Hono<AppEnv>();
 
 // MUST be first — 提供 requestId + 结构化 logger
 app.use("*", requestContext());
+
+// 双域名分流（09-21-dual-domain-split）：管理台域 / 公开 API 域按 Host 分流、越界路径互跳。
+// 必须在 zod 统一中间件之前 —— 301/308 不该进入"400 响应重写"路径。
+// 未配置 API_DOMAIN（本地 dev 等）⇒ 整体关闭，行为与今日完全一致。
+app.use("*", domainSplit());
 
 // M8 全局 zod 校验错误统一（journal 延期项 1）：
 // @hono/zod-validator 校验失败返回 `{success:false, error: <ZodError 序列化>}`（400，直接返回、
@@ -69,6 +77,20 @@ app.use("*", async (c, next) => {
 app.get("/api/health", (c) =>
   c.json({ ok: true, service: "cf-ai-gateway", ts: new Date().toISOString() }),
 );
+
+// GET /api/config —— 公开的**运行期**前端配置（R-B14）。**必须注册在下面 requireSession 之前**
+// （Hono 按注册顺序匹配，先命中的 handler 返回即终止）—— 它是登录页也要用的公开端点。
+// 为什么不能构建期烘焙：SPA 是**同一份**静态产物，同时服务 prod / stg / 本地 dev
+// （assets.directory 是构建产物，[env.*] 改不了前端 bundle），只能运行期下发。
+// 取值见 design §2.3：apiBaseUrl **不带 /v1 后缀**（前端按 `${apiBaseUrl}${basePath}` 拼接，
+// 保持既有结构）；未配置 API_DOMAIN 时回落请求自身 origin（本地行为与今日完全一致）。
+app.get("/api/config", (c) => {
+  const origin = new URL(c.req.url).origin;
+  return c.json({
+    apiBaseUrl: apiBaseUrl(c.env, origin),
+    platformBaseUrl: platformBaseUrl(c.env, origin),
+  });
+});
 
 // Better Auth（public）：必须先于 requireSession 注册
 app.route("/api/auth", authRouter);

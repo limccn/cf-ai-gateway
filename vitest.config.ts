@@ -24,6 +24,10 @@ export default defineConfig({
           GATEWAY_SECRET_KEY: "test-gateway-secret-key-0123456789abcdef",
           BETTER_AUTH_SECRET: "test-better-auth-secret-0123456789abcdef",
           BETTER_AUTH_URL: "http://localhost:5173",
+          // 双域名分流（09-21-dual-domain-split）：pin **空 = 未配置 ⇒ 分流整体关闭**，既有用例
+          // 的行为与今日完全一致（AND 与 prod 缺省形态同源）。domain-split.test.ts 用 helpers 的
+          // withSwitch 逐用例翻成真实域名 —— 故这里必须 pin 一个值（未 pin 的键不保证可写）。
+          API_DOMAIN: "",
           GITHUB_CLIENT_ID: "test-github-client-id",
           GITHUB_CLIENT_SECRET: "test-github-client-secret",
           GITHUB_ALLOWED_EMAILS: "",

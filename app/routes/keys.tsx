@@ -15,6 +15,7 @@ import {
 import { Ban, Check, Copy, Pencil, Plus, Search } from "lucide-react";
 import { z } from "zod";
 import { useSession } from "@/hooks/use-session";
+import { useApiConfig } from "@/hooks/use-api-config";
 import { useKeys } from "@/modules/keys/hooks/use-keys";
 import { useCreateKey } from "@/modules/keys/hooks/use-create-key";
 import { useUpdateKey } from "@/modules/keys/hooks/use-update-key";
@@ -490,12 +491,22 @@ function CopyBlock({ label, value, errorHint, multiline = false }: CopyBlockProp
 /** 接入说明：三种协议各自的 base URL + curl / 官方 SDK 开始方式，用分段控件切换。
  * 默认停在最常用的 Chat Completions。 */
 function QuickStart() {
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
   const [activeIndex, setActiveIndex] = useState(0);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const apiConfig = useApiConfig();
 
   const guide = PROTOCOL_GUIDES[activeIndex] ?? CHAT_COMPLETIONS_GUIDE;
-  const baseUrl = `${origin}${guide.basePath}`;
+
+  /* base URL 的运行期取值（双域名分流，2026-09-22）：
+     - 成功：用服务端下发的 `apiBaseUrl`（prod = https://api.lmlh.net，stg = https://stg-api.lmlh.net）。
+       分流后管理台域**不服务** /v1，拿 `window.location.origin` 拼出来的正好是一个访问不通的地址。
+     - **未就绪（loading）：不渲染代码块**（返回 null）—— 先渲染 `${origin}${basePath}` 会把
+       "短暂错误"变成"用户复制走了错误 URL"。
+     - 请求失败（例如 Worker 还没有这个端点）：回落 window.location.origin —— 降级但可用。 */
+  const fallbackOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  const resolvedBaseUrl =
+    apiConfig.data?.apiBaseUrl ?? (apiConfig.isError ? fallbackOrigin : null);
+  const baseUrl = resolvedBaseUrl === null ? null : `${resolvedBaseUrl}${guide.basePath}`;
 
   /** ARIA tabs 键盘约定：左右方向键循环、Home/End 跳首尾。必须与下面的 roving tabIndex
    * 配套 —— 只加 role="tab" 而不实现方向键，屏幕阅读器会报「标签页」但按键无反应。 */
@@ -570,37 +581,44 @@ function QuickStart() {
           aria-labelledby={`quickstart-tab-${activeIndex}`}
           className="space-y-4"
         >
-          <CopyBlock
-            label="Base URL"
-            value={baseUrl}
-            errorHint="Copy failed — clipboard is unavailable. Select the URL manually."
-          />
+          {/* config 未就绪时**只**渲染这一行：绝不先渲染 `origin + basePath`（见上方注释）。 */}
+          {baseUrl === null ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : (
+            <>
+              <CopyBlock
+                label="Base URL"
+                value={baseUrl}
+                errorHint="Copy failed — clipboard is unavailable. Select the URL manually."
+              />
 
-          <CopyBlock
-            label={
-              <>
-                Example request{" "}
-                <span className="font-normal text-muted-foreground">{guide.endpoint}</span>
-              </>
-            }
-            value={guide.curl(baseUrl)}
-            multiline
-            errorHint="Copy failed — clipboard is unavailable. Select the command manually."
-          />
+              <CopyBlock
+                label={
+                  <>
+                    Example request{" "}
+                    <span className="font-normal text-muted-foreground">{guide.endpoint}</span>
+                  </>
+                }
+                value={guide.curl(baseUrl)}
+                multiline
+                errorHint="Copy failed — clipboard is unavailable. Select the command manually."
+              />
 
-          <CopyBlock
-            label="Official SDK"
-            value={guide.sdk(baseUrl)}
-            multiline
-            errorHint="Copy failed — clipboard is unavailable. Select the snippet manually."
-          />
+              <CopyBlock
+                label="Official SDK"
+                value={guide.sdk(baseUrl)}
+                multiline
+                errorHint="Copy failed — clipboard is unavailable. Select the snippet manually."
+              />
 
-          <p className="text-xs text-muted-foreground">{guide.note}</p>
-          <p className="text-xs text-muted-foreground">
-            Replace <code className="font-mono">sk-xxxxxxxx</code> with a key — the full secret is
-            shown only once, right after you create it. Model names above are examples;{" "}
-            <code className="font-mono">GET /v1/models</code> lists the ones a key can route.
-          </p>
+              <p className="text-xs text-muted-foreground">{guide.note}</p>
+              <p className="text-xs text-muted-foreground">
+                Replace <code className="font-mono">sk-xxxxxxxx</code> with a key — the full secret is
+                shown only once, right after you create it. Model names above are examples;{" "}
+                <code className="font-mono">GET /v1/models</code> lists the ones a key can route.
+              </p>
+            </>
+          )}
         </div>
       </CardContent>
     </Card>
