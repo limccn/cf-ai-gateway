@@ -27,7 +27,9 @@ import { anthropicMessagesUrl } from "../../../providers/anthropic";
 import { openaiEndpointUrl } from "../../../providers/openai";
 import {
   DEFAULT_UPSTREAM_TIMEOUT_MS,
+  describeFetchFailure,
   fetchUpstream,
+  UPSTREAM_ERROR_MAX_CHARS,
   UpstreamTimeoutError,
 } from "../../../lib/upstream";
 import type { ProviderConfig } from "../../../providers/types";
@@ -66,8 +68,8 @@ export interface ProbeResult {
  */
 export const PROBE_TIMEOUT_CAP_MS = 30_000;
 
-/** 错误消息回显上限（防上游把整篇 HTML 错误页塞进 UI）。 */
-const ERROR_MAX_CHARS = 300;
+/** 错误消息回显上限：与联通性 ping 共用同一条（见 src/lib/upstream.ts，防两处漂移）。 */
+const ERROR_MAX_CHARS = UPSTREAM_ERROR_MAX_CHARS;
 
 /**
  * 探测请求的最大生成长度**默认值**。取小值是为了把上游那边的成本压到最低 ——
@@ -284,12 +286,7 @@ export async function runProbe(spec: ProbeSpec, timeoutMs: number): Promise<Prob
       };
     }
 
-    const message =
-      error instanceof UpstreamTimeoutError
-        ? `Timed out after ${timeoutMs}ms`
-        : error instanceof Error
-          ? error.message
-          : "Unknown network error";
+    const message = describeFetchFailure(error, timeoutMs);
     // 网络层没拿到响应头 ⇒ 没有 status，TTFB 与总耗时取同一个值（请求就此终止）
     return {
       ...meta,
