@@ -8,6 +8,7 @@ import {
   selfFetch,
   sessionCookie,
   setupUser,
+  withSwitch,
 } from "./helpers";
 
 beforeAll(async () => {
@@ -23,6 +24,7 @@ interface SettingsBody {
     signupBonusAmount: number;
     emailVerifyBonusAmount: number;
     emailVerificationEnabled: boolean;
+    emailAccountAdminPromotionEnabled: boolean;
   };
 }
 
@@ -57,5 +59,34 @@ describe("GET /api/admin/settings", () => {
     expect(body.settings.signupBonusAmount).toBe(5); // bonus.ts 默认（测试 env 无覆盖）
     expect(body.settings.emailVerifyBonusAmount).toBe(5);
     expect(body.settings.emailVerificationEnabled).toBe(true); // 测试绑定显式开启（vitest.config.ts）
+    // 账户安全总开关（09-21-email-admin-promotion-switch）：测试绑定显式 pin 成部署缺省（关闭）
+    expect(body.settings.emailAccountAdminPromotionEnabled).toBe(false);
+  });
+
+  it("AC11 账户安全总开关随 env 翻转（管理画面的开关值只此一个来源）", async () => {
+    const adminId = await setupUser("settings-admin-promo@test.dev", 0, "admin");
+    const cookie = sessionCookie(await createSession(adminId));
+
+    const reported = await withSwitch(
+      "EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED",
+      "true",
+      async () => {
+        const res = await selfFetch("http://localhost/api/admin/settings", {
+          headers: { Cookie: cookie },
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as SettingsBody;
+        return body.settings.emailAccountAdminPromotionEnabled;
+      },
+    );
+
+    // 只断言 true 不够（pin 值本就是 false，写死也过）——上面 200 与这里 true 合起来才说明「读的是 env」
+    expect(reported).toBe(true);
+    // 还原后再读一次：证明翻转确实来自 env 而不是常量
+    const after = await selfFetch("http://localhost/api/admin/settings", {
+      headers: { Cookie: cookie },
+    });
+    const afterBody = (await after.json()) as SettingsBody;
+    expect(afterBody.settings.emailAccountAdminPromotionEnabled).toBe(false);
   });
 });

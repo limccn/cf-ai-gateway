@@ -42,6 +42,12 @@ interface Env {
   // emailVerification 段不配置（不发验证信、不发验证赠金）；true/1/yes/on 才开启。
   // staging 用 STAGING_EMAIL_VERIFICATION_ENABLED 独立设置
   EMAIL_VERIFICATION_ENABLED?: string;
+  // 账户安全总开关（09-21-email-admin-promotion-switch；[vars] 渲染烘焙）：缺省 false =
+  // 邮件注册的账户（有 accounts.providerId='credential' 行）**永远不能**提升为 admin ——
+  // PATCH /api/users/:id 对该形态显式 403，管理画面的提升操作置灰；true/1/yes/on 才允许。
+  // 只拦「新提升」：降级、停用、以及已是 admin 的幂等重写不受影响（不倒查存量）。
+  // staging 用 STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED 独立设置
+  EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED?: string;
   // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users
   // 并在注册校验中放行种子邮箱（绕过邀请码）。生产禁止设置。格式见 src/lib/seed-users.ts
   SEED_USERS?: string;

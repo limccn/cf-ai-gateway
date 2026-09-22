@@ -29,7 +29,9 @@ when needed, and settles billing per token from the price table.
 - **Team & keys**: GitHub OAuth login (email whitelist, fail-closed) +
   email/password registration with admin invite codes; roles `admin` / `member`;
   per-user API keys (SHA-256 hashed at rest, plaintext shown once) with per-key
-  `qps_limit` and caching settings.
+  `qps_limit` and caching settings. An account-security switch
+  (`EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED`, default **off**) governs whether
+  email-registered accounts may be promoted to `admin` at all.
 - **Prepaid billing (per token)**: price table seeded with common models and
   admin-overridable; conditional-UPDATE atomic deduction (no overcharge under
   concurrency); `balance_tx` ledger; failures are never charged; cache hits are
@@ -184,6 +186,12 @@ Management API (session auth, roles `admin`/`member`):
 | `/api/admin/transactions` | admin | Global ledger with optional `userId` filter |
 | `/api/admin/settings` | admin | Runtime defaults (read-only) |
 | `/api/health` | public | Liveness probe |
+
+Role changes on `/api/users` are subject to the deployment's account-security
+switch: with `EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED` off (the default),
+promoting an email-registered account to `admin` is refused with `403` and the
+console disables the action for those rows. Demotions, status changes, existing
+admins and the first-admin bootstrap (direct D1 `UPDATE`) are unaffected.
 
 Proxy API (gateway-key auth, three protocol entry points):
 

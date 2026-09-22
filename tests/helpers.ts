@@ -78,6 +78,29 @@ export function countKvOps(prefix: string): {
   };
 }
 
+/**
+ * 在指定开关值下跑一段用例，结束（含抛错）后还原 —— 09-21-email-admin-promotion-switch。
+ *
+ * 为什么可以这样改：**实测**（2026-09-21）`env.X = "true"` 对同一 isolate 的主 worker 可见
+ * （观测：改前 `GET /api/admin/settings` 读到 false、改后读到 true，与 countKvOps 改写
+ * `env.CACHE_KV` 同一机制）。两条边界：① 可见性仅限本 isolate —— pool-workers 每个测试文件一个
+ * isolate，故不跨文件泄漏；② **同文件内会残留** —— 所有翻转必须走本函数（try/finally），
+ * 否则污染同文件其余依赖 pinned 值的用例。
+ */
+export async function withSwitch<T>(
+  key: "EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED",
+  value: string | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const original = env[key];
+  try {
+    env[key] = value as string;
+    return await fn();
+  } finally {
+    env[key] = original;
+  }
+}
+
 // ============ 延迟计费（08-31-perf-v2）测试辅助 ============
 // 请求路径成功时只向 BILLING_QUEUE 发事件（不写 D1）；单测环境不自动投递队列消息，
 // 与 usage.test.ts 的 consumeUsageBatch 驱动模式一致：构造批 → 手动驱动消费者。

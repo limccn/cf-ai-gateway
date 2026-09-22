@@ -39,6 +39,11 @@ export default defineConfig({
           SIGNUP_BONUS_AMOUNT: "5",
           EMAIL_VERIFY_BONUS_AMOUNT: "5",
           EMAIL_VERIFICATION_ENABLED: "true",
+          // 账户安全总开关（09-21-email-admin-promotion-switch）：显式 pin 成**部署缺省**（关闭）。
+          // 被拦分支（403 门控）的路由测试就跑在这一态。bindings 在 miniflare 进程内不可逐用例翻转，
+          // 开启态由 tests/helpers.ts 的 withSwitch 在运行时改写 —— 步骤 3 实测**生效**（同一 isolate
+          // 内对主 worker 可见，与 countKvOps 改写 env.CACHE_KV 同一机制）。
+          EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED: "false",
           // seed 路由测试固定种子（dev-only）：安全密码仅存在于测试绑定，不落盘
           SEED_USERS: JSON.stringify([
             {

@@ -106,6 +106,10 @@ EMAIL_VERIFY_BONUS_AMOUNT = "{EMAIL_VERIFY_BONUS_AMOUNT}"
 # 邮箱验证功能总开关（09-16-signup-bonus-grant）：缺省 false = 系统休眠（不发验证信、
 # 不发验证赠金、前端不展示验证入口）；true/1/yes/on 才开启。staging 用 STAGING_* 独立设置。
 EMAIL_VERIFICATION_ENABLED = "{EMAIL_VERIFICATION_ENABLED}"
+# 账户安全总开关（09-21-email-admin-promotion-switch）：缺省/false = 邮件注册的账户永远不能提升为
+# admin（写边界 403 + 画面置灰该操作）；true/1/yes/on 才允许提升。只拦新提升，不倒查存量 admin
+# （降级/停用/已是 admin 的幂等重写不受影响）。staging 用 STAGING_* 独立设置。
+EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED = "{EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED}"
 
 # ====================================================================
 # Staging 环境（wrangler deploy --env staging；worker 名取 STAGING_WORKER_NAME）
@@ -169,3 +173,5 @@ MODELCAP_MULTIPLIER = "{STAGING_MODELCAP_MULTIPLIER}"
 SIGNUP_BONUS_AMOUNT = "{STAGING_SIGNUP_BONUS_AMOUNT}"
 EMAIL_VERIFY_BONUS_AMOUNT = "{STAGING_EMAIL_VERIFY_BONUS_AMOUNT}"
 EMAIL_VERIFICATION_ENABLED = "{STAGING_EMAIL_VERIFICATION_ENABLED}"
+# stg 账户安全总开关（缺省与顶层同为 false = 邮件注册账户不可提升为 admin）
+EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED = "{STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED}"

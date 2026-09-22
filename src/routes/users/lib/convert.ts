@@ -3,8 +3,14 @@ import type { User } from "../../../db/schema";
 import type { UserRole, UserStatus } from "../../../types";
 import type { InviteCodeResponse, UserResponse } from "../types";
 
-/** DB 用户行 → API 响应（时间戳 ISO 字符串；role/status 窄化为字面量类型）。 */
-export function toUserResponse(user: User): UserResponse {
+/**
+ * DB 用户行 → API 响应（时间戳 ISO 字符串；role/status 窄化为字面量类型）。
+ *
+ * `emailRegistered` **必填**（不是可选、不给默认值）：它是 accounts 表的事实，本函数查不到 ——
+ * 设成可选会让漏传的调用点静默把邮箱注册账户报成 false，于是管理画面照常可点（假防线）。
+ * 必填参数由编译器逼每个调用点显式传入（09-21-email-admin-promotion-switch）。
+ */
+export function toUserResponse(user: User, emailRegistered: boolean): UserResponse {
   return {
     id: String(user.id),
     email: user.email,
@@ -13,6 +19,7 @@ export function toUserResponse(user: User): UserResponse {
     status: user.status as UserStatus,
     balance: user.balance,
     emailVerified: user.emailVerified,
+    emailRegistered,
     createdAt: user.createdAt.toISOString(),
     updatedAt: user.updatedAt.toISOString(),
   };
