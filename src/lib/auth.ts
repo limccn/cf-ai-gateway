@@ -8,6 +8,10 @@
 //   随 session 用户对象下发；inviteCode 仅允许注册时提交（input: true），写入前由 create.before 钩子剥离。
 // - user.validateUserInfo：注册/登录准入门（邀请码校验 + GitHub 白名单），
 //   通过 source.method/action 区分 email-password 注册与 GitHub OAuth 流程。
+// - **本文件不引用 SEED_USERS**（09-22-seed-users-dev-only）：此前"种子邮箱白名单直接放行"的
+//   逃生口已整体删除 —— 种子用户改由 dev-only 路由自铸一次性邀请码（src/routes/seed/router.ts），
+//   走与真实用户完全相同的校验 + 消费链路。于是生产鉴权路径中不再存在任何"靠变量没被设置"
+//   来兜底的判定，隔离是**结构性**的而非约定性的。
 //
 // 赠金与邮箱验证（09-16-signup-bonus-grant）：
 // - 注册赠金挂在 `databaseHooks.user.create.after` —— 该钩子**不区分 provider**，
@@ -41,7 +45,6 @@ import { MIN_PASSWORD_LENGTH } from "./password";
 // 消费失败 return false 阻止建号，关闭「两并发同码注册都通过校验、一码两用」的重放窗口。
 // 权衡：before 消费后若 Better Auth 内部建号失败 → 码被烧（一次性码语义，管理员可补发）。
 import { isEmailAllowed } from "./github-whitelist";
-import { isSeedEmail, parseSeedUsers } from "./seed-users";
 
 const INVITE_CODE_REQUIRED = "INVITE_CODE_REQUIRED";
 const INVITE_CODE_INVALID = "INVITE_CODE_INVALID";
@@ -84,13 +87,6 @@ export function createAuth(env: Env, db: Db) {
       // 准入门：email-password 注册需邀请码；GitHub OAuth 需白名单邮箱
       validateUserInfo: async ({ user, source }) => {
         if (source.method === "email-password" && source.action === "create-user") {
-          // dev-only 种子逃生口：仅当 SEED_USERS 配置且邮箱在种子列表内时放行（绕过邀请码）。
-          // 生产/测试未配置 SEED_USERS → 本分支永不进入；配置了即视为本地调试场景。
-          const seedSpecs = parseSeedUsers(env.SEED_USERS);
-          const email = typeof user.email === "string" ? user.email : "";
-          if (isSeedEmail(seedSpecs, email)) {
-            return;
-          }
           const inviteCode = readInviteCode(user);
           if (inviteCode === "") {
             return { error: INVITE_CODE_REQUIRED, errorDescription: "Invite code is required for email/password signup" };
@@ -166,12 +162,10 @@ export function createAuth(env: Env, db: Db) {
           // 剥离 inviteCode：邀请码为一次性凭证，不随用户记录持久化。
           before: async (user) => {
             if ("inviteCode" in user) {
+              // 空串不是"放行"而是"无码"：consumeInviteCode 首行即对空串返回 false ⇒ 阻止建号。
+              // 这是第二道闸（email-password 注册已在 validateUserInfo 拦 INVITE_CODE_REQUIRED），
+              // 也是 09-22-seed-users-dev-only 移除"空码放行"分支后空库/种子路径的兜底行为。
               const code = String(user.inviteCode ?? "").trim();
-              if (code === "") {
-                // 空串 = 未提供：dev seed 路径（validateUserInfo 白名单放行，不消费）；
-                // 生产无 SEED_USERS 入口，普通注册已在 validateUserInfo 拦 INVITE_CODE_REQUIRED。
-                return { data: { inviteCode: undefined } };
-              }
               const email = typeof user.email === "string" ? user.email.toLowerCase() : "";
               if (email === "") {
                 return false;

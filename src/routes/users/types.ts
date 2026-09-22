@@ -90,7 +90,8 @@ export const inviteCodeResponseSchema = z.object({
   id: z.number().int(),
   code: z.string(),
   status: z.enum(["active", "used", "expired"]),
-  createdBy: z.number().int(),
+  // 可空：dev 种子路由自铸的码没有签发者（09-22-seed-users-dev-only / D-F1）；生产恒为数字。
+  createdBy: z.number().int().nullable(),
   createdAt: z.string(),
   usedAt: z.string().nullable(),
   expiresAt: z.string(),

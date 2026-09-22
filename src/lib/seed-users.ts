@@ -1,5 +1,8 @@
-// 测试用户种子配置（dev-only）：解析 env.SEED_USERS，供种子路由与 auth 逃生口共用。
-// 红线：本开关只在本地/测试环境设置；生产收到该 env 即视为配置事故（端点暴露 + 邀请码放行）。
+// 测试用户种子配置（dev-only）：解析 env.SEED_USERS，**仅供** dev-only 种子路由
+// （POST /api/seed/users）使用 —— 生产鉴权路径（src/lib/auth.ts）对它已无任何引用点
+// （09-22-seed-users-dev-only 删除"种子邮箱绕过邀请码"逃生口之后成立）。
+// 红线：本开关只在本地 dev 设置；生产/staging 收到该 env 即视为配置事故（`POST /api/seed/users`
+// 造号端点被暴露）。⚠ 安全**不再依赖"变量没被设置"** —— 鉴权侧已与它结构性无关，见上。
 // 格式（JSON 数组字符串）：
 //   [{"email":"admin@local.dev","password":"min8","name":"Admin","role":"admin"}, ...]
 import type { UserRole } from "../types";
@@ -46,12 +49,4 @@ export function parseSeedUsers(raw: string | undefined): SeedUserSpec[] | null {
       role,
     };
   });
-}
-
-/** 指定邮箱是否出现在种子列表（auth 逃生口判定用）。 */
-export function isSeedEmail(specs: SeedUserSpec[] | null, email: string): boolean {
-  if (specs === null) {
-    return false;
-  }
-  return specs.some((s) => s.email === email);
 }

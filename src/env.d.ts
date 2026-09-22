@@ -71,7 +71,9 @@ interface Env {
   // 事务邮件收件人白名单（同上；[vars] 渲染烘焙）：逗号分隔、大小写不敏感；**空 = 全放行**（prod 语义）。
   // staging 必须在 .dev.vars.staging 中设同名键，防测试环境向真实用户发信
   EMAIL_ALLOWED_RECIPIENTS?: string;
-  // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users
-  // 并在注册校验中放行种子邮箱（绕过邀请码）。生产禁止设置。格式见 src/lib/seed-users.ts
+  // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users。
+  // **纯功能开关，不是安全边界**（09-22-seed-users-dev-only）：注册校验中"放行种子邮箱、
+  // 绕过邀请码"的豁免已删除，本变量的唯一读者是 dev-only 路由自身（它自铸一次性邀请码，
+  // 种子用户走与真实用户相同的校验 + 消费链路）。生产禁止设置。格式见 src/lib/seed-users.ts
   SEED_USERS?: string;
 }
