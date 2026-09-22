@@ -47,6 +47,14 @@ declare namespace Cloudflare {
     RESEND_API_KEY?: string;
     /** 事务邮件收件人白名单（同上）。pin "" = 全放行，与 prod 缺省形态一致。 */
     EMAIL_ALLOWED_RECIPIENTS?: string;
+    /**
+     * 延迟计费队列名（09-21-prod-resource-naming）。**双重身份** token：既是 queues 绑定的队列名
+     * （绑定本身由 worker-configuration.d.ts 生成 BILLING_QUEUE），又是 queue() 的运行期分流谓词。
+     * vitest.config.ts 显式 pin；tests/queue-dispatch.test.ts 的 A/A′/B 三例从 cloudflare:test 侧读它
+     * —— 该文件是**首个**这样做的用例，故这里必须声明（本文件是 Cloudflare.Env 的平行声明，
+     * src/env.d.ts 管不到 cloudflare:test 的 env；漏声明的症状是「运行时能跑、typecheck 报错」）。
+     */
+    BILLING_QUEUE_NAME?: string;
     /** vitest.config.ts 注入的 drizzle 迁移 SQL（applyD1Migrations 用）。 */
     TEST_MIGRATIONS: D1Migration[];
   }

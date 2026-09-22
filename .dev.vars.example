@@ -31,8 +31,15 @@ LEGACY_DOMAIN=router.lmlh.net
 D1_DB_NAME=cf-ai-gateway-db
 D1_DB_ID=00000000-0000-0000-0000-000000000000
 KV_ID=00000000000000000000000000000000
-QUEUE_NAME=usage-aggregation
-BILLING_QUEUE_NAME=billing-aggregation
+# ---- 资源名（Cloudflare 侧真实资源名；命名式 <worker 名>-<purpose>，见 spec governance/config-inventory 的资源命名规范） ----
+# ⚠ 队列表**不可改名**：改名 = 新建 + 改绑定 + 删旧，且切换后旧队列里在途的消息**永不被消费**（不迁移）。
+#   KV 是本栈**唯一**可原地改名的资源（按 id 寻址 ⇒ id 不变、数据不动）；命令与两个坑见 deployment.md Step 2。
+# ⚠ 改 BILLING_QUEUE_NAME 必须同步 vitest.config.ts 的 pin（否则测试值被本文件牵着走）；
+#   分流的**判别性护栏**是 tests/queue-dispatch.test.ts（A / A′ 两例只差批名，落点必须不同）。
+#   queue() 按 batch.queue === env.BILLING_QUEUE_NAME **精确比对**分流：真实环境里漂移会让计费批落进用量
+#   分支 —— 事件体不含 cost，被 usageEventSchema 挡下、只留一条 warn，**静默不扣费且账上无痕**。
+QUEUE_NAME=cf-ai-gateway-usage
+BILLING_QUEUE_NAME=cf-ai-gateway-billing
 
 # ---- Better Auth ----
 # 会话签名密钥（生产必须为随机值，>=32 字符；不要与 GATEWAY_SECRET_KEY 相同）

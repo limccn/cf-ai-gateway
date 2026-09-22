@@ -54,6 +54,13 @@ export default defineConfig({
           // tests/helpers.ts 的 withSwitch 注入 key。白名单 pin ""（= 全放行，与 prod 缺省同形态）。
           RESEND_API_KEY: "",
           EMAIL_ALLOWED_RECIPIENTS: "",
+          // 延迟计费队列名（09-21-prod-resource-naming）：src/index.ts 的 queue() 按
+          // `batch.queue === env.BILLING_QUEUE_NAME` **精确比对**分流（不等即落用量分支）。
+          // **必须显式 pin**：不 pin 时该值来自 wrangler.toml 渲染产物 ← `.dev.vars` —— 即测试
+          // 行为被**生产值文件**牵着走（09-22 改队列名时 helpers 的批名与 env 一度错位）。
+          // 分流的判别性护栏在 tests/queue-dispatch.test.ts（经**真实 queue() 入口**）；
+          // billing-queue / usage 两个文件直驱消费者、不读批名，改批名不会让它们变红（已变异验证）。
+          BILLING_QUEUE_NAME: "cf-ai-gateway-billing",
           // seed 路由测试固定种子（dev-only）：安全密码仅存在于测试绑定，不落盘
           SEED_USERS: JSON.stringify([
             {

@@ -21,7 +21,8 @@
 //   node scripts/verify-render-config.mjs --with-mutation # 另做「破坏性」用例：AC-E5/E6/E8 与 AC-B11
 //                                                          # 需临时挪走/改写 .dev.vars[.staging]（finally 还原 + 字节校验）
 //
-// 覆盖：AC-E1a/E1b/E1c/E2/E3/E5(检查态)/E7/E9/E10 + AC-B11a–h（双域名分流的渲染面）+ AC-E6/E8/B11 的
+// 覆盖：AC-E1a/E1b/E1c/E2/E3/E5(检查态)/E7/E9/E10 + AC-B11a–h（双域名分流的渲染面）
+// + AC-C3（billing 队列三处同名，09-21-prod-resource-naming）+ AC-E6/E8/B11 的
 // 破坏性用例（需 --with-mutation）+ AC-E3 dry-run（需 --with-dry-run）。
 // AC-E4（npm test / typecheck / lint / dev 起服）不在本脚本内 —— 跑全量测试不能从测试链里再起测试。
 import { spawnSync } from "node:child_process";
@@ -465,6 +466,43 @@ if (!halves) {
       );
     }
   }
+}
+
+// ---------------------------------------------------------------- AC-C3：billing 队列「三处同名」（09-21-prod-resource-naming）
+
+/**
+ * 为什么值得单独锁：`BILLING_QUEUE_NAME` 是**双重身份**的 token —— 既是 `[[queues.producers]]`
+ * 的投递目标，又是 `[vars]` 里 queue() 的**分流判据**（`batch.queue === env.BILLING_QUEUE_NAME`，
+ * src/index.ts:183）。两处一旦漂移：投出去的消息永远匹配不上判据 ⇒ 计费批被当**用量批**消费，
+ * **静默不扣费**（不报错、不重试，只是钱没记账）。模板里三处（producer / consumer / [vars]）
+ * 共用同一 token 是结构保证（tests/render-config.unit.test.ts 锁这一层），这里对**生成物**实证
+ * 它确实落成了同一个字符串。
+ */
+if (halves) {
+  const at = rendered.indexOf("\n[env.staging]\n");
+  const segments = [
+    ["基段", rendered.slice(0, at)],
+    ["环境段", rendered.slice(at)],
+  ];
+  const billingNames = [];
+  for (const [label, text] of segments) {
+    const values = tomlValues(text);
+    const billing = one(values, "BILLING_QUEUE_NAME");
+    // 计数而非"包含"：三处同名 = producer + consumer 各一次。只查包含的话，
+    // "usage 队列恰好等于 billing 名、而 billing 指向别处"也能蒙混过关。
+    const hits = billing ? text.split(`queue = "${billing}"`).length - 1 : 0;
+    billingNames.push(billing);
+    report(
+      `AC-C3 ${label} billing 队列三处同名（producer + consumer 各 1 次，且 = [vars] BILLING_QUEUE_NAME）`,
+      Boolean(billing) && hits === 2,
+      `BILLING_QUEUE_NAME=${billing}；\`queue = "${billing}"\` 命中 ${hits} 次；段内全部 queue 值 ${JSON.stringify(all(values, "queue"))}`,
+    );
+  }
+  report(
+    "AC-C3 两段 billing 队列名互不相同（防环境段缺值时静默回退成生产队列名）",
+    Boolean(billingNames[0] && billingNames[1]) && billingNames[0] !== billingNames[1],
+    `生产 ${billingNames[0]} / staging ${billingNames[1]}`,
+  );
 }
 
 // ---------------------------------------------------------------- AC-E9：残留 token

@@ -152,10 +152,19 @@ export interface BillingEventInput {
   ts?: number;
 }
 
-/** 构造 Queues 计费批（模拟消费者收到的 MessageBatch<unknown>）。 */
+/**
+ * 构造 Queues 计费批（模拟消费者收到的 MessageBatch<unknown>）。
+ *
+ * 批名在这里**只是标签**：本文件与 billing-queue.test.ts 都直驱 `consumeBillingBatch(batch, env)`，
+ * 而该函数不读 `batch.queue` —— 批名改成什么都不影响这些用例（2026-09-22 变异验证：改回旧名
+ * "billing-aggregation"，billing-queue.test.ts 仍 8/8 全绿）。队列名分流的**唯一**护栏在
+ * tests/queue-dispatch.test.ts（经真实的 queue() 入口）。这里保持与 env 同名只为可读性；
+ * env 值由 vitest.config.ts 显式 pin、**不读** `.dev.vars` 渲染产物 —— 那是为了测试自洽，
+ * 不是为了检测漂移。
+ */
 export function makeBillingBatch(events: BillingEvent[]): MessageBatch<unknown> {
   return {
-    queue: "billing-aggregation",
+    queue: "cf-ai-gateway-billing",
     messages: events.map((body, index) => ({
       id: `billing-msg-${index}`,
       timestamp: new Date(body.ts),
