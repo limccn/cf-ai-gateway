@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "render:config": "node scripts/render-wrangler-config.mjs && npm run render:modelcaps",
+    "render:config": "node scripts/render-config.mjs",
     "predev": "npm run render:config",
     "predeploy": "npm run render:config",
     "pretest": "npm run render:config",

@@ -1,6 +1,14 @@
-# 本地开发环境变量模板（提交入库；复制为 .dev.vars 后填写，.dev.vars 已被 .gitignore 忽略）
-# 生产环境：非敏感 vars 在部署 shell export 同名环境变量后重新渲染（npm run render:config 烘焙进 wrangler.toml）；
-# 真实 secrets（BETTER_AUTH_SECRET / GITHUB_CLIENT_SECRET / GATEWAY_SECRET_KEY）仅通过 secret put 注入。
+# 本地开发 / 生产环境变量模板（提交入库；复制为 .dev.vars 后填写，.dev.vars 已被 .gitignore 忽略）
+#
+# 一套变量名，每个环境一份值 —— 渲染是**段感知**的（scripts/render-wrangler-config.mjs）：
+#   .dev.vars          → 模板顶层段（production / 本地 dev）        ← 本文件
+#   .dev.vars.staging  → 模板 [env.*] 段（staging）                 ← .dev.vars.staging.example
+# `npm run render:config` **一次**即产出含两个环境的 wrangler.toml；**没有 `--env` 参数**
+# （传入会 fail-fast），部署哪个环境只由 `wrangler deploy [--env staging]` 决定。
+#
+# 生产环境：非敏感 vars 在部署 shell export 同名环境变量后重新渲染（烘焙进 wrangler.toml）；
+# 真实 secrets（BETTER_AUTH_SECRET / GITHUB_CLIENT_SECRET / GATEWAY_SECRET_KEY / RESEND_API_KEY）
+# 仅通过 secret put 注入，禁止出现在本文件之外的任何地方。
 # wrangler.toml 由 wrangler.toml.template 渲染生成（npm run render:config），勿直接修改生成物。
 
 # ---- Infra 结构配置（模板渲染 token；见 CLAUDE.md §环境与配置） ----
@@ -11,8 +19,8 @@
 #   KV_ID                     -> `wrangler kv namespace create CACHE_KV` 输出
 #   QUEUE_NAME                -> `wrangler queues create <name>` 创建的队列名（usage 聚合）
 #   BILLING_QUEUE_NAME        -> `wrangler queues create <name>` 创建的延迟计费队列名
-# staging 环境用同名前缀 STAGING_*；`npm run render:config -- --env staging` 用 STAGING_* 键覆盖同名键。
 # 注意：部署真实环境时在部署 shell export 同名环境变量覆盖本地占位值（process.env 优先于本文件）。
+# staging 的同名键请写在 .dev.vars.staging（模板见 .dev.vars.staging.example）。
 WORKER_NAME=cf-ai-gateway
 DOMAIN=router.lmlh.net
 D1_DB_NAME=cf-ai-gateway-db
@@ -20,13 +28,6 @@ D1_DB_ID=00000000-0000-0000-0000-000000000000
 KV_ID=00000000000000000000000000000000
 QUEUE_NAME=usage-aggregation
 BILLING_QUEUE_NAME=billing-aggregation
-STAGING_WORKER_NAME=cf-ai-gateway-staging
-STAGING_DOMAIN=stg-router.lmlh.net
-STAGING_D1_DB_NAME=cf-ai-gateway-db-staging
-STAGING_D1_DB_ID=00000000-0000-0000-0000-000000000000
-STAGING_KV_ID=00000000000000000000000000000000
-STAGING_QUEUE_NAME=usage-aggregation-staging
-STAGING_BILLING_QUEUE_NAME=billing-aggregation-staging
 
 # ---- Better Auth ----
 # 会话签名密钥（生产必须为随机值，>=32 字符；不要与 GATEWAY_SECRET_KEY 相同）
@@ -77,27 +78,12 @@ API_KEY_PREFIX=sk-
 # 凭据行）永远不能提升为 admin —— PATCH /api/users/:id 对该形态 403，管理画面置灰提升操作。
 # 只拦新提升：降级、停用、以及已是 admin 的幂等重写不受影响。设 true/1/yes/on 才允许提升。
 # EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED=false
-# ---- staging 环境 [vars] 独立值（--env staging 渲染时覆盖顶层同名键；与 STAGING_* infra 键同源管理） ----
-STAGING_BETTER_AUTH_URL=https://stg-router.lmlh.net
-STAGING_GITHUB_CLIENT_ID=replace-me-github-client-id
-STAGING_GITHUB_ALLOWED_EMAILS=alice@example.com
-STAGING_REQUEST_LOG_RETENTION_DAYS=30
-STAGING_API_KEY_PREFIX=sk-
-# staging 全局缓存开关（缺省 false，关闭）；覆盖顶层 CACHE_ENABLED
-# STAGING_CACHE_ENABLED=false
-# staging modelcap 档位乘算常数（缺省与顶层同 8192 × 2）；stg 如需整体缩容改此处
-# STAGING_MODELCAP_BASE_TOKENS=8192
-# STAGING_MODELCAP_MULTIPLIER=2
-# staging 赠金与邮箱验证开关：默认与顶层同（金额 5 / 验证关）。
-# 注意：stg 若不做限制，注册会真实产生赠金流水 —— 不希望如此就显式置 0：
-# STAGING_SIGNUP_BONUS_AMOUNT=0
-# STAGING_EMAIL_VERIFY_BONUS_AMOUNT=0
-# STAGING_EMAIL_VERIFICATION_ENABLED=false
-# staging 账户安全总开关（缺省与顶层同为 false = 邮件注册账户不可提升为 admin）
-# STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED=false
-# staging 事务邮件收件人白名单（08-27-email-notification）：**必须设置** —— staging 会真实投递，
-# 空 = 全放行会把验证信发给任意真实用户（收件人隔离全靠这一条）
-STAGING_EMAIL_ALLOWED_RECIPIENTS=
+# ---- staging 环境的值不在这里 ----
+# staging 与生产/本地**同名键、另一份值**：见 .dev.vars.staging.example（复制为 .dev.vars.staging）。
+# 本文件是「一套变量名」的权威模板，两个 example 的分工：
+#   本文件                  → 模板顶层段（production / 本地 dev）
+#   .dev.vars.staging.example → 模板 [env.*] 段（staging）
+
 # 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
 # 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
 # SEED_USERS=

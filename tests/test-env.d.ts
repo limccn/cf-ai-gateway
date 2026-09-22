@@ -1,6 +1,14 @@
 // 测试环境类型补充（M4）：cloudflare:test 的 `env` 类型为 `Cloudflare.Env`
 // （worker-configuration.d.ts 生成，仅含 D1/KV/Queues 绑定）；字符串环境变量与
 // TEST_MIGRATIONS 由 vitest.config.ts 以 miniflare bindings 注入，此处合并声明。
+// Vite `?raw` 资源导入：vitest 的 Workers pool 走 Vite 转换管线，`?raw` 在**构建期**内联为字符串
+// 常量，因此 workerd 里也读得到仓库文件（测试没有 node:fs）。
+// 用于 tests/render-config.unit.test.ts 直接断言真实 wrangler.toml.template 的结构契约。
+declare module "*?raw" {
+  const content: string;
+  export default content;
+}
+
 declare namespace Cloudflare {
   interface Env {
     GATEWAY_SECRET_KEY: string;

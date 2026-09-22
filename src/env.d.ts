@@ -27,26 +27,27 @@ interface Env {
   // 网关 API Key 明文前缀（缺省 "sk-"；空白视为未设置，回退默认。仅影响新生成 Key）
   API_KEY_PREFIX?: string;
   // 全局响应缓存总开关（09-03-stg-cache-investigation；[vars] 渲染烘焙）：缺省/false = 关闭，
-  // 即使 key.cacheEnabled=true 也不缓存；true/1/yes/on = 开启。staging 用 STAGING_CACHE_ENABLED 独立设置
+  // 即使 key.cacheEnabled=true 也不缓存；true/1/yes/on = 开启。staging 在 .dev.vars.staging 中以同名键给值
   CACHE_ENABLED?: string;
   // modelcap 档位乘算常数（09-16 kv-ops 档位化；[vars] 渲染烘焙）：cap = BASE × MULT × 档位
-  // （src/generated/modelcaps.ts 存档位）；缺省 8192 × 2 = 16384 基准。staging 用 STAGING_* 独立设置
+  // （src/generated/modelcaps.ts 存档位）；缺省 8192 × 2 = 16384 基准。staging 在 .dev.vars.staging 中以同名键给值
+  // （但 render:modelcaps 只读顶层值：档位表两环境共享，不要在此分叉）
   MODELCAP_BASE_TOKENS?: string;
   MODELCAP_MULTIPLIER?: string;
   // 注册赠金 / 邮箱验证赠金金额（USD，09-16-signup-bonus-grant；[vars] 渲染烘焙）：
   // 缺省 5（开箱即送）；显式设 0（或非法值）即不赠（fail-safe 到少发）。
-  // staging 用 STAGING_* 独立设置（stg 需显式置 0 才不送）
+  // staging 在 .dev.vars.staging 中以同名键给值（stg 需显式置 0 才不送）
   SIGNUP_BONUS_AMOUNT?: string;
   EMAIL_VERIFY_BONUS_AMOUNT?: string;
   // 邮箱验证功能总开关（09-16-signup-bonus-grant；[vars] 渲染烘焙）：缺省 false = 整个
   // emailVerification 段不配置（不发验证信、不发验证赠金）；true/1/yes/on 才开启。
-  // staging 用 STAGING_EMAIL_VERIFICATION_ENABLED 独立设置
+  // staging 在 .dev.vars.staging 中以同名键给值
   EMAIL_VERIFICATION_ENABLED?: string;
   // 账户安全总开关（09-21-email-admin-promotion-switch；[vars] 渲染烘焙）：缺省 false =
   // 邮件注册的账户（有 accounts.providerId='credential' 行）**永远不能**提升为 admin ——
   // PATCH /api/users/:id 对该形态显式 403，管理画面的提升操作置灰；true/1/yes/on 才允许。
   // 只拦「新提升」：降级、停用、以及已是 admin 的幂等重写不受影响（不倒查存量）。
-  // staging 用 STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED 独立设置
+  // staging 在 .dev.vars.staging 中以同名键给值
   EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED?: string;
   // Resend 事务邮件 API key（08-27-email-notification；**真实 secret**：本地 .dev.vars，
   // 生产/staging 各自 `wrangler secret put RESEND_API_KEY`）。空/缺失 = **通道未配置**：
@@ -55,7 +56,7 @@ interface Env {
   // 类型如实反映，且必须与 tests/test-env.d.ts 的声明一致（否则 Cloudflare.Env 不能传给 Env）
   RESEND_API_KEY?: string;
   // 事务邮件收件人白名单（同上；[vars] 渲染烘焙）：逗号分隔、大小写不敏感；**空 = 全放行**（prod 语义）。
-  // staging 必须设 STAGING_EMAIL_ALLOWED_RECIPIENTS，防测试环境向真实用户发信
+  // staging 必须在 .dev.vars.staging 中设同名键，防测试环境向真实用户发信
   EMAIL_ALLOWED_RECIPIENTS?: string;
   // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users
   // 并在注册校验中放行种子邮箱（绕过邀请码）。生产禁止设置。格式见 src/lib/seed-users.ts
