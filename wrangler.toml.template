@@ -110,6 +110,10 @@ EMAIL_VERIFICATION_ENABLED = "{EMAIL_VERIFICATION_ENABLED}"
 # admin（写边界 403 + 画面置灰该操作）；true/1/yes/on 才允许提升。只拦新提升，不倒查存量 admin
 # （降级/停用/已是 admin 的幂等重写不受影响）。staging 用 STAGING_* 独立设置。
 EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED = "{EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED}"
+# 事务邮件收件人白名单（08-27-email-notification；逗号分隔，大小写不敏感，空白项忽略）：
+# **空 = 全放行**（prod 语义）。staging **必须**显式设置（STAGING_EMAIL_ALLOWED_RECIPIENTS），
+# 否则测试环境会把验证信发给任意真实用户。名单外收件人静默跳过（记 email_skipped_allowlist）。
+EMAIL_ALLOWED_RECIPIENTS = "{EMAIL_ALLOWED_RECIPIENTS}"
 
 # ====================================================================
 # Staging 环境（wrangler deploy --env staging；worker 名取 STAGING_WORKER_NAME）
@@ -175,3 +179,5 @@ EMAIL_VERIFY_BONUS_AMOUNT = "{STAGING_EMAIL_VERIFY_BONUS_AMOUNT}"
 EMAIL_VERIFICATION_ENABLED = "{STAGING_EMAIL_VERIFICATION_ENABLED}"
 # stg 账户安全总开关（缺省与顶层同为 false = 邮件注册账户不可提升为 admin）
 EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED = "{STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED}"
+# stg 事务邮件收件人白名单：**必须显式设置**（staging 隔离真实用户；空 = 全放行，会误发）
+EMAIL_ALLOWED_RECIPIENTS = "{STAGING_EMAIL_ALLOWED_RECIPIENTS}"

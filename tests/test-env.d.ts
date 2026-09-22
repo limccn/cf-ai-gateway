@@ -19,6 +19,19 @@ declare namespace Cloudflare {
      * 平行声明，漏一处会让「运行时能跑、类型检查报错」（src/env.d.ts 管不到 cloudflare:test 的 env）。
      */
     EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED?: string;
+    /**
+     * 邮箱验证总开关（09-16-signup-bonus-grant）。vitest.config.ts pin "true"（否则 emailVerification
+     * 段整段不配置，验证链路不可测）；email-verification-send.test.ts 的 AC5 用 withSwitch 翻到
+     * "false" 做对照 —— 故这里必须声明（漏一处会「运行时能跑、typecheck 报错」）。
+     */
+    EMAIL_VERIFICATION_ENABLED?: string;
+    /**
+     * Resend 事务邮件 API key（08-27-email-notification）。vitest.config.ts pin ""（**空 = 通道未配置**）
+     * → 既有注册/验证用例零网络、行为不变；需要真发送的用例自己 stub fetch 并用 withSwitch 注入 key。
+     */
+    RESEND_API_KEY?: string;
+    /** 事务邮件收件人白名单（同上）。pin "" = 全放行，与 prod 缺省形态一致。 */
+    EMAIL_ALLOWED_RECIPIENTS?: string;
     /** vitest.config.ts 注入的 drizzle 迁移 SQL（applyD1Migrations 用）。 */
     TEST_MIGRATIONS: D1Migration[];
   }

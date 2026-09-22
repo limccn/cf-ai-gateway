@@ -44,6 +44,12 @@ export default defineConfig({
           // 开启态由 tests/helpers.ts 的 withSwitch 在运行时改写 —— 步骤 3 实测**生效**（同一 isolate
           // 内对主 worker 可见，与 countKvOps 改写 env.CACHE_KV 同一机制）。
           EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED: "false",
+          // 事务邮件通道（08-27-email-notification）：**空 key = 通道未配置**（src/lib/email.ts 短路，
+          // 只记 email_not_configured）。EMAIL_VERIFICATION_ENABLED 在这里是 "true"，注册/验证用例
+          // 会走真发送路径 —— 空 key 让它们零网络、行为不变；要验发送的用例自己 stub fetch 并用
+          // tests/helpers.ts 的 withSwitch 注入 key。白名单 pin ""（= 全放行，与 prod 缺省同形态）。
+          RESEND_API_KEY: "",
+          EMAIL_ALLOWED_RECIPIENTS: "",
           // seed 路由测试固定种子（dev-only）：安全密码仅存在于测试绑定，不落盘
           SEED_USERS: JSON.stringify([
             {
