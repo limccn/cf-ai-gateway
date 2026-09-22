@@ -29,7 +29,7 @@ const OUTPUT_PATH = join(ROOT, "wrangler.toml");
 const DOT_VARS = join(ROOT, ".dev.vars");
 const DOT_VARS_STAGING = join(ROOT, ".dev.vars.staging");
 
-// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（38 键）。
+// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（40 键）。
 // 计数口径 = 本集合元素个数（非模板 {TOKEN} 出现次数，同一 token 会在多处复用）。
 // 顶层 [vars] 运行时配置（BETTER_AUTH_URL 等）与 infra 键同策略烘焙——wrangler 4.x 不解析
 // {KEY}，值必须在构建期就位。本地默认值（localhost / 占位）来自 .dev.vars，仅用于本地 dev
@@ -62,6 +62,8 @@ const TOKENS = new Set([
   "EMAIL_VERIFY_BONUS_AMOUNT",
   "EMAIL_VERIFICATION_ENABLED",
   "EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED",
+  // 事务邮件收件人白名单（08-27-email-notification）：**空是合法配置**（= 全放行），见 EMPTY_ALLOWED。
+  "EMAIL_ALLOWED_RECIPIENTS",
   // [env.staging.vars]：STAGING_* 独立键，与 infra 键同源管理（--env staging 渲染）。
   "STAGING_API_KEY_PREFIX",
   "STAGING_BETTER_AUTH_URL",
@@ -75,6 +77,17 @@ const TOKENS = new Set([
   "STAGING_EMAIL_VERIFY_BONUS_AMOUNT",
   "STAGING_EMAIL_VERIFICATION_ENABLED",
   "STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED",
+  "STAGING_EMAIL_ALLOWED_RECIPIENTS",
+]);
+
+/**
+ * 允许空值的 token：空是**合法配置**（空 = 全放行，见 src/lib/email.ts 的 parseEmailAllowlist），
+ * 而非「缺配置」。其余 token 取值为空仍 fail-fast。
+ * 注意：通道本身另有缺省闸门 —— RESEND_API_KEY（secret，不进本渲染）为空时整个邮件通道关闭。
+ */
+const EMPTY_ALLOWED = new Set([
+  "EMAIL_ALLOWED_RECIPIENTS",
+  "STAGING_EMAIL_ALLOWED_RECIPIENTS",
 ]);
 
 /** 本地占位特征：命中即 WARN（仅提醒，不 fail——本地 dev 渲染本来就该是这些值）。 */
@@ -105,6 +118,10 @@ const DEFAULT_VALUES = {
   // （缺省即禁止邮件注册账户提升为 admin）。DEFAULT 必须非空，否则缺配置会触发下面的 fail-fast。
   EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED: "false",
   STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED: "false",
+  // 事务邮件收件人白名单缺省（08-27-email-notification）：**空串**即缺省语义（空 = 全放行，
+  // prod 形态）。空值靠 EMPTY_ALLOWED 放行 —— 见该集合的注释。
+  EMAIL_ALLOWED_RECIPIENTS: "",
+  STAGING_EMAIL_ALLOWED_RECIPIENTS: "",
 };
 
 // 解析 .dev.vars：KEY=VALUE 行 + # 注释 + 双/单引号剥离（手写解析，零依赖）。
@@ -171,7 +188,7 @@ const values = {};
 const missing = [];
 for (const token of templateTokens) {
   const value = process.env[token] ?? fromVars[token] ?? DEFAULT_VALUES[token] ?? "";
-  if (!value.trim()) {
+  if (!value.trim() && !EMPTY_ALLOWED.has(token)) {
     missing.push(token);
     continue;
   }
@@ -186,6 +203,23 @@ for (const token of templateTokens) {
 }
 if (missing.length) {
   fail("以下 token 缺值（fail-fast，未写出生成物）", missing);
+}
+
+// staging 邮件误发护栏（08-27-email-notification）：staging 与 prod **共用同一把 Resend 账号**，
+// 而「空白名单 = 全放行」是 prod 语义 —— 在 staging 上它几乎只能是漏配。危险组合 = 开关开 + 名单空：
+// 此时任何在 stg 注册的**真实邮箱**都会收到信。**仅告警不 fail**（空值仍是合法配置，见 EMPTY_ALLOWED），
+// 只把危险组合喊出来。另注意 fail-fast 网兜不住这两个键 —— 它们在 DEFAULT_VALUES 里有缺省值。
+// 判据与 src/lib/bonus.ts 的 isEmailVerificationEnabled 保持同一套真值集合（true/1/yes/on）。
+if (env === "staging") {
+  const truthy = new Set(["true", "1", "yes", "on"]);
+  const switchOn = truthy.has((values["STAGING_EMAIL_VERIFICATION_ENABLED"] ?? "").toLowerCase());
+  if (switchOn && (values["STAGING_EMAIL_ALLOWED_RECIPIENTS"] ?? "") === "") {
+    console.warn(
+      "  ⚠ STAGING_EMAIL_VERIFICATION_ENABLED 为开，但 STAGING_EMAIL_ALLOWED_RECIPIENTS 为空（= 全放行）——\n" +
+        "    staging 将能向任意真实邮箱发信（与 prod 共用 Resend 账号）。\n" +
+        "    部署前请 export STAGING_EMAIL_ALLOWED_RECIPIENTS=<测试邮箱>（逗号分隔多个）。",
+    );
+  }
 }
 
 // 渲染：非注释行白名单 token 逐项替换（全量烘焙，wrangler 4.x 不做运行时插值）。

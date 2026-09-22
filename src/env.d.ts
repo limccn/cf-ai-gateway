@@ -48,6 +48,15 @@ interface Env {
   // 只拦「新提升」：降级、停用、以及已是 admin 的幂等重写不受影响（不倒查存量）。
   // staging 用 STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED 独立设置
   EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED?: string;
+  // Resend 事务邮件 API key（08-27-email-notification；**真实 secret**：本地 .dev.vars，
+  // 生产/staging 各自 `wrangler secret put RESEND_API_KEY`）。空/缺失 = **通道未配置**：
+  // 不发信、不抛错，只记 email_not_configured（fail-safe，见 src/lib/email.ts）。
+  // 可选（`?`）：该键不经 render 烘焙，未被 secret put 的环境里 binding 真的缺席 ——
+  // 类型如实反映，且必须与 tests/test-env.d.ts 的声明一致（否则 Cloudflare.Env 不能传给 Env）
+  RESEND_API_KEY?: string;
+  // 事务邮件收件人白名单（同上；[vars] 渲染烘焙）：逗号分隔、大小写不敏感；**空 = 全放行**（prod 语义）。
+  // staging 必须设 STAGING_EMAIL_ALLOWED_RECIPIENTS，防测试环境向真实用户发信
+  EMAIL_ALLOWED_RECIPIENTS?: string;
   // 测试用户批量初始化（dev-only，JSON 数组字符串）：设置后启用 POST /api/seed/users
   // 并在注册校验中放行种子邮箱（绕过邀请码）。生产禁止设置。格式见 src/lib/seed-users.ts
   SEED_USERS?: string;

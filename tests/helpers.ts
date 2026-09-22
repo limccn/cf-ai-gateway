@@ -86,15 +86,25 @@ export function countKvOps(prefix: string): {
  * `env.CACHE_KV` 同一机制）。两条边界：① 可见性仅限本 isolate —— pool-workers 每个测试文件一个
  * isolate，故不跨文件泄漏；② **同文件内会残留** —— 所有翻转必须走本函数（try/finally），
  * 否则污染同文件其余依赖 pinned 值的用例。
+ *
+ * key 取值范围是**白名单**（不是任意键）：只在 vitest.config.ts 里 pin 过、且确实需要逐用例
+ * 翻转的键才登记 —— 未被 pin 的键无法保证可写。08-27-email-notification 追加了邮件通道三键
+ * （RESEND_API_KEY / EMAIL_ALLOWED_RECIPIENTS / EMAIL_VERIFICATION_ENABLED）。
  */
 export async function withSwitch<T>(
-  key: "EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED",
+  key:
+    | "EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED"
+    | "EMAIL_VERIFICATION_ENABLED"
+    | "RESEND_API_KEY"
+    | "EMAIL_ALLOWED_RECIPIENTS",
   value: string | undefined,
   fn: () => Promise<T>,
 ): Promise<T> {
   const original = env[key];
   try {
-    env[key] = value as string;
+    // 四个键在 Cloudflare.Env 里都是 string | undefined（清空 = 复原「未配置」形态），
+    // 故这里无需断言
+    env[key] = value;
     return await fn();
   } finally {
     env[key] = original;

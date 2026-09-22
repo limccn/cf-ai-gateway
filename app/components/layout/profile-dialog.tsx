@@ -211,11 +211,12 @@ function ProfileForm({ profile, onClose }: { profile: Profile; onClose: () => vo
           </p>
         ) : null}
         {resendStatus === "requested" ? (
-          // 文案诚实性（design §2.3）：本轮 sendVerificationEmail 是占位、不发真实邮件，
-          // 不得声称「已发送到你的邮箱」。接入真实邮件通道后必须同步改写此文案。
+          // 文案诚实性（design §5 前端文案）：这句只在服务端**真把信交给 Resend** 时出现 ——
+          // 交互式路径的发送失败会由 better-auth 上抛成非 2xx（走上面的 resendError 分支），
+          // 不会落到这里。故不得写「可能没发」这类含糊措辞，只说发送结果与后续动作。
           <p role="status" className="text-xs text-muted-foreground">
-            Verification email requested. Note: email delivery is not enabled on this gateway
-            yet, so nothing has been sent to your inbox.
+            Verification email sent to {profile.email}. Check your spam folder if it does not
+            arrive within a few minutes.
           </p>
         ) : null}
       </div>

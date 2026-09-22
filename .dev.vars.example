@@ -45,6 +45,16 @@ GITHUB_ALLOWED_EMAILS=alice@example.com
 # 生产：wrangler secret put GATEWAY_SECRET_KEY；任意字符串，建议 >=32 字符随机值
 GATEWAY_SECRET_KEY=local-gateway-secret-key-change-me-0123456789abcdef
 
+# ---- 事务邮件通道（Resend，08-27-email-notification） ----
+# Resend API key（**真实 secret**）：本地填在 .dev.vars；生产 / staging 各自
+# `wrangler secret put RESEND_API_KEY`（staging 加 `--env staging`），建议两环境各用一把
+# send-only 的独立 key（blast radius 隔离）。
+# **空或缺失 = 通道未配置**：不发信、不抛错，只记 email_not_configured（fail-safe；回滚杠杆之一）。
+RESEND_API_KEY=
+# 收件人白名单（逗号分隔，大小写不敏感，空白项忽略）；**空 = 全放行**（prod 语义）。
+# 名单外收件人静默跳过（记 email_skipped_allowlist，不抛错 —— 保住防枚举的恒定耗时）。
+EMAIL_ALLOWED_RECIPIENTS=
+
 # ---- 其他 ----
 # 全局响应缓存总开关（09-03-stg-cache-investigation）；缺省 false（关闭），设为 true/1/yes/on 开启
 # 即使设为 true，仍需 key.cacheEnabled=true 且非流式且请求体 ≤32KB 才能命中/写入缓存
@@ -85,6 +95,9 @@ STAGING_API_KEY_PREFIX=sk-
 # STAGING_EMAIL_VERIFICATION_ENABLED=false
 # staging 账户安全总开关（缺省与顶层同为 false = 邮件注册账户不可提升为 admin）
 # STAGING_EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED=false
+# staging 事务邮件收件人白名单（08-27-email-notification）：**必须设置** —— staging 会真实投递，
+# 空 = 全放行会把验证信发给任意真实用户（收件人隔离全靠这一条）
+STAGING_EMAIL_ALLOWED_RECIPIENTS=
 # 测试用户批量初始化（仅本地开发；JSON 数组）。设置后暴露 POST /api/seed/users 端点 —— 生产切勿设置！
 # 格式: [{"email":"admin@local.dev","password":"<min 8 位>","name":"Admin","role":"admin"},{"email":"member@local.dev","password":"<min 8 位>","name":"Member","role":"member"}]
 # SEED_USERS=

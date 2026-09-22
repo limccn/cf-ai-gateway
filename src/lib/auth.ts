@@ -18,6 +18,10 @@
 //     1) sendOnSignUp 一并消失 → 注册不签发验证 token、不发信；
 //     2) afterEmailVerification 未接线 → 即使有人拿旧 token 打通 GET /api/auth/verify-email
 //        （Better Auth 内置端点恒在）也不会发验证赠金 —— 开关关闭期间赠金结构性不可达。
+// - 真发送（08-27-email-notification，2026-09-22）：sendVerificationEmail 回调接 Resend
+//   （src/lib/email.ts）。**失败不在回调里 catch**：注册路径由库侧 runInBackgroundOrAwait
+//   吞错（fail-open），交互式端点须上抛（fail-loud）—— 自己 catch 会让后者谎报「已发送」。
+//   通道未配置（RESEND_API_KEY 空/缺失）时降级为只记 email_not_configured，不发信。
 // - 不开 emailAndPassword.requireEmailVerification、不设 autoSignIn:false：
 //   未验证邮箱仍可登录与调用（D3），且注册响应形状零变更
 //   （Better Auth sign-up 的 shouldReturnGenericDuplicateResponse = requireEmailVerification
@@ -28,6 +32,7 @@ import { eq } from "drizzle-orm";
 import type { Db } from "../db";
 import * as schema from "../db/schema";
 import { grantEmailVerifyBonus, grantSignupBonus, isEmailVerificationEnabled } from "./bonus";
+import { sendMail, verificationEmail } from "./email";
 import { consumeInviteCode, validateInviteCode } from "./invites";
 import { logger } from "./logger";
 import { MIN_PASSWORD_LENGTH } from "./password";
@@ -118,20 +123,25 @@ export function createAuth(env: Env, db: Db) {
     ...(isEmailVerificationEnabled(env.EMAIL_VERIFICATION_ENABLED)
       ? {
           emailVerification: {
-            // D9：注册即自动发（本轮 sendVerificationEmail 为占位，不发真实邮件）
+            // D9：注册即自动发（09-22 起为**真实投递**：sendMail → Resend，见 src/lib/email.ts）
             sendOnSignUp: true,
             // 显式写出默认值，便于阅读：验证成功后自动为该邮箱建会话
             autoSignInAfterVerification: true,
-            expiresIn: 60 * 60, // 1 小时
+            expiresIn: 60 * 60, // 1 小时（文案里的有效期说明与这里同一口径，改一处须同步另一处）
             sendVerificationEmail: async ({ user, url }) => {
-              // 占位（D2：本轮不发信）：记录 user id 与链接骨架供排障（baseURL 配错会体现在这里，
+              // 排障入口：记录 user id 与链接骨架（baseURL 配错会体现在这里，
               // 见 spec big-question/env-configuration）。**token 不入日志**（spec backend/security
-              // 「Never log raw tokens」）—— 只留 token 参数的存在性，邮件通道就绪后接 sendEmail。
+              // 「Never log raw tokens」）—— 只留 token 参数的存在性。
               logger.info("email_verify_link_issued", {
                 userId: Number(user.id),
                 email: user.email,
                 url: url.replace(/token=[^&]*/, "token=<redacted>"),
               });
+              // **刻意不 try/catch**（design §2）：注册路径（sendOnSignUp）由 better-auth 的
+              // runInBackgroundOrAwait 吞错 → 注册天然 fail-open；交互式
+              // POST /api/auth/send-verification-email 是裸 await → 错误上抛给用户。
+              // 在这里补 catch 会让交互式路径「谎报已发送」（返回 {status:true} 但没发），勿加。
+              await sendMail(env, logger, { to: user.email, ...verificationEmail(url) });
             },
             // 完成验证 → 发放验证赠金（fail-open：赠金异常不影响验证结果）
             afterEmailVerification: async (user) => {
