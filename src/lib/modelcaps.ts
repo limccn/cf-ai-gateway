@@ -1,7 +1,8 @@
 // modelcap 档位乘算（09-16 kv-ops O3c 档位化，用户裁决）：
 // MODELCAPS 存档位（xlarge 式 1x/2x，null=不限）；运行时
 // cap = MODELCAP_BASE_TOKENS × MODELCAP_MULTIPLIER × 档位。
-// 两常数为 env [vars] 烘焙（缺省 8192 × 2 = 16384 基准；staging 独立 STAGING_*）。
+// 两常数为 env [vars] 烘焙（缺省 8192 × 2 = 16384 基准；staging 的值取自 .dev.vars.staging 的同名键，
+// 但 render:modelcaps 只读顶层值 —— 档位表两环境共享，不要分叉）。
 // 改常数需重跑 render:modelcaps + 部署（档位按生成时常数推导，design.md §3.1 契约）。
 import { MODELCAPS } from "../generated/modelcaps";
 

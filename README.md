@@ -109,7 +109,7 @@ npx wrangler d1 execute cf-ai-gateway-db --local \
 
 | Command | Purpose |
 | --- | --- |
-| `npm run render:config` | Render `wrangler.toml` from `wrangler.toml.template` + `.dev.vars` (idempotent; auto-runs before dev/test/deploy/db:*) |
+| `npm run render:config` | Render `wrangler.toml` from `wrangler.toml.template` + both value files (`.dev.vars` / `.dev.vars.staging`, segment-aware; idempotent; auto-runs before dev/test/deploy/db:*) |
 | `npm run dev` | Vite dev server (Worker + SPA, Miniflare bindings) |
 | `npm run build` | Build the React SPA (Vite) into `dist/` |
 | `npm test` | Vitest suite (unit + integration, Miniflare: D1/KV/Queues) |
