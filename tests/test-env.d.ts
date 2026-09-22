@@ -14,6 +14,13 @@ declare namespace Cloudflare {
     GATEWAY_SECRET_KEY: string;
     BETTER_AUTH_SECRET: string;
     BETTER_AUTH_URL: string;
+    /**
+     * 公开 API 域名（双域名分流，09-21-dual-domain-split）。vitest.config.ts pin ""（**空 =
+     * 未配置 = 分流整体关闭**，既有用例零影响）；tests/domain-split.test.ts 用 helpers.withSwitch
+     * 逐用例翻成真实域名来覆盖分流规则 —— 故这里必须声明（本文件是 Cloudflare.Env 的平行声明，
+     * 漏一处会「运行时能跑、typecheck 报错」，src/env.d.ts 管不到 cloudflare:test 的 env）。
+     */
+    API_DOMAIN?: string;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
     GITHUB_ALLOWED_EMAILS: string;

@@ -12,6 +12,11 @@
 //   在两段各自取值：
 //     基段：process.env[K] → .dev.vars[K] → DEFAULT_VALUES[K]
 //     环境段：process.env[K] → .dev.vars.staging[K] → .dev.vars[K] → DEFAULT_VALUES[K]
+//   **逐侧校验**：只检查「模板中实际出现的 (token, 段) 组合」，**不比对两个值文件的键集合** ——
+//   某 token 只在一侧出现的形态合法，故不比对。**当前 22 个 token 两段都有**（含 `LEGACY_DOMAIN`：
+//   prod 绑 router.lmlh.net、stg 绑 stg-router.lmlh.net），没有任何 token 处于"只在环境段且无缺省"
+//   的形态 ⇒ 缺 `.dev.vars.staging` 时环境段整体回退、只 WARN（R-E9）。下方 missing 的 fail-fast
+//   保留为网兜：将来若再出现该形态的 token，它会在回退状态下报缺值（见该处注释）。
 //   于是同一份模板同时产出两个环境的正确内容，**部署哪个环境只由 `wrangler deploy [--env staging]`
 //   这个运行参数决定** —— 这也正是 `--env` 渲染参数被移除的原因（平铺替换时代它会把顶层段也渲染成
 //   staging 值，`name` / `routes` / D1 id 全部错位，忘了重渲染就留下毒化的生成物）。
@@ -43,7 +48,7 @@ const OUTPUT_PATH = join(ROOT, "wrangler.toml");
 const DOT_VARS = join(ROOT, ".dev.vars");
 const DOT_VARS_STAGING = join(ROOT, ".dev.vars.staging");
 
-// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（20 键）。
+// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（22 键）。
 // 计数口径 = 本集合元素个数（非模板 {TOKEN} 出现次数：同名 token 在顶层段与环境段各出现一次）。
 // 顶层 [vars] 运行时配置（BETTER_AUTH_URL 等）与 infra 键同策略烘焙——wrangler 4.x 不解析
 // {KEY}，值必须在构建期就位。本地默认值（localhost / 占位）来自 .dev.vars，仅用于本地 dev
@@ -52,6 +57,13 @@ const TOKENS = new Set([
   // --- infra 结构键（基段与管理段同名共用；值文件各给一份） ---
   "WORKER_NAME",
   "DOMAIN",
+  // 双域名分流（09-21-dual-domain-split）：API_DOMAIN = 公开 API 域（基段与 stg 段各一份值）。
+  "API_DOMAIN",
+  // 旧域转发源（prod = router.lmlh.net / stg = stg-router.lmlh.net）：**两段各一条 routes**，
+  // 故两个值文件都必须有该键（缺基段那份 ⇒ 基段第三条 route 无值可烘，fail-fast）。仅用于绑定：
+  // 中间件不读它（「host 不属于两类新域 ⇒ 按路径转发」已涵盖）。校验按「模板中实际出现的
+  // (token, 段)」逐条判定，**不比对两个值文件的键集合**。
+  "LEGACY_DOMAIN",
   "D1_DB_NAME",
   "D1_DB_ID",
   "KV_ID",
@@ -224,18 +236,22 @@ for (const { token, section: sec } of occurrences) {
   }
   values[key] = trimmed;
 }
-if (missing.length) {
-  fail("以下 token 缺值（fail-fast，未写出生成物）", missing.map((m) => m.label));
-}
-
-// 缺 .dev.vars.staging 时环境段整体回退到 .dev.vars（R-E9）。**不 fail-fast**：predev / pretest
-// 都会渲染，全新 clone 没有该文件时不能直接挂。但必须喊出来——否则"stg 已配好"是错觉。
+// 缺 .dev.vars.staging 时环境段整体回退到 .dev.vars（R-E9）：predev / pretest 每次都会渲染，
+// 只有 .dev.vars 的开发者不该被挡住，故只 WARN 不 fail。**当前 22 个 token 全部有基段或缺省来源**
+// （09-21-dual-domain-split 起 `LEGACY_DOMAIN` 两段各一条 routes，prod 也绑旧域），本状态下渲染
+// 必然成功；上面 missing 的 fail-fast 留给"将来再出现只在环境段、又无缺省的 token"—— 那种形态在
+// 此状态下无处取值，会在回退状态下报缺值。故本 WARN 仍须在 fail-fast **之前**打印：让"回退状态"
+// 与"为什么这次挂了/该怎么办"出现在同一段输出里。
 if (!stagingSourceExists) {
   console.warn(
     `  ⚠ ${DOT_VARS_STAGING.replace(ROOT, ".")} 不存在，环境段（[env.*]）当前回退为本地值 ——\n` +
       "    此时 staging 段与顶层段取值相同（含 worker 名），**不能据此部署 staging**。\n" +
       "    创建：cp .dev.vars.staging.example .dev.vars.staging 后填入各环境的真实值。",
   );
+}
+
+if (missing.length) {
+  fail("以下 token 缺值（fail-fast，未写出生成物）", missing.map((m) => m.label));
 }
 
 // modelcap 常数不得按环境分叉：render:modelcaps 只读 .dev.vars 的顶层值，生成的档位表
@@ -272,7 +288,7 @@ const { top: topWorkerName, envNames } = extractWorkerNames(rendered);
 for (const [name, workerName] of envNames) {
   if (workerName !== topWorkerName) continue;
   if (!stagingSourceExists) {
-    // 缺文件导致的回退：上面已给 WARN，这里只补充后果，不 fail（见 R-E9 与 AC-E5）。
+    // 缺文件导致的回退：上面已给 WARN，这里只补充后果，不 fail（见 R-E9 与 AC-E5「不 fail-fast」）。
     console.warn(
       `  ⚠ [env.${name}].name 与顶层相同（${topWorkerName}）—— 这是上面"环境段回退"的直接后果。\n` +
         `    创建 .dev.vars.staging 并设置不同的 WORKER_NAME 后即可正常渲染。`,

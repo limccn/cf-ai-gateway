@@ -298,10 +298,31 @@ describe("真实模板 wrangler.toml.template 的结构契约", () => {
       "KV_ID",
       "QUEUE_NAME",
       "BILLING_QUEUE_NAME",
+      // 双域名分流（09-21-dual-domain-split）：`API_DOMAIN` 两段都有（routes + [vars] 各一处）。
+      // 它是**运行时分流的开关**，只在环境段出现的话 stg 会静默回退到基段的生产域名。
+      "API_DOMAIN",
+      // 旧域转发源：**两段各一条 routes**（prod = router.lmlh.net / stg = stg-router.lmlh.net）。
+      // 只在一段出现的话，那一侧的第三条 route 无值可烘 —— 基段缺是 fail-fast，环境段缺则静默
+      // 回退成 prod 的旧域（由 verify 脚本的 AC-B11c 直接对账值文件钉住）。
+      "LEGACY_DOMAIN",
     ]) {
       expect(inBase.has(token)).toBe(true);
       expect(inEnv.has(token)).toBe(true);
     }
+  });
+
+  it("{LEGACY_DOMAIN} 两段都出现（prod 与 stg 各绑自己的旧域做转发）", () => {
+    const occurrences = collectTokenOccurrences(classifySections(lines)).filter(
+      (o) => o.token === "LEGACY_DOMAIN",
+    );
+    // 空集合会让 `every` 恒真（恒真假绿），先钉住"确实出现过"。
+    expect(occurrences.length).toBeGreaterThan(0);
+    // 判据取"两段各有 ≥1 处"而非精确条数：条数由 verify 脚本的 AC-B11a/b（有序全量比对，含
+    // "恰好三条"）钉住；这里要抓的是**某一侧的绑定整条消失**（prod 不再绑旧域 ⇒ 基段 0 处）。
+    const inBase = occurrences.filter((o) => o.section === SECTION_BASE);
+    const inEnv = occurrences.filter((o) => o.section === SECTION_ENV);
+    expect(inBase.length).toBeGreaterThan(0);
+    expect(inEnv.length).toBeGreaterThan(0);
   });
 
   it("整份模板渲染后：顶层 name 取基段值、[env.staging].name 取环境段值，且两者不同", () => {

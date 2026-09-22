@@ -73,16 +73,16 @@ git branch -d feat/<name>                          # ⑤ 删除
 
 ## 环境与配置（env 三分类）
 
-> 全量：`.trellis/spec/governance/config-inventory.md`（RENDER-ENV token 清单，2026-09-22 实测 **20 个**——段感知改造后 `STAGING` 前缀的孪生键已全删，一套 token 名两段各取一份值）。
+> 全量：`.trellis/spec/governance/config-inventory.md`（RENDER-ENV token 清单，2026-09-22 实测 **22 个**——段感知改造后 `STAGING` 前缀的孪生键已全删，一套 token 名两段各取一份值；双域名分流又加 `API_DOMAIN`（两段各一份值）与 `LEGACY_DOMAIN`（旧域转发源，**两段各一条 routes**：prod=`router.lmlh.net` / stg=`stg-router.lmlh.net`））。
 
 1. **真实 secret**（`BETTER_AUTH_SECRET` / `GITHUB_CLIENT_SECRET` / `GATEWAY_SECRET_KEY`）→ 本地 `.dev.vars`、生产 `wrangler secret put`。**禁止出现在 wrangler.toml / 代码 / 文档值中**。
 2. **PII 与环境差异值**（`GITHUB_ALLOWED_EMAILS` / `BETTER_AUTH_URL` / `GITHUB_CLIENT_ID` / `REQUEST_LOG_RETENTION_DAYS` / `API_KEY_PREFIX`）→ wrangler.toml `[vars]` 渲染烘焙，值在**基段 ← `.dev.vars`**、**`[env.*]` 段 ← `.dev.vars.staging`**（再回退 `.dev.vars`）/ 部署 shell export（`process.env` 优先）；缺失即 fail-fast。**策略开关**（`CACHE_ENABLED` / `EMAIL_VERIFICATION_ENABLED` / `EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED` 等）走同一机制，缺省一律**关闭**（fail-closed）。
-3. **基础设施资源 ID**（D1 database_id、KV id、Queue 名、worker 名、自定义域名）→ toml 字面量，经 `wrangler.toml.template` 模板 token（`WORKER_NAME` / `DOMAIN` / `D1_DB_*` / `KV_ID` / `QUEUE_NAME` / `BILLING_QUEUE_NAME`）渲染管理，**两段同名**。
+3. **基础设施资源 ID**（D1 database_id、KV id、Queue 名、worker 名、自定义域名）→ toml 字面量，经 `wrangler.toml.template` 模板 token（`WORKER_NAME` / `DOMAIN` / `API_DOMAIN` / `LEGACY_DOMAIN` / `D1_DB_*` / `KV_ID` / `QUEUE_NAME` / `BILLING_QUEUE_NAME`）渲染管理，**两段同名**（旧域 `LEGACY_DOMAIN` 也两段各一条 routes，值各取各的值文件）。域名 token 一律**不进渲染脚本的 `DEFAULT_VALUES`**——域名没有安全缺省，缺值即 fail-fast。
 
 **关键坑（2026-08-26 实测）**：wrangler 4.x **不解析 `{KEY}` 占位符**——`[vars]` 值必须在构建期烘焙真实值（`npm run render:config`），否则占位符字面量进运行时。渲染脚本仅读白名单键、缺键 fail-fast、值含本地占位特征（localhost/placeholder-/@example.com）时 WARN。
 
 - `wrangler.toml` 是**生成物**（gitignored），勿直改；改配置走两个值文件 + render。**渲染是段感知的**：一次 `npm run render:config` 同时产出两环境的正确内容，`--env` 渲染参数已移除（传入即 fail-fast）——部署哪个环境只由 `wrangler deploy [--env staging]` 决定。
-- `.dev.vars.example` / `.dev.vars.staging.example` 是全部键的权威模板（提交入库）；本地 `cp .dev.vars.example .dev.vars` 填本地值，`cp .dev.vars.staging.example .dev.vars.staging` 填 staging 值（**同名键**）。`.dev.vars.staging` 缺失时环境段回退到 `.dev.vars`（只 WARN），**不可据此部署 staging**。
+- `.dev.vars.example` / `.dev.vars.staging.example` 是全部键的权威模板（提交入库）；本地 `cp .dev.vars.example .dev.vars` 填本地值，`cp .dev.vars.staging.example .dev.vars.staging` 填 staging 值（**同名键**）。`.dev.vars.staging` 缺失时环境段回退到 `.dev.vars`（WARN，`predev`/`pretest` 仍能跑）；渲染脚本保留一道网兜——若将来出现「只在环境段、又无缺省」的 token，那种状态会 **fail-fast**（回退 WARN 与建文件指引先打印）。**不可据此部署 staging**（回退状态下 stg 段拿到的是 prod 的值）。
 - **顶层 `[vars]` 就是生产值，来源是 `.dev.vars`（同时也服务本地 dev）**——本地为跑邮件链路填的开关/白名单会被 `predeploy` 原样烘焙进生产。发生产前须在部署 shell `export EMAIL_VERIFICATION_ENABLED` / `EMAIL_ALLOWED_RECIPIENTS` 覆盖并核对 deploy banner。详见 deployment.md「Production mail safety」。
 - `SEED_USERS` 仅本地 dev 用（设置才注册 `POST /api/seed/users` 路由）；**生产/staging 切勿设置**。
 - 改 env 相关代码后自查：`git grep` 真实值、`git status` 确认 `.dev.vars` 未跟踪、`git check-ignore` 复核忽略规则。
@@ -97,6 +97,7 @@ git branch -d feat/<name>                          # ⑤ 删除
 - 首个 admin 无自提升端点：GitHub OAuth 登录（白名单内）→ 直接 D1 `UPDATE users SET role='admin'`（唯一合法 bootstrap；**禁止 SQL INSERT 造用户**——Better Auth 哈希/绑定会被绕过）。
 - `[env.staging]` 不继承顶层 `[vars]`；顶层 assets / compatibility_date 继承。
 - GitHub OAuth 回调必须精确等于 `https://<origin>/api/auth/callback/github`（origin 与 `BETTER_AUTH_URL` 一致）；`GITHUB_ALLOWED_EMAILS` 为空 = 拒绝所有登录（fail-closed）。
+- **`BETTER_AUTH_URL` 同时是双域名分流的「平台域」真源**（`new URL(BETTER_AUTH_URL).hostname`，见 `src/lib/domains.ts`；刻意不新增 `PLATFORM_DOMAIN` token 以免多一个真源）⇒ 生产/staging 部署 shell **必须** export 它（`https://platform.lmlh.net` / `https://stg-platform.lmlh.net`）。忘了 export 的后果是**部分可用**：`/v1` 照常，但管理面（`/api/*` 与 SPA）会被 301 到 `https://localhost/...`。部署后探针：`curl -sI https://<平台域>/` 与 `https://<api 域>/api/health` 均须 200。
 - cron 每日 02:00 UTC 清理 `request_logs`（保留 `REQUEST_LOG_RETENTION_DAYS`，默认 30）。
 - 本地 curl 验证线上可能需 `--ssl-no-revoke`（Windows schannel CRL）与自定义域名（workers.dev 域名在部分网络被 DNS 污染）。
 

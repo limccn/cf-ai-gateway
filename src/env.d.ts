@@ -14,7 +14,20 @@ interface Env {
   // Better Auth 会话签名密钥（生产：wrangler secret put BETTER_AUTH_SECRET）
   BETTER_AUTH_SECRET: string;
   // 前端 origin（本地 http://localhost:5173；生产为部署域名），用于 baseURL/cookie/回调地址
+  // **同时是分流的"平台域"真源**：`new URL(BETTER_AUTH_URL).hostname`（见 src/lib/domains.ts，
+  // 刻意不新增 PLATFORM_DOMAIN token —— 那会是第三个真源）。故生产/staging 必须把它设成管理台域。
   BETTER_AUTH_URL: string;
+  // 公开 API 域名（双域名分流，09-21-dual-domain-split；[vars] 渲染烘焙）：/v1、/anthropic 只在
+  // 该域服务，管理台域上的这两个前缀会被 308/301 跳到它。**未配置（或为空）= 分流整体关闭**。
+  // staging 在 .dev.vars.staging 中以同名键给值。
+  // ⚠ **本地 dev 不是"未配置"形态**：`.dev.vars` 同时承载生产值（spec config-inventory §1），
+  //   故本地 API_DOMAIN 是真的公网域名，保护本地的是中间件的**环回例外**（isLoopbackHost，
+  //   见 src/middleware/domain-split.ts 与 src/lib/domains.ts）。两者别混为一谈：删掉环回例外
+  //   会让本地 /v1 被 301 到线上；断言"未配置即关闭"的用例只覆盖另一条路径（tests/domain-split.test.ts）。
+  // 注意 `LEGACY_DOMAIN` **不在此声明**：它**只出现在 routes 绑定**里（模板顶层与 [env.staging]
+  // **各一条**：prod = router.lmlh.net / stg = stg-router.lmlh.net，D16 后两段同形），运行时不出现
+  // —— 中间件按「host 既不是 DOMAIN 也不是 API_DOMAIN ⇒ 按路径转发」处理它（这就是旧域转发的全部实现）。
+  API_DOMAIN?: string;
   // GitHub OAuth App 凭据（生产：wrangler secret put）
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;

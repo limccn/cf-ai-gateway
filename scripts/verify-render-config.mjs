@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-// 渲染体系验收（09-22-env-config-unification，AC-E1..AC-E10）。
+// 渲染体系验收（09-22-env-config-unification，AC-E1..AC-E10；09-21-dual-domain-split 追加 AC-B11 组）。
+//
+// 标签约定：`AC-B11x` 是 09-21-dual-domain-split 的**唯一**一条渲染类 AC（"渲染可校验"）的分解项，
+// 逐项与 prd.md 的 AC-B11 子项对应（a/b 两段 routes 有序、c 环境段第三条不回退、d 环境段逐字段、
+// e–h 缺值 fail-fast）。**不要**再用裸的 `AC-B1`/`AC-B2`/`AC-B3` 命名 —— 那几个编号在任务 B 的
+// prd.md 里是**运行时分流**的 AC（api 域放行 / api 域越界 / platform 域放行），与此处无关；
+// 早期版本混用过，读标签会把人带偏。
 //
 // **为什么在 Node 侧**：vitest 跑在 Workers pool（workerd）里没有 node:fs —— 凡是要读真实文件、
 // 起子进程、临时挪走值文件的断言都只能在这里做。纯判定逻辑的边界用例在
@@ -12,10 +18,11 @@
 // 用法：
 //   node scripts/verify-render-config.mjs                 # 快检（不动任何文件的那些 AC）
 //   node scripts/verify-render-config.mjs --with-dry-run  # 另跑两次 wrangler deploy --dry-run（慢，~1min）
-//   node scripts/verify-render-config.mjs --with-mutation # 另做「破坏性」用例：AC-E5/E6/E8 需临时挪走
-//                                                          # 或改写 .dev.vars.staging（finally 还原 + 校验）
+//   node scripts/verify-render-config.mjs --with-mutation # 另做「破坏性」用例：AC-E5/E6/E8 与 AC-B11
+//                                                          # 需临时挪走/改写 .dev.vars[.staging]（finally 还原 + 字节校验）
 //
-// 覆盖：AC-E1a/E1b/E1c/E2/E3/E5(检查态)/E7/E9/E10 + AC-E6/E8（需 --with-mutation）+ AC-E3 dry-run（需 --with-dry-run）。
+// 覆盖：AC-E1a/E1b/E1c/E2/E3/E5(检查态)/E7/E9/E10 + AC-B11a–h（双域名分流的渲染面）+ AC-E6/E8/B11 的
+// 破坏性用例（需 --with-mutation）+ AC-E3 dry-run（需 --with-dry-run）。
 // AC-E4（npm test / typecheck / lint / dev 起服）不在本脚本内 —— 跑全量测试不能从测试链里再起测试。
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -286,7 +293,7 @@ const namesIn = (block) => [...(block ?? "").matchAll(/"([A-Z0-9_]+)"/g)].map((m
 const tokens = namesIn(blockOf("TOKENS"));
 const emptyAllowed = namesIn(blockOf("EMPTY_ALLOWED"));
 
-report("AC-E2a TOKENS 白名单恰 20 项", tokens.length === 20, `实际 ${tokens.length} 项`);
+report("AC-E2a TOKENS 白名单恰 22 项", tokens.length === 22, `实际 ${tokens.length} 项`);
 report(
   `AC-E2b TOKENS 无 ${STAGING_PREFIX}* 残留`,
   tokens.every((t) => !t.includes(STAGING_PREFIX)),
@@ -350,6 +357,10 @@ if (!halves) {
     ["BETTER_AUTH_URL", "[vars] BETTER_AUTH_URL"],
     ["GITHUB_CLIENT_ID", "[vars] GITHUB_CLIENT_ID"],
     ["GITHUB_ALLOWED_EMAILS", "[vars] GITHUB_ALLOWED_EMAILS"],
+    // 双域名分流（09-21-dual-domain-split）。`API_DOMAIN` 与 `BETTER_AUTH_URL` 同属"段感知必填"：
+    // 环境段漏了值会**静默回退到基段的值**（= 生产域名 / localhost），stg 于是把管理面与 base URL
+    // 指向 prod。两段都必须有、且必须互不相同 —— 故与上面几项同表（独立复核补的覆盖缺口）。
+    ["API_DOMAIN", "[vars] API_DOMAIN"],
   ];
   for (const [key, label] of pairs) {
     const b = all(base, key);
@@ -358,6 +369,48 @@ if (!halves) {
     const distinct = JSON.stringify(b) !== JSON.stringify(e);
     report(`AC-E3 段感知：${label} 两段各自有值且互不相同`, bothPresent && distinct,
       `基段 [${b.join(",")}] / 环境段 [${e.join(",")}]`);
+  }
+
+  // ---------- AC-B11a/b/c：routes **逐条有序**比对（09-21-dual-domain-split）----------
+  // 口径刻意不是"两段集合不同"：`routes` 是各段独立字面量，两侧各三条（新双域 + 各自的旧域），
+  // 只有**有序全量相等**才能同时钉住条数、顺序与取值 —— 集合比较会放过"某一侧多/少一条"。
+  // `all()` 去重+排序，故这里直接读 tomlValues 的有序数组（`{DOMAIN}` 必须仍在首位，
+  // AC-E3 的 pattern 断言依赖它）。
+  {
+    const wantBase = ["DOMAIN", "API_DOMAIN", "LEGACY_DOMAIN"].map(
+      (t) => expectFrom([[".dev.vars", baseValues]], t).value,
+    );
+    const gotBase = base.get("pattern") ?? [];
+    report(
+      "AC-B11a 顶层 routes 有序 = [DOMAIN, API_DOMAIN, LEGACY_DOMAIN]（恰好三条 = 新双域 + prod 旧域 router.lmlh.net）",
+      wantBase.every((v) => v !== undefined) && JSON.stringify(gotBase) === JSON.stringify(wantBase),
+      `实际 [${gotBase.join(", ")}] / 期望 [${wantBase.join(", ")}]`,
+    );
+    if (!hasStagingFile) {
+      skip("AC-B11b [env.staging] routes 有序 = [DOMAIN, API_DOMAIN, LEGACY_DOMAIN]", ".dev.vars.staging 不存在");
+    } else {
+      const wantEnv = ["DOMAIN", "API_DOMAIN", "LEGACY_DOMAIN"].map(
+        (t) => expectFrom([[".dev.vars.staging", stagingValues], [".dev.vars", baseValues]], t).value,
+      );
+      const gotEnv = env.get("pattern") ?? [];
+      report(
+        "AC-B11b [env.staging] routes 有序 = [DOMAIN, API_DOMAIN, LEGACY_DOMAIN]（恰好三条）",
+        wantEnv.every((v) => v !== undefined) && JSON.stringify(gotEnv) === JSON.stringify(wantEnv),
+        `实际 [${gotEnv.join(", ")}] / 期望 [${wantEnv.join(", ")}]`,
+      );
+      // AC-B11c：旧域那条**不给回退**。上面 AC-B11b 的期望值走的是与渲染器同序的值链（含基段回退），
+      // 故"staging 文件缺该键"这一形态它**抓不到** —— 渲染会把 **prod 的旧域**绑到 stg worker 上
+      // （部署期报"域名已被占用"，报错指向 Cloudflare 而不是配置）。这里只用 staging 文件对账。
+      const wantLegacyEnv = expectFrom([[".dev.vars.staging", stagingValues]], "LEGACY_DOMAIN").value;
+      const gotLegacyEnv = gotEnv[2];
+      report(
+        "AC-B11c [env.staging] 第三条 route == .dev.vars.staging[LEGACY_DOMAIN]（**不走基段回退**）",
+        wantLegacyEnv !== undefined && gotLegacyEnv === wantLegacyEnv,
+        wantLegacyEnv === undefined
+          ? ".dev.vars.staging 缺 LEGACY_DOMAIN 键（会静默回退成基段的 prod 旧域）"
+          : `期望 ${wantLegacyEnv} / 实际 ${gotLegacyEnv}`,
+      );
+    }
   }
 
   // 逐字段对账：基段 ← .dev.vars，环境段 ← .dev.vars.staging（process.env 覆盖优先）。
@@ -379,6 +432,16 @@ if (!halves) {
     const exp = expectFrom([[".dev.vars.staging", stagingValues]], token);
     const got = one(env, key);
     report(`AC-E3 环境段 ${key} == .dev.vars.staging[${token}]`, exp.value !== undefined && got === exp.value,
+      exp.value === undefined ? `${token} 未配置` : `期望 ${exp.value} / 实际 ${got}`);
+  }
+  // 双域名分流（09-21-dual-domain-split）：分流的两个目标域都从**环境段**取值，且都属"段感知必填"。
+  // 标签用 `exp.from` 而不是写死 `.dev.vars.staging`：部署 shell export 时取值优先来自 `process.env`
+  // （`lookup` 的值链与 `expectFrom` 同序），写死会让这条断言的名称在那种场景下撒小谎。
+  for (const [key, token] of [["API_DOMAIN", "API_DOMAIN"], ["BETTER_AUTH_URL", "BETTER_AUTH_URL"]]) {
+    if (!hasStagingFile) continue;
+    const exp = expectFrom([[".dev.vars.staging", stagingValues]], token);
+    const got = one(env, key);
+    report(`AC-B11d 环境段 ${key} == ${exp.from ?? ".dev.vars.staging"}[${token}]`, exp.value !== undefined && got === exp.value,
       exp.value === undefined ? `${token} 未配置` : `期望 ${exp.value} / 实际 ${got}`);
   }
 
@@ -414,22 +477,30 @@ if (!halves) {
   report("AC-E9 生成物非注释行无残留 {TOKEN}", residual.length === 0, [...new Set(residual)].join(", "));
 }
 
-// ---------------------------------------------------------------- AC-E5 / E6 / E8：临时改文件的用例
+// ---------------------------------------------------------------- AC-E5 / E6 / E8 / B11：临时改文件的用例
 
 if (!hasStagingFile) {
-  for (const name of ["AC-E5 缺 .dev.vars.staging 不炸", "AC-E6 name 冲突拦截", "AC-E8 误发护栏每次渲染都跑"]) {
+  for (const name of ["AC-E5 缺 .dev.vars.staging 不炸", "AC-E6 name 冲突拦截", "AC-E8 误发护栏每次渲染都跑", "AC-B11 缺 API_DOMAIN 的 fail-fast"]) {
     skip(name, ".dev.vars.staging 不存在");
   }
 } else if (!WITH_MUTATION) {
-  for (const name of ["AC-E5 缺 .dev.vars.staging 不炸", "AC-E6 name 冲突拦截", "AC-E8 误发护栏每次渲染都跑"]) {
+  for (const name of ["AC-E5 缺 .dev.vars.staging 不炸", "AC-E6 name 冲突拦截", "AC-E8 误发护栏每次渲染都跑", "AC-B11 缺 API_DOMAIN 的 fail-fast"]) {
     skip(name, "需 --with-mutation（会临时挪走/改写 .dev.vars.staging）");
   }
 } else {
-  // AC-E5：挪走值文件 → 必须**成功**（predev/pretest 会渲染，全新 clone 不能挂）且喊出后果。
-  // 用 `--check` 跑：同样会走到回退分支与两条 WARN，但不写生成物（避免留下降级产物再靠重渲染收拾）。
+  // AC-E5：挪走值文件 → 必须**成功**（predev/pretest 会渲染，全新 clone 不能挂）且喊出后果（R-E9）。
+  // 判据在 09-21-dual-domain-split 期间收紧过一次（当时 `{LEGACY_DOMAIN}` 只在环境段出现、又无缺省
+  // ⇒ 该文件缺失时必然 fail-fast），随后**因 prod 也绑旧域而复位**：现在 22 个 token 两段都有，
+  // 缺文件只回退不报错。渲染脚本里那段 missing fail-fast 保留为网兜（将来再出现环境段专属 token 时
+  // 才触发），本用例回到"不炸但说清楚"。
+  // 用 `--check` 跑：不写生成物（避免留下降级产物再靠重渲染收拾）。
   const missing = withoutFile(DOT_VARS_STAGING, () => renderScript(["--check"]));
   const text = bag(missing);
-  report("AC-E5 缺 .dev.vars.staging 时渲染仍成功（不 fail-fast）", ok(missing), `exit=${missing.status}`);
+  report(
+    "AC-E5 缺 .dev.vars.staging 时渲染仍成功（不 fail-fast）",
+    ok(missing),
+    `exit=${missing.status} | ${text.trim().split("\n").slice(-3).join(" | ")}`,
+  );
   report("AC-E5 打印环境段回退 WARN", text.includes("环境段（[env.*]）当前回退为本地值"), text.trim().slice(-200));
   report("AC-E5 R-E10 路径给出可执行指引（如何创建该文件）", text.includes("cp .dev.vars.staging.example .dev.vars.staging"), "");
 
@@ -459,6 +530,44 @@ if (!hasStagingFile) {
     () => renderScript(["--check"]),
   );
   report("AC-E8 不带参数也能触发误发护栏", ok(risky) && bag(risky).includes("EMAIL_ALLOWED_RECIPIENTS 为空"), bag(risky).trim().slice(-200));
+
+  // AC-B11e–h（独立复核补）：`API_DOMAIN` 是**两段都必填**的 token —— 它刻意不进 `DEFAULT_VALUES`
+  // （域名没有安全缺省：编一个默认值就是把流量指向不存在的域）。两侧的"无解条件"不同，故分两侧验：
+  //   基段：值链 `process.env → .dev.vars → DEFAULT_VALUES` ⇒ 只有 `.dev.vars` 是来源；
+  //   环境段：`process.env → .dev.vars.staging → .dev.vars → DEFAULT_VALUES` ⇒ 两侧都缺才无解
+  //   （**只缺环境段那份会静默回退成基段的生产域名** —— 这正是本组断言要钉住的那类事故）。
+  // 两者都必须 fail-fast 且**点名缺的是哪个段**：只报 token 名的话，"漏配置"与"配错了域"分不开。
+  const dropKey = (key) => (t) =>
+    t.split(/\r?\n/).filter((l) => !l.trim().startsWith(`${key}=`)).join("\n");
+  const noBase = withPatchedFile(DOT_VARS, dropKey("API_DOMAIN"), () => renderScript(["--check"]));
+  report(
+    "AC-B11e 基段缺 API_DOMAIN ⇒ fail-fast 且点名 `API_DOMAIN（基段）`",
+    !ok(noBase) && bag(noBase).includes("API_DOMAIN（基段）"),
+    `exit=${noBase.status} | ${bag(noBase).trim().split("\n").slice(-2).join(" | ")}`,
+  );
+  const noEnv = withPatchedFile(DOT_VARS_STAGING, dropKey("API_DOMAIN"), () => renderScript(["--check"]));
+  // ⚠ 本条是**现状记录（characterization），不是契约**：它只说明"渲染器在这里不报错"，
+  // **不保护任何安全属性**。只缺环境段那份时值链回退到基段 ⇒ stg 会拿到 prod 的域名，
+  // 而渲染器此时**不** fail-fast（值链是设计使然，回退是它对所有 token 的统一语义）。
+  // 真正兜住安全的是另外两条（独立复核已实测：在该形态下它们变红，本条保持绿）：
+  //   · AC-B11d「环境段逐字段对账」—— 值必须等于 .dev.vars.staging 的那份；
+  //   · AC-E3「段感知：routes pattern 两段各自有值且互不相同」。
+  // 因此：**若将来把"环境段缺值"改为 fail-fast（更安全），请把本行改为 `!ok(noEnv)` 并同步
+  // 重命名 —— 那时本条变红是预期的改进后果，不是回归**，别把它当护栏又改回去。
+  report(
+    "AC-B11f 现状记录：只缺环境段的 API_DOMAIN ⇒ 渲染不报错（静默回退基段 = prod 域名；安全由 AC-B11d/AC-E3 兜，本行非契约）",
+    ok(noEnv),
+    `exit=${noEnv.status} | ${bag(noEnv).trim().split("\n").slice(-2).join(" | ")}`,
+  );
+  const noBoth = withPatchedFile(DOT_VARS_STAGING, dropKey("API_DOMAIN"), () =>
+    withPatchedFile(DOT_VARS, dropKey("API_DOMAIN"), () => renderScript(["--check"])),
+  );
+  report(
+    "AC-B11g 两侧都缺 API_DOMAIN ⇒ 环境段同样 fail-fast（不静默取 prod 域名）",
+    !ok(noBoth) && bag(noBoth).includes("API_DOMAIN（环境段）"),
+    `exit=${noBoth.status} | ${bag(noBoth).trim().split("\n").slice(-2).join(" | ")}`,
+  );
+  report("AC-B11h 缺值用例未写出生成物（wrangler.toml 字节不变）", sha(OUTPUT) === before, `前后 ${before} / ${sha(OUTPUT)}`);
 }
 
 // ---------------------------------------------------------------- AC-E7：--env 已移除

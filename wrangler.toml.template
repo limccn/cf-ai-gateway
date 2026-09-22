@@ -16,9 +16,17 @@ compatibility_flags = ["nodejs_compat"]
 
 # --- 自定义域名（部署时自动创建/绑定；wrangler v4 已移除 `wrangler domains` 子命令，改用配置声明） ---
 # lmlh.net 已托管在 Cloudflare，custom_domain = true 会自动验证并绑定。
-# 域名配置：顶层取 .dev.vars 的 DOMAIN，[env.staging] 取 .dev.vars.staging 的同名 DOMAIN。
+# **双域名分流**（09-21-dual-domain-split）：同一 Worker 绑三个 custom domain，**两段同形** ——
+#   DOMAIN        = 管理台域（/api/* 与 SPA 深链）
+#   API_DOMAIN    = 公开 API 域（/v1、/anthropic）
+#   LEGACY_DOMAIN = 旧域转发源（prod = router.lmlh.net / stg = stg-router.lmlh.net）
+# 分流与越界互跳见 src/middleware/domain-split.ts（301/308）。旧域**只为保留绑定 + 让旧 base_url
+# 继续可用**（按路径转发到本环境的新域）；中间件不读该值，故它不出现在任何 [vars] 里。
+# 域名取值：顶层 ← .dev.vars，[env.staging] ← .dev.vars.staging（同名键）。
 routes = [
   { pattern = "{DOMAIN}", custom_domain = true },
+  { pattern = "{API_DOMAIN}", custom_domain = true },
+  { pattern = "{LEGACY_DOMAIN}", custom_domain = true },
 ]
 
 # --- 静态资源（M6）：Vite 构建产物（React SPA）由 Worker 托管 ---
@@ -122,6 +130,12 @@ EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED = "{EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED}
 # 否则测试环境会把验证信发给任意真实用户。名单外收件人静默跳过（记 email_skipped_allowlist）。
 # 渲染脚本每次执行都会检查这个危险组合（开关开 + 名单空）并 WARN。
 EMAIL_ALLOWED_RECIPIENTS = "{EMAIL_ALLOWED_RECIPIENTS}"
+# 公开 API 域名（双域名分流，09-21-dual-domain-split）：/v1、/anthropic 只在 api 域服务，
+# 管理面（/api/*）与 SPA 只在管理台域服务；两侧越界路径由中间件互跳。
+# **本键同时驱动 routes 绑定与运行时分流**：未配置（或为空）⇒ 分流整体关闭（本地 dev 即此形态，
+# 行为与今日完全一致）。须显式声明 —— 刻意不进渲染脚本的 DEFAULT_VALUES（缺了要 fail-fast）。
+# 注意 [env.staging.vars] **不继承**顶层 [vars]，该段必须另写一份同名键。
+API_DOMAIN = "{API_DOMAIN}"
 
 # ====================================================================
 # Staging 环境（wrangler deploy --env staging）
@@ -131,8 +145,14 @@ EMAIL_ALLOWED_RECIPIENTS = "{EMAIL_ALLOWED_RECIPIENTS}"
 # ====================================================================
 [env.staging]
 name = "{WORKER_NAME}"
+# 与顶层同形三条：管理台域 + 公开 API 域 + **旧域转发源** `{LEGACY_DOMAIN}`（= stg-router.lmlh.net）。
+# 旧域只用于**绑定**（stg 现存客户端/脚本的 base_url 指着它，保留绑定 + 按路径转发 ⇒ 零改动继续
+# 可用）；运行时不读该值，故它不出现在 [env.staging.vars]。顶层段的旧域是 prod 的 router.lmlh.net
+# —— 两段各绑自己的旧域，值来自各自的值文件（同 token 名，无需条件渲染）。
 routes = [
   { pattern = "{DOMAIN}", custom_domain = true },
+  { pattern = "{API_DOMAIN}", custom_domain = true },
+  { pattern = "{LEGACY_DOMAIN}", custom_domain = true },
 ]
 
 [[env.staging.d1_databases]]
@@ -173,7 +193,7 @@ crons = ["0 2 * * *"]
 mode = "smart"
 
 # ====================================================================
-# ⚠ 本段的 14 行**不是顶层 [vars] 的冗余复制** —— Cloudflare 平台上 `[env.<name>.vars]`
+# ⚠ 本段的 15 行**不是顶层 [vars] 的冗余复制** —— Cloudflare 平台上 `[env.<name>.vars]`
 # **不继承**顶层 `[vars]`。删掉任何一行 = 该变量在 staging 运行时**整体缺失**（不是"退回默认值"，
 # 而是 `env.X` 为 undefined）。token 名与顶层相同容易让人误以为可以继承，**切勿"顺手去重"**。
 # 契约：本段键集合必须与顶层 [vars] 逐键相等（有单测断言）。
@@ -197,3 +217,7 @@ EMAIL_VERIFICATION_ENABLED = "{EMAIL_VERIFICATION_ENABLED}"
 EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED = "{EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED}"
 # stg 事务邮件收件人白名单：**必须在 .dev.vars.staging 中显式设置**（staging 隔离真实用户；空 = 全放行，会误发）
 EMAIL_ALLOWED_RECIPIENTS = "{EMAIL_ALLOWED_RECIPIENTS}"
+# stg 公开 API 域（取 .dev.vars.staging 的同名键）。
+# 旧域 stg-router.lmlh.net 的转发**不需要**在这里声明 —— 中间件按「host 既不是 DOMAIN 也不是
+# API_DOMAIN ⇒ 按路径转发」处理，运行时不读 LEGACY_DOMAIN（它只在 routes 里做绑定）。
+API_DOMAIN = "{API_DOMAIN}"
