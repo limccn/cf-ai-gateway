@@ -31,8 +31,11 @@ LEGACY_DOMAIN=stg-router.lmlh.net
 D1_DB_NAME=cf-ai-gateway-db-staging
 D1_DB_ID=00000000-0000-0000-0000-000000000000
 KV_ID=00000000000000000000000000000000
-QUEUE_NAME=usage-aggregation-staging
-BILLING_QUEUE_NAME=billing-aggregation-staging
+# ---- 资源名（同 .dev.vars；staging 的 -staging 落在**前缀**：cf-ai-gateway-staging-usage） ----
+# ⚠ 两段队列名**必须不同**：环境段缺值时是静默回退到基段（生产）值，同名会让「stg 投进生产队列」看不出来。
+# ⚠ 队列表不可改名（改名 = 重建），KV 可原地改名 —— 详见 deployment.md Step 2/3 与 config-inventory 命名规范。
+QUEUE_NAME=cf-ai-gateway-staging-usage
+BILLING_QUEUE_NAME=cf-ai-gateway-staging-billing
 
 # ---- 运行时配置（[env.staging.vars]） ----
 # ⚠ Cloudflare 平台上 [env.<name>.vars] **不继承**顶层 [vars]（模板里那 15 行不是冗余），

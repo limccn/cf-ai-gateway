@@ -93,6 +93,8 @@ git branch -d feat/<name>                          # ⑤ 删除
 
 - **永远显式 `--config wrangler.toml`**（staging 加 `--env staging`）：vite 插件生成的 `dist/cf_ai_gateway/wrangler.json` 丢弃 `[env.*]` 段，不带 `--config` 时 `--env staging` 会静默部署生产配置。
 - D1 迁移**只增不改**（保证 `wrangler rollback` 兼容旧版本）；回滚用 `wrangler rollback`，勿改已应用迁移。
+- **`wrangler deploy --dry-run` 不校验 `[[queues.producers]]` 指向的队列是否存在**（2026-09-22 实测：生产渲染产物指向不存在的 `billing-aggregation` 时，prod 与 `--env staging` 两次 dry-run **均 exit 0**）。故 dry-run 绿只证明"配置结构合法"，**不能当"资源就绪"检查**——它会给出一枚"本地全绿、真实 `wrangler deploy` 才炸"的静默地雷。资源就绪的唯一判据是账号侧实查：`wrangler queues list` / `wrangler kv namespace list`。**建队列必须先于真实 deploy 完成**（同理，`develop`「始终可部署」在队列缺失时并不成立）。
+- 资源命名式 **`<worker 名>-<purpose>`**（生产 `cf-ai-gateway-*` / staging `cf-ai-gateway-staging-*`）。**KV 是本栈唯一可原地改名的资源**（`wrangler kv namespace rename --namespace-id <id> --new-name <名>`：按 id 寻址 ⇒ id 不变、数据不动、绑定无需改；**别用 key 计数前后对比来验证数据还在**——活流量下计数是读数时刻的函数）；**队列表不可改名**，改名 = 新建 + 改绑定 + 删旧，且切换后旧队列的在途消息永不被消费。全表见 `.trellis/spec/governance/config-inventory.md` 的「资源命名规范」。
 - secrets 每环境独立（`--env staging`）；`GATEWAY_SECRET_KEY` / `BETTER_AUTH_SECRET` 分别生成独立随机值（`crypto.randomBytes(32)`），二者不得相同。
 - 首个 admin 无自提升端点：GitHub OAuth 登录（白名单内）→ 直接 D1 `UPDATE users SET role='admin'`（唯一合法 bootstrap；**禁止 SQL INSERT 造用户**——Better Auth 哈希/绑定会被绕过）。
 - `[env.staging]` 不继承顶层 `[vars]`；顶层 assets / compatibility_date 继承。

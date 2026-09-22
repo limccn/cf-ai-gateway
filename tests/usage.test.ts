@@ -20,7 +20,11 @@ import {
   setupUser,
 } from "./helpers";
 
-const QUEUE_NAME = "usage-aggregation";
+// 用量批的队列名（09-21-prod-resource-naming 起为 cf-ai-gateway-usage）。
+// 这里**只是标签**：queue() 的分流是「等于 BILLING_QUEUE_NAME ⇒ 计费，否则用量」，
+// 故用量批不依赖此串与 [vars] 相等。分流的护栏在 tests/queue-dispatch.test.ts
+// （本文件与 billing-queue.test.ts 都直驱消费者，批名对它们无效）。
+const QUEUE_NAME = "cf-ai-gateway-usage";
 
 /** 构造 Queues 批次（模拟 consumer 收到的 MessageBatch<unknown>）。 */
 function makeBatch(events: UsageEvent[]): MessageBatch<unknown> {
