@@ -16,7 +16,25 @@ import { describe, expect, it } from "vitest";
 import { createDb } from "../src/db";
 import { inviteCodes, users } from "../src/db/schema";
 
-/** 本用例锚定的迁移。加新迁移后这里会红 —— 提示把锚点换成"最新的那条重建式迁移"。 */
+/**
+ * 本用例锚定的迁移 = **最后一根重建式迁移**（`__new_*` → INSERT SELECT → DROP → RENAME）。
+ *
+ * 定位方式是 `findIndex` 按名字找（见下），**不是**取「数组最后一个」—— 故：
+ *   - 又加了一根 `ALTER TABLE ADD COLUMN` 类迁移（如 0012）⇒ **本常量不动、本用例不红**；
+ *   - 又出现一根**重建式**迁移 ⇒ 把本常量改成那一根（目标换了，夹具才有意义）。
+ *
+ * 为什么不能「只把字符串从 0011 改成 0012」：本用例的判别力全部来自
+ * 「夹具插进**尚未重建**的表 → 跑重建 → 断言既有行存活」。若把一根 ADD COLUMN 迁移当目标，
+ * 0011（真正的重建）就会落进 `prior`，夹具插进的是**已被重建完**的表 ——
+ * 于是「既有行原样存活」这一步变成**平凡真**。
+ *
+ * ⚠ 但那种误锚**不会**静默变绿（2026-09-23 实测：把本常量改成 "0012_last_warlock.sql" ⇒ 红）：
+ * prior 含 0011 ⇒ created_by 已是可空 ⇒ 第 ① 步「插 NULL 必须被 NOT NULL 拒」拿到空错误链，
+ * 用例在 `expect(errorChain(beforeMigration)).toMatch(/NOT NULL/i)` 处**先**红。
+ * 即「① 拒 → ② 通过」这对**成对断言**本身就是锚点正确性的守护（锚在重建之前 ⇒ 拒得掉；
+ * 锚错 ⇒ 拒不掉）。反方向锚在 0011 之前（如 0010）同样是红：rebuild 没跑，第 ④ 步插 NULL 失败。
+ * 故这段注释别再被读成「锚错了也看不出来」—— 锚错**看得出来**，只是红的理由与你以为的不同。
+ */
 const TARGET_MIGRATION = "0011_lame_silver_fox.sql";
 
 /** 展开错误链（drizzle 包装错误 → D1 原始错误），用于断言底层列约束文案。 */
@@ -32,10 +50,16 @@ function errorChain(err: unknown): string {
 
 describe("重建式迁移（invite_codes.created_by 放开 NOT NULL）", () => {
   it("既有行与索引原样存活，且 NULL 签发者由被拒变为可插", async () => {
+    // 按名字定位 + 下标切 prior（**不是** `all[all.length - 1]` / `all.slice(0, -1)`）：
+    // 目标之后若又加了迁移（如 0012 的 ADD COLUMN），取"最后一个"会锚错对象，
+    // 而锚错的后果是**测试变绿且失去判别力**（见 TARGET_MIGRATION 的注释）。
     const all = env.TEST_MIGRATIONS;
-    const target = all[all.length - 1];
-    expect(target?.name).toBe(TARGET_MIGRATION);
-    const prior = all.slice(0, -1);
+    const idx = all.findIndex((m) => m.name === TARGET_MIGRATION);
+    expect(idx, `未找到目标迁移 ${TARGET_MIGRATION}（若已重命名/删除请同步本用例）`).toBeGreaterThan(
+      -1,
+    );
+    const target = all[idx];
+    const prior = all.slice(0, idx);
 
     // ---------- ① 跑到 0010，造"生产已有数据"的夹具 ----------
     await applyD1Migrations(env.DB, prior);

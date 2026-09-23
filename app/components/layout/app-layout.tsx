@@ -36,7 +36,8 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/billing", label: "Billing", icon: <Wallet /> },
   { to: "/usage", label: "Usage", icon: <BarChart3 /> },
   { to: "/providers", label: "Providers", icon: <Server />, adminOnly: true },
-  { to: "/models", label: "Models", icon: <Tag />, adminOnly: true },
+  // Models 对 member 也可见（批次 P，D18）：member 只读价格表 —— 他们得知道自己按什么价计费
+  { to: "/models", label: "Models", icon: <Tag /> },
   { to: "/users", label: "Users", icon: <Users />, adminOnly: true },
   { to: "/settings", label: "Settings", icon: <Settings />, adminOnly: true },
 ];

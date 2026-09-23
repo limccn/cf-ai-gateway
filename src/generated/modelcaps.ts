@@ -4,6 +4,7 @@
 // 档位化（09-16 用户裁决）：值为**档位**（xlarge 式，null = 不限）——
 //   运行时 cap = MODELCAP_BASE_TOKENS × MODELCAP_MULTIPLIER × 档位
 //   （env [vars] 烘焙，缺省 8192 × 2 = 16384 基准；本文件按生成时常数推导档位）。
+//   档位为 0.5 的正整数倍（管理台 Max output 下拉提供 0.5x/1x/2x/4x/8x）。
 export const MODELCAPS: Record<string, number | null> = {
   "claude-fable-5": 1,
   "claude-fable-5.1": 1,

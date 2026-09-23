@@ -354,6 +354,17 @@ export const models = sqliteTable(
     // 模型级输出上限（tokens，09-01-stg-glm-ccswitch-fix）：NULL ≡ 不限制。
     // 请求 max_tokens 超过上限时 proxy 层 clamp（防慢模型长生成撞上游超时）。
     maxOutputTokens: integer("max_output_tokens"),
+    // 免费模式（09-14-admin-ui-adjustments-2 批次 P，D17）：**标记列**，5 个价列一字不动。
+    // 计费侧 findModelPrice 命中后返回有效价（FREE_MODE_PRICE_PER_MILLION）而非库里的价 ——
+    // 作用是让该模型仍走**真实扣费路径**（cost > 0 ⇒ 有 balance_tx 流水、余额真的下降），
+    // 而不是「改价」或「防计价失败」（0 token 的请求 cost 恰为 0，连极小值也救不了）。
+    freeMode: integer("free_mode", { mode: "boolean" }).notNull().default(false),
+    // 隐藏（同批次 D18）：⚠ **不是「停用」** —— 网关照常服务该模型（代理路径与 /v1/models
+    // 都不读这一列），只是 member 的价格表响应里**不列这一行**（服务端过滤）。
+    // 命名刻意避开 hidden / disabled，以免日后被读成「已停用」而据此删行。
+    hiddenFromMembers: integer("hidden_from_members", { mode: "boolean" })
+      .notNull()
+      .default(false),
     ...timestamps,
   },
   (table) => [index("models_model_idx").on(table.model)],

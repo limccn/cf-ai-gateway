@@ -1,6 +1,8 @@
 // 显式路由表（spec directory-structure.md：所有路由必须在此注册，非文件系统路由）。
 // 非关键路由懒加载（spec quality.md：lazy-load non-critical routes）。
 // 权限隔离：admin 路由在布局菜单中隐藏（AppLayout）+ 路由级拒绝（RequireAdmin）。
+// 例外：`/models` 任何已登录用户可读（批次 P，D18）—— 它**不在** RequireAdmin 里，
+// 页内再按角色收敛可写控件；后端只对写动词设 adminOnly。
 import { lazy, Suspense, type ComponentType } from "react";
 import { createBrowserRouter, Navigate } from "react-router";
 import { AppLayout } from "@/components/layout/app-layout";
@@ -34,10 +36,10 @@ export const router = createBrowserRouter([
         path: "providers",
         element: <RequireAdmin>{lazyPage(() => import("@/routes/providers"))}</RequireAdmin>,
       },
-      {
-        path: "models",
-        element: <RequireAdmin>{lazyPage(() => import("@/routes/models"))}</RequireAdmin>,
-      },
+      // models 刻意**不**包 RequireAdmin（批次 P，D18）：member 只读价格表 —— 页内的
+      // Add price / 两个行控制 / Actions 列由 useSession 的角色判断自行收敛。写操作的
+      // 真防线在后端 router.ts，不在这一层。
+      { path: "models", element: lazyPage(() => import("@/routes/models")) },
       {
         path: "users",
         element: <RequireAdmin>{lazyPage(() => import("@/routes/users"))}</RequireAdmin>,

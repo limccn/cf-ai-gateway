@@ -11,8 +11,8 @@
 // 明细因此无人消费，useUsage 的 limit 收到 schema 下限 1。
 //
 // **两个 Spend 口径别混**：顶部那张是**账户累计消费**（全时段、独立端点、不随筛选变化），
-// 6 卡区那张是**当前窗口**的消费（随 Time Filter 变）。标签上「Spend」对「Spend — Last 30 days」，
-// 是用户可分辨的。
+// 6 卡区那张是**当前窗口**的消费（随 Time Filter 变）。标签上「Spend」对「Spend — Today」
+// （默认窗口），是用户可分辨的 —— **改默认窗口时这句示例要跟着改**。
 import { useMemo, useState } from "react";
 import { Link } from "react-router";
 import { CircleDollarSign, Coins, Filter, KeyRound, TrendingUp, Wallet, Zap } from "lucide-react";
@@ -105,7 +105,11 @@ function StatCard({
 
 export default function DashboardPage() {
   const { user } = useSession();
-  const [range, setRange] = useState<UsageRange>("last30");
+  // 默认窗口 = **today**（2026-09-23 用户裁定 D25）。与 /usage 的默认一致 —— 两页同为
+  // 「先看今天」，且 today 是**小时**桶（RANGE_OPTIONS: granularity "hour"），值卡 hint 因此
+  // 走 `active hours` 而非 `active days`；`rangeGranularity` 是唯一判据，勿按窗口名写死。
+  // 代价如实记：默认窗口在无流量时是**空态**（「No activity yet」），这是真实状态而非故障。
+  const [range, setRange] = useState<UsageRange>("today");
   // 时区快照与查询参数同源（模块加载时计算一次；窗口边界与桶构建共用）
   const tzOffsetMin = useMemo(() => getTzOffsetMin(), []);
   // 桶窗口时刻快照：与发起查询同时刻，且 range 切换时刷新（否则跨本地午夜后

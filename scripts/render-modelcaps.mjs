@@ -3,11 +3,12 @@
 // 档位化（09-16 用户裁决）：生成物存**档位**（xlarge 式 1x/2x，null=不限），
 // 运行时 cap = MODELCAP_BASE_TOKENS × MODELCAP_MULTIPLIER × 档位（env [vars] 烘焙，
 // 默认链 process.env → .dev.vars → 8192/2）。档位按当前常数自 seed 字面值推导，
-// 非整数档 → fail-fast；改常数需重跑本脚本 + 部署（与改 seed.sql 同流程）。
+// 非半档（0.5 的正整数倍）→ fail-fast；改常数需重跑本脚本 + 部署（与改 seed.sql 同流程）。
 // 幂等：同输入 → 同输出（键排序稳定）；解析失败 fail-fast（seed.sql 格式严格）。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deriveTier } from "./lib/modelcap-grid.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SEED_PATH = resolve(ROOT, "seed.sql");
@@ -88,7 +89,7 @@ for (let i = 0; i < lines.length; i += 1) {
   modelRows += 1;
 }
 
-// 档位推导：tier = cap / (base × mult)，非整数档 fail-fast（网格外字面值需先改常数或 seed）
+// 档位推导：tier = cap / (base × mult)，非半档 fail-fast（网格外字面值需先改常数或 seed）
 const dotVars = parseDotVars(resolve(ROOT, ".dev.vars"));
 const baseTokens = positiveInt(
   "MODELCAP_BASE_TOKENS",
@@ -108,10 +109,11 @@ for (const [model, cap] of caps) {
     tiers.set(model, null);
     continue;
   }
-  const tier = cap / gridSize;
-  if (!(Number.isInteger(tier) && tier > 0)) {
+  const tier = deriveTier(cap, gridSize);
+  if (tier === null) {
     console.error(
-      `render-modelcaps: ${model} cap=${cap} 不在档位网格上（${baseTokens} × ${multiplier} = ${gridSize}）；` +
+      `render-modelcaps: ${model} cap=${cap} 不在档位网格上（${baseTokens} × ${multiplier} = ${gridSize}，` +
+        `档位须为 0.5 的正整数倍，即 ${gridSize / 2} 的整数倍）；` +
         `改 seed.sql 字面值或调整 MODELCAP_BASE_TOKENS/MODELCAP_MULTIPLIER`,
     );
     process.exit(1);
@@ -132,6 +134,7 @@ const content = `// 生成物（勿手改）：scripts/render-modelcaps.mjs 解�
 // 档位化（09-16 用户裁决）：值为**档位**（xlarge 式，null = 不限）——
 //   运行时 cap = MODELCAP_BASE_TOKENS × MODELCAP_MULTIPLIER × 档位
 //   （env [vars] 烘焙，缺省 8192 × 2 = 16384 基准；本文件按生成时常数推导档位）。
+//   档位为 0.5 的正整数倍（管理台 Max output 下拉提供 0.5x/1x/2x/4x/8x）。
 export const MODELCAPS: Record<string, number | null> = {
 ${body}
 };
