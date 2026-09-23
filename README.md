@@ -184,7 +184,7 @@ Management API (session auth, roles `admin`/`member`):
 | `/api/keys` | member/admin | Own gateway keys CRUD (admin sees all) |
 | `/api/users` | admin | User list/role/status, invites, balance adjust |
 | `/api/providers` | admin | Upstream providers CRUD (keys AES-GCM encrypted, masked in responses) |
-| `/api/models` | admin | Model price table CRUD |
+| `/api/models` | member/admin | Model price table (read-only for member; admin CRUD + per-row free/hidden flags) |
 | `/api/admin/usage` | admin | Global usage with user/key/model/time filters |
 | `/api/admin/transactions` | admin | Global ledger with optional `userId` filter |
 | `/api/admin/settings` | admin | Runtime defaults (read-only) |

@@ -2,9 +2,13 @@
 // 1) calcCost 分层/缓存矩阵（short/long/cached、128K 边界）；2) 价格表查询 5 列映射；
 // 3) usage 缓存 token 提取（openai / anthropic 非流式 / anthropic 流式尾包 / loose 兜底）；
 // 4) 扣费正确性（余额/流水/明细）；5) 并发扣费不超扣（条件 UPDATE 原子性）；6) admin 余额调整。
+// 7) 免费模式（批次 P / D17）：极小有效价让免费行仍走**真实扣费路径**（末尾新增 describe，
+//    既有断言一行未动 —— 尤其 124 行的 `toEqual(PRICE)`，它同时是"非免费行原样返回"的回归锁）。
 import { env } from "cloudflare:test";
+import { eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createDb } from "../src/db";
+import { balanceTx, requestLogs } from "../src/db/schema";
 import {
   adjustUserBalance,
   calcCost,
@@ -21,6 +25,8 @@ import {
   countTxByType,
   getBalance,
   latestLogStatus,
+  setModelFlags,
+  settleDelayedBilling,
   setupKey,
   setupPrice,
   setupProviderWithModel,
@@ -349,5 +355,65 @@ describe("adjustUserBalance admin 余额调整", () => {
     const result = await adjustUserBalance(db, 999_999, 10, null);
     expect(result.success).toBe(false);
     expect(result.balance).toBeNull();
+  });
+});
+
+describe("免费模式（批次 P / D17）：极小有效价让免费行仍走真实扣费路径", () => {
+  const FREE_MODEL = "pricing-free-mode-test";
+  const PAID_MODEL = "pricing-free-mode-control";
+
+  it("同批两条：免费行 cost 极小但 > 0（有负数流水、余额真的下降），非免费行照旧 ≈0.007", async () => {
+    const db = createDb(env);
+    const userId = await setupUser("free-mode@test.dev", 10);
+    const { keyId } = await setupKey(userId);
+    const providerId = await setupProviderWithModel(PAID_MODEL);
+
+    // 两行**同一档真价**，只有标记不同 —— 这样两个模型走的是同一条代码路径，
+    // cost 的差异只能来自 free_mode（而不是"碰巧价格不一样"）。
+    await setupPrice(FREE_MODEL, 2, 4, 0.2, 10, 15);
+    await setupPrice(PAID_MODEL, 2, 4, 0.2, 10, 15);
+    await setModelFlags(FREE_MODEL, { freeMode: true });
+
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: FREE_MODEL, promptTokens: 1000, completionTokens: 500 },
+      { userId, keyId, providerId, model: PAID_MODEL, promptTokens: 1000, completionTokens: 500 },
+    ]);
+
+    const logs = await db
+      .select({ model: requestLogs.model, cost: requestLogs.cost })
+      .from(requestLogs)
+      .where(eq(requestLogs.userId, userId));
+    const freeLog = logs.find((l) => l.model === FREE_MODEL);
+    const paidLog = logs.find((l) => l.model === PAID_MODEL);
+    if (!freeLog || !paidLog) {
+      throw new Error(`明细未落行：${JSON.stringify(logs)}`);
+    }
+
+    // 关键在**严格大于 0**：billing-queue.ts 的 `if (cost > 0)` 是「扣费 + balance_tx」那一批的
+    // 唯一闸门。取 0 会让免费请求只有 usage_daily 零额入账、流水与余额纹丝不动 ——
+    // 这正是常量取极小值而非 0 的**唯一**理由（不是"防计价失败"）。
+    expect(freeLog.cost).toBeGreaterThan(0);
+    expect(freeLog.cost).toBeLessThan(1e-6);
+    // 对照：同批非免费行仍按 short 档计价（1000×2 + 500×10）/1e6
+    expect(paidLog.cost).toBeCloseTo(0.007, 12);
+
+    // 流水：免费行**有**一条负数 usage 流水，金额 = -cost
+    const txs = await db
+      .select({ amount: balanceTx.amount, note: balanceTx.note })
+      .from(balanceTx)
+      .where(eq(balanceTx.userId, userId));
+    expect(txs).toHaveLength(2);
+    const freeTx = txs.find((t) => t.note === `usage: ${FREE_MODEL}`);
+    if (!freeTx) {
+      throw new Error(`免费行没有流水：${JSON.stringify(txs)}`);
+    }
+    expect(freeTx.amount).toBeLessThan(0);
+    expect(freeTx.amount).toBeCloseTo(-freeLog.cost, 15);
+
+    // 余额真的下降，且下降量 = 两条 cost 之和。两侧都断言：只比 `10 - paid.cost` 小一点
+    // 证明免费那笔确实扣了，而不小于 1e-6 证明扣的**只是**极小值（没按真价扣）。
+    const balance = await getBalance(userId);
+    expect(balance).toBeLessThan(10 - paidLog.cost);
+    expect(balance).toBeGreaterThan(10 - paidLog.cost - 1e-6);
   });
 });

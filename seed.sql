@@ -3,6 +3,14 @@
 --   （详见 .trellis/tasks/08-26-model-pricing-tiers/research/models-pricing.md）。
 -- 列：input_price_short / input_price_long / input_price_cached / output_price_short / output_price_long
 --   max_output_tokens：模型级输出上限（tokens，NULL = 不限制；proxy 层 clamp 防慢模型撞上游超时）。
+--     ⚠ 档位网格（09-14-admin-ui-adjustments-2 批次 Q）：非 NULL 值须落在
+--     MODELCAP_BASE_TOKENS × MODELCAP_MULTIPLIER（缺省 8192 × 2 = 16384）的 **0.5 正整数倍**上，
+--     否则 `npm run render:modelcaps` fail-fast（生成物存的是**档位**）。管理台的 Max output
+--     下拉只提供 0.5x/1x/2x/4x/8x 五档（即 8192 / 16384 / 32768 / 65536 / 131072）；
+--     1.5x、3x 等半档在构建侧合法但下拉选不到 —— 真要写就同时改下拉选项表。
+--     ⚠ 只写不改下拉的后果：管理台打开该模型的编辑弹窗会**就近预选**到最近档（并列取大，
+--       24,576 → 32,768），管理员一按保存库值就被改写。半档值不会被静默改写 —— 弹窗会
+--       显式写出原值 —— 但「按一次保存就漂到隔壁档」仍不是想要的行为。
 -- 分层规则（M9）：单次请求未缓存输入 tokens > 128,000 时输入与输出均取 long 档，否则 short 档。
 --   ⚠ 官方阈值与网关固定 128K 不一致的模型（gpt-5.x=272K / claude-sonnet-4.5=200K），
 --     错位区间按网关 128K 判定计费（128K~官方阈值间按 long 档多收），属已确认决策。

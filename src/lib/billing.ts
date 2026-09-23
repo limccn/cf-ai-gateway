@@ -21,6 +21,19 @@ export interface ModelPrice {
 /** 单价单位：USD / 每百万 tokens（seed.sql 与 models 表一致）。 */
 const PRICE_PER_MILLION = 1_000_000;
 
+/**
+ * 免费模式（`models.free_mode`）的**有效单价**：USD / 每百万 tokens，与其余价列同单位
+ * （09-14-admin-ui-adjustments-2 批次 P，D17）。
+ *
+ * 取极小值而非 0 的目的**只有一个**：让这行仍走**真实扣费路径**。`calcCost` 得 0 时
+ * `billing-queue.ts` 的 `if (cost > 0)` 会跳过「扣费 + balance_tx」那一批（`usage_daily`
+ * 仍以零额入账）—— 用极小值就能保留下真实的流水与余额变动。**不是防计价失败**：
+ * 0 token 的请求 cost 恰为 0，连极小值也救不了（那是算式的性质，不是缺陷）。
+ *
+ * 单位写进常量名，避免日后被读成"每次请求 0.00001 美元"。
+ */
+export const FREE_MODE_PRICE_PER_MILLION = 0.00001;
+
 /** 分层阈值（M9）：未命中缓存的输入 tokens 超过该值时按 long 档（输入+输出），否则 short 档。 */
 export const SHORT_CONTEXT_THRESHOLD = 128_000;
 
@@ -46,7 +59,17 @@ export function calcCost(usage: TokenUsage, price: ModelPrice): number {
   ) / PRICE_PER_MILLION;
 }
 
-/** 价格表查询（models 表 = seed 默认 + admin 覆盖的唯一来源；查不到返回 null → 免计）。 */
+/**
+ * 价格表查询（models 表 = seed 默认 + admin 覆盖的唯一来源；查不到返回 null → 免计）。
+ *
+ * ⚠ 返回的是**有效计费价**，不是库里的价：`free_mode` 为真的行**五个字段一律**返回
+ * `FREE_MODE_PRICE_PER_MILLION`，库里那 5 个价列原样不动（批次 P，D17 —— 只改生效值，
+ * 不碰底层数据）。故「库里存的价格」与「实际扣的价」在免费行上**不相等**，读库排查时别混。
+ *
+ * 返回类型刻意**不带** freeMode 字段：一是调用方（calcCost / 路由）没有任何分支需要它，
+ * 加了就是死字段；二是 `tests/billing.test.ts` 用 `toEqual(PRICE)` 精确对照，多一个键即红 ——
+ * 那条对照本身就是「非免费行**原样返回**、不掺任何东西」的回归锁。
+ */
 export async function findModelPrice(db: Db, model: string): Promise<ModelPrice | null> {
   const row = await db.query.models.findFirst({
     where: eq(models.model, model),
@@ -56,10 +79,24 @@ export async function findModelPrice(db: Db, model: string): Promise<ModelPrice 
       inputPriceCached: true,
       outputPriceShort: true,
       outputPriceLong: true,
+      // ⚠ 漏掉这一行 = 「编译过、测试过、什么也没发生」的静默失效：
+      //    drizzle 只 select 声明的列，row.freeMode 未声明时**根本不存在于返回对象**
+      //    （不是 undefined 的偶然，是构造上取不到），下面的判断会一路 false，
+      //    免费模型照原价收钱且不报任何错。改本函数时这一行必须留住。
+      freeMode: true,
     },
   });
   if (!row) {
     return null;
+  }
+  if (row.freeMode) {
+    return {
+      inputPriceShort: FREE_MODE_PRICE_PER_MILLION,
+      inputPriceLong: FREE_MODE_PRICE_PER_MILLION,
+      inputPriceCached: FREE_MODE_PRICE_PER_MILLION,
+      outputPriceShort: FREE_MODE_PRICE_PER_MILLION,
+      outputPriceLong: FREE_MODE_PRICE_PER_MILLION,
+    };
   }
   return {
     inputPriceShort: row.inputPriceShort,

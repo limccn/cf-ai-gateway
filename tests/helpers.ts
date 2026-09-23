@@ -369,6 +369,34 @@ export async function setupPrice(
     });
 }
 
+/**
+ * 翻转价格行的两个标记（批次 P，09-14-admin-ui-adjustments-2）：免费模式 / 对 member 隐藏。
+ *
+ * 刻意**只写标记列**：`setupPrice` 的 onConflictDoUpdate 只管 5 个价列，两者互补 ——
+ * 「开关不等于改价」那条断言正是靠这个分工（先 setupPrice 定价、再 setModelFlags 打标、
+ * 回查价列逐字节未变）。
+ *
+ * 刻意**不做 upsert**：找不到行就抛错。若写成 upsert，`setModelFlags("typo-model", …)` 会静默
+ * 造出一行 0 价模型，测试随即以「member 看不到它」的假象变绿 —— 最难查的一类假绿。
+ */
+export async function setModelFlags(
+  model: string,
+  flags: { freeMode?: boolean; hiddenFromMembers?: boolean },
+): Promise<void> {
+  if (flags.freeMode === undefined && flags.hiddenFromMembers === undefined) {
+    throw new Error("setModelFlags: 至少要给一个标记");
+  }
+  const db = createDb(env);
+  const updated = await db
+    .update(models)
+    .set(flags)
+    .where(eq(models.model, model))
+    .returning({ id: models.id });
+  if (updated.length === 0) {
+    throw new Error(`setModelFlags: 价格表里没有 "${model}"（先 setupPrice 建行）`);
+  }
+}
+
 export async function getBalance(userId: number): Promise<number> {
   const db = createDb(env);
   const row = await db.query.users.findFirst({

@@ -1,20 +1,40 @@
-// /models — 模型价格表管理（M6 6.3，admin）：CRUD 表格。
+// /models — 模型价格表（批次 P，2026-09-23）：**任何已登录用户可读**；写操作与两个行控制仅 admin。
 // 单价单位：USD / 每百万 tokens（与后端 seed.sql 一致）。
-import { useState, type FormEvent } from "react";
-import { Info, Pencil, Plus, Search, Trash2 } from "lucide-react";
+//
+// 角色分三层，别混：
+//   ① 服务端（真防线，见 src/routes/models/procedures/list.ts）：被隐藏的行不进 member 的响应体；
+//      免费模型的 5 个价在 member 的响应里**就是 0**。devtools 也读不到原价 —— 是"看不见"不是"不显示"。
+//   ② 本页（怎么画）：`modelTableColumns(isAdmin)` 决定列集合、`modelBadges` 决定徽章。
+//      表头与表体都从**同一份列数组**渲染（`columns.map` 两处），错位在构造上不可能。
+//   ③ 后端写路由：POST/PATCH/DELETE 由 router.ts 的 adminOnly 拦（顺序敏感，见该文件头）。
+//      故本页即便被改坏，member 也改不动价格表 —— 但按钮不该出现，那是 UX 不是安全。
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Check, Copy, Eye, EyeOff, Gift, Info, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { z } from "zod";
+import { useSession } from "@/hooks/use-session";
 import { useModels } from "@/modules/models/hooks/use-models";
 import { useCreateModel } from "@/modules/models/hooks/use-create-model";
 import { useUpdateModel } from "@/modules/models/hooks/use-update-model";
 import { useDeleteModel } from "@/modules/models/hooks/use-delete-model";
+import {
+  MODEL_CAP_OPTIONS,
+  isUnofferedCap,
+  modelBadges,
+  modelTableColumns,
+  snapToTier,
+  type ModelTableColumnKey,
+} from "@/modules/models/display";
 import type { ModelResponse } from "@/modules/models/types";
+import { copyToClipboard } from "@/lib/clipboard";
 import { formatDateTime, formatNumber, formatUsd } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ErrorState, EmptyState } from "@/components/ui/states";
 import {
@@ -29,6 +49,11 @@ import {
 // ============= Zod 表单 Schema =============
 // 分层规则（M9）：未缓存输入 > 128K tokens 时输入与输出均取 long 档，否则 short 档；
 // 缓存命中输入按 cached 价计。单价单位：USD / 每百万 tokens。
+//
+// ⚠ 这两份 schema **只服务于表单弹窗**。Actions 列的两个行控制**不经过它们**：
+// 它们的 refine 与后端那份（src/routes/models/types.ts）不一致 —— 后端把 freeMode /
+// hiddenFromMembers 也算进"至少改一项"，走这里会被 refine 拦下（"Change at least one price"）。
+// 表单也刻意不渲染这两个标记（创建路径同样不暴露，见后端 createModelInputSchema 的注释）。
 
 const priceField = z.coerce.number("Enter a number").min(0, "Must be 0 or greater");
 
@@ -70,6 +95,67 @@ const updateModelSchema = z
     { message: "Change at least one price" },
   );
 
+// ============= 子组件：模型名复制按钮 =============
+
+/**
+ * Model 列的名字旁边那个复制按钮（照 keys.tsx CopyBlock 的体例：Clipboard API → execCommand
+ * 降级、2s 复位、卸载清 timer、aria-label 随状态切换）。
+ *
+ * 每个行实例**自持** copied 态（不共用一个"当前复制的是哪行"的页面态）：共用态得额外维护
+ * "哪一行正在显示已复制"，而列表重渲染/重排后那个 id 会指向别的行。
+ */
+function CopyModelButton({ model }: { model: string }) {
+  const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const resetTimer = useRef<number | null>(null);
+
+  // 卸载时清掉复位定时器，避免离开页面后仍触发 setState
+  useEffect(
+    () => () => {
+      if (resetTimer.current !== null) {
+        window.clearTimeout(resetTimer.current);
+      }
+    },
+    [],
+  );
+
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(model);
+    if (!ok) {
+      // 静默失败在复制场景里最坏（用户以为复制到了，粘出来是旧内容）——给可见反馈
+      setFailed(true);
+      setCopied(false);
+      return;
+    }
+    setFailed(false);
+    setCopied(true);
+    if (resetTimer.current !== null) {
+      window.clearTimeout(resetTimer.current);
+    }
+    resetTimer.current = window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={handleCopy}
+        /* 无可见文字 ⇒ 可访问名只能由 aria-label 提供，且随状态切换：
+           屏幕阅读器重新聚焦时读到的是当前状态。也正因如此，行内复制按钮的锚点
+           与 CopyBlock 不同 —— 它得带模型名才能定位到具体哪一行。
+           h-6/w-6 覆盖 size="icon" 的 h-9/w-9（twMerge 同组后者胜）。 */
+        aria-label={copied ? "Copied" : `Copy ${model}`}
+        title={copied ? "Copied" : "Copy model name"}
+        className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+      >
+        {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+      </Button>
+      {failed ? <span className="text-xs text-destructive">Copy failed</span> : null}
+    </>
+  );
+}
+
 // ============= 子组件：价格表单对话框 =============
 
 interface ModelFormDialogProps {
@@ -101,10 +187,17 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
       setInputPriceCached(editing ? String(editing.inputPriceCached) : "");
       setOutputPriceShort(editing ? String(editing.outputPriceShort) : "");
       setOutputPriceLong(editing ? String(editing.outputPriceLong) : "");
-      setMaxOutputTokens(editing?.maxOutputTokens?.toString() ?? "");
+      setMaxOutputTokens(snapToTier(editing?.maxOutputTokens ?? null));
       setErrors({});
     }
   }
+
+  // 批次 Q（D22）：库里「不在下拉档位上」的上限在**打开弹窗时**已被上面吸附到最近档
+  // （保存即写回），这里只负责把原值如实显示出来。读 `editing`（库值）而非 state ——
+  // state 已是吸附后的值。注意判据是**下拉提供集**，不是构建期网格（见 display.ts 的注释）。
+  const storedCap = editing?.maxOutputTokens ?? null;
+  // 判据是**问题判据**（true = 要提示）：`isUnofferedCap(null) === false`（不限不是问题）
+  const unofferedCap = isUnofferedCap(storedCap) ? storedCap : null;
 
   const isBusy = createModel.isPending || updateModel.isPending;
   const mutationError = createModel.error?.message ?? updateModel.error?.message;
@@ -267,20 +360,36 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
         </div>
         <div className="space-y-2">
           <Label htmlFor="model-max-output">Max output (tokens)</Label>
-          <Input
+          {/* 批次 Q：档位下拉取代自由输入 —— 库值只可能来自 MODEL_CAP_OPTIONS ⇒ 下拉给不出的值在输入侧绝迹 */}
+          <Select
             id="model-max-output"
-            type="number"
-            min={1}
-            step={1000}
-            placeholder="16000 — empty = unlimited"
             value={maxOutputTokens}
             onChange={(e) => setMaxOutputTokens(e.target.value)}
             aria-invalid={errors.maxOutputTokens !== undefined}
-          />
+          >
+            {MODEL_CAP_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+          {unofferedCap !== null ? (
+            <p className="text-xs text-muted-foreground">
+              Stored value {formatNumber(unofferedCap)} is not one of the offered tiers —
+              preselecting{" "}
+              {MODEL_CAP_OPTIONS.find((option) => option.value === maxOutputTokens)?.label}. Saving
+              will update it.
+            </p>
+          ) : null}
           <p className="text-xs text-muted-foreground">
-            Hard cap on requested <code>max_tokens</code>. Slow long-generation models (e.g. b.ai
-            glm-5.3-flash with Claude Code's 64K default) should set this below the upstream timeout
-            budget. Empty = unlimited.
+            Hard cap on requested <code>max_tokens</code>; the gateway clamps anything above it.
+            Tiers are multiples of the 8,192 × 2 baseline, so whatever this form saves is one of the
+            five options above. For models baked into the runtime constants a tier below the
+            constant only binds requests above it, and Unlimited still gets the constant injected,
+            until the constants are regenerated and redeployed; rows added here are not baked, so
+            they take effect immediately. The grid's floor is 8,192 — a slow upstream can need less
+            than that, and no tier expresses it (b.ai glm-5.3-flash: ~37 tok/s; see
+            spec/backend/proxy-protocols.md).
           </p>
           {errors.maxOutputTokens ? (
             <p className="text-xs text-destructive">{errors.maxOutputTokens}</p>
@@ -303,30 +412,146 @@ function ModelFormDialog({ open, onOpenChange, editing }: ModelFormDialogProps) 
 // ============= 页面 =============
 
 export default function ModelsPage() {
+  const { user } = useSession();
+  const isAdmin = user?.role === "admin";
+
   const modelsQuery = useModels();
   const deleteModel = useDeleteModel();
+  // 行控制专用的 PATCH 实例 —— 与弹窗里那个**不是同一个**（mutate 的 isPending/error 各自独立，
+  // 否则点一下 Free 会让弹窗按钮也转成 "Saving…"）。
+  const updateModel = useUpdateModel();
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ModelResponse | null>(null);
   const [deleting, setDeleting] = useState<ModelResponse | null>(null);
 
   const items = modelsQuery.data?.items ?? [];
+  const columns = modelTableColumns(isAdmin);
+  // 哪个行正在发请求（行内禁用）：只关这一行的按钮，不把整表冻住
+  const pendingRowId = updateModel.isPending ? updateModel.variables?.id : undefined;
 
   // 前端内存过滤（列表量小；API 无 search 参数）
   const [search, setSearch] = useState("");
   const query = search.trim().toLowerCase();
   const filtered = query ? items.filter((m) => m.model.toLowerCase().includes(query)) : items;
 
+  // 列 → 单元格渲染器。写成 `Record<ModelTableColumnKey, …>` 而非 switch：
+  // display.ts 里新增一个列 key 而这里忘了补渲染器 = **类型错误**（漏项无处可逃）。
+  const cellRenderers: Record<ModelTableColumnKey, (item: ModelResponse) => ReactNode> = {
+    model: (item) => (
+      <div className="flex items-center gap-1.5">
+        <span className="font-medium">{item.model}</span>
+        <CopyModelButton model={item.model} />
+        {modelBadges(item, isAdmin).map((badge) => (
+          <Badge key={badge.key} variant={badge.variant} title={badge.title}>
+            {badge.label}
+          </Badge>
+        ))}
+      </div>
+    ),
+    input: (item) => (
+      <>
+        {formatUsd(item.inputPriceShort)} → {formatUsd(item.inputPriceLong)}
+      </>
+    ),
+    inputCached: (item) => <>{formatUsd(item.inputPriceCached)}</>,
+    output: (item) => (
+      <>
+        {formatUsd(item.outputPriceShort)} → {formatUsd(item.outputPriceLong)}
+      </>
+    ),
+    maxOutput: (item) => (
+      <>{item.maxOutputTokens ? item.maxOutputTokens.toLocaleString() : "∞"}</>
+    ),
+    updated: (item) => <>{formatDateTime(item.updatedAt)}</>,
+    actions: (item) => {
+      const rowPending = pendingRowId === item.id;
+      return (
+        <div className="flex items-center justify-end gap-1.5">
+          {/* 两个行控制（批次 P，D17/D19；2026-09-23 用户改为图标按钮）：
+              🎁 Gift = 活动免费、👁 Eye/EyeOff = 对 member 可见/不可见。
+              随后一条竖分隔线隔开 Edit/Delete —— 「改这个模型的计费语义」与「编辑/删除这一行」
+              是两类动作，视觉上不该连成一片；四个按钮同为 size="icon"（h-9 w-9）时这一行才齐平。
+              原生 disabled（与账户菜单的灰项相反）：这是独立动作按钮，不参与键盘方向键导航，
+              禁用态用原生属性才拦得住点击。
+
+              ⚠ 图标按钮**没有可见文字**，可访问名全靠 aria-label，三条约定缺一不可：
+                · `aria-label` **恒定**（不随状态变）—— 它是这个按钮的身份，兼作探针/测试的定位锚；
+                · `aria-pressed` = **当前状态**（同 dashboard.tsx 的 Time Filter 与批次 P 的有字按钮）；
+                · `title` = **点下去会发生什么**（动态），弥补图标说不清的语义 ——
+                  Eye 一族尤其容易与「预览/查看」混淆，而 Gift 不点开不知道是开还是关。
+              可见图标也随状态换（Eye ⇄ EyeOff），与 aria-pressed 说的是同一件事。 */}
+          <Button
+            variant={item.freeMode ? "default" : "outline"}
+            size="icon"
+            aria-pressed={item.freeMode}
+            aria-label="Free mode"
+            disabled={rowPending}
+            onClick={() => updateModel.mutate({ id: item.id, freeMode: !item.freeMode })}
+            title={
+              item.freeMode
+                ? "Free mode on — click to bill at the prices in this table"
+                : "Bill this model at the free-mode rate (prices in this table stay unchanged)"
+            }
+          >
+            <Gift aria-hidden="true" />
+          </Button>
+          <Button
+            variant={item.hiddenFromMembers ? "default" : "outline"}
+            size="icon"
+            aria-pressed={item.hiddenFromMembers}
+            aria-label="Hide from members"
+            disabled={rowPending}
+            onClick={() => updateModel.mutate({ id: item.id, hiddenFromMembers: !item.hiddenFromMembers })}
+            title={
+              item.hiddenFromMembers
+                ? "Hidden from members — click to list this row again"
+                : "Hide this row from the member price table (the model is still served)"
+            }
+          >
+            {item.hiddenFromMembers ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+          </Button>
+          <span className="h-4 w-px bg-border" aria-hidden="true" />
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setEditing(item)}
+            aria-label={`Edit ${item.model}`}
+            title="Edit"
+          >
+            <Pencil aria-hidden="true" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-destructive hover:text-destructive"
+            onClick={() => setDeleting(item)}
+            aria-label={`Delete ${item.model}`}
+            title="Delete"
+          >
+            <Trash2 aria-hidden="true" />
+          </Button>
+        </div>
+      );
+    },
+  };
+
   return (
     <PageContainer>
       <PageHeader
         title="Model pricing"
-        description="Price table used for usage billing (admin)"
+        // 副标题两角色同一句：「— read-only」对 member 是**多余的**（页面上没有编辑入口，
+        // 而服务端投影已把 admin 才有的列整列拿掉 —— 想说的事实已由「看不到按钮」表达，
+        // 再写一遍只是噪声）。用户 2026-09-23 裁定删除。
+        description="Price table used for usage billing"
         actions={
-          <Button onClick={() => setFormOpen(true)}>
-            <Plus aria-hidden="true" />
-            Add price
-          </Button>
+          // Add price 仅 admin：member 发 POST 会被后端 403，按钮本就不该出现
+          isAdmin ? (
+            <Button onClick={() => setFormOpen(true)}>
+              <Plus aria-hidden="true" />
+              Add price
+            </Button>
+          ) : undefined
         }
       />
 
@@ -355,6 +580,17 @@ export default function ModelsPage() {
           ) : null}
         </CardHeader>
         <CardContent className="p-0">
+          {/* 行控制失败（无 toast 基建）：顶在表格上方给一条可见提示，不静默吞掉 */}
+          {isAdmin && updateModel.isError ? (
+            <div className="p-6 pb-0">
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {updateModel.error.message}
+              </p>
+            </div>
+          ) : null}
           {modelsQuery.isLoading ? (
             <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
               Loading…
@@ -368,7 +604,9 @@ export default function ModelsPage() {
               <EmptyState
                 title={items.length === 0 ? "No price entries yet" : "No models match"}
                 description={
-                  items.length === 0 ? "Add model prices before usage can be billed." : undefined
+                  items.length === 0 && isAdmin
+                    ? "Add model prices before usage can be billed."
+                    : undefined
                 }
               />
             </div>
@@ -376,57 +614,24 @@ export default function ModelsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Model</TableHead>
-                  <TableHead className="text-right">Input / 1M</TableHead>
-                  <TableHead className="hidden text-right sm:table-cell">Input cached / 1M</TableHead>
-                  <TableHead className="text-right">Output / 1M</TableHead>
-                  <TableHead className="hidden text-right lg:table-cell">Max output</TableHead>
-                  <TableHead className="hidden md:table-cell">Updated</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+                  {/* 表头与表体都从 `columns` 渲染（同一个数组，两处 map）：
+                      角色决定列集合、每列的类名（含响应式藏列）都在 display.ts 里，
+                      这里只负责把 descriptor 摊开 —— 表头/表体错位在构造上不可能。 */}
+                  {columns.map((column) => (
+                    <TableHead key={column.key} className={column.headClassName}>
+                      {column.label}
+                    </TableHead>
+                  ))}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {filtered.map((item) => (
                   <TableRow key={item.id}>
-                    <TableCell className="font-medium">{item.model}</TableCell>
-                    <TableCell className="text-right whitespace-nowrap">
-                      {formatUsd(item.inputPriceShort)} → {formatUsd(item.inputPriceLong)}
-                    </TableCell>
-                    <TableCell className="hidden text-right sm:table-cell">
-                      {formatUsd(item.inputPriceCached)}
-                    </TableCell>
-                    <TableCell className="text-right whitespace-nowrap">
-                      {formatUsd(item.outputPriceShort)} → {formatUsd(item.outputPriceLong)}
-                    </TableCell>
-                    <TableCell className="hidden text-right lg:table-cell">
-                      {item.maxOutputTokens ? item.maxOutputTokens.toLocaleString() : "∞"}
-                    </TableCell>
-                    <TableCell className="hidden text-muted-foreground md:table-cell">
-                      {formatDateTime(item.updatedAt)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => setEditing(item)}
-                          aria-label={`Edit ${item.model}`}
-                          title="Edit"
-                        >
-                          <Pencil aria-hidden="true" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="text-destructive hover:text-destructive"
-                          onClick={() => setDeleting(item)}
-                          aria-label={`Delete ${item.model}`}
-                          title="Delete"
-                        >
-                          <Trash2 aria-hidden="true" />
-                        </Button>
-                      </div>
-                    </TableCell>
+                    {columns.map((column) => (
+                      <TableCell key={column.key} className={column.cellClassName}>
+                        {cellRenderers[column.key](item)}
+                      </TableCell>
+                    ))}
                   </TableRow>
                 ))}
               </TableBody>
@@ -434,13 +639,15 @@ export default function ModelsPage() {
           )}
           {/* 分层规则说明（批次 L，2026-09-21 用户裁决：原副标题下沉到卡片最下方、独立成条）。
               与 settings 页「These values are compile-time constants…」同款信息条。
-              CardContent 是 p-0（表格齐边），故本条的左右下边距得自己给。 */}
+              CardContent 是 p-0（表格齐边），故本条的左右下边距得自己给。
+              末句（批次 P）：member 看到免费行为 `$0.00`，这里是对「为什么是 0」的唯一解释。 */}
           <div className="mx-6 mb-6 mt-4 flex items-start gap-2 rounded-md border border-muted bg-muted/40 p-3 text-sm text-muted-foreground">
             <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
             <p>
               USD per 1M tokens. Arrows show short → long tiers: short = input ≤ 128K tokens,
               long = input &gt; 128K (longer context bills both input and output at the long
-              rate); cached = input served from cache.
+              rate); cached = input served from cache. A model showing <code>$0.00</code> is
+              currently free.
             </p>
           </div>
         </CardContent>

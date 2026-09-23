@@ -85,6 +85,13 @@
       "when": 1790067825742,
       "tag": "0011_lame_silver_fox",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1790134398471,
+      "tag": "0012_last_warlock",
+      "breakpoints": true
     }
   ]
 }
