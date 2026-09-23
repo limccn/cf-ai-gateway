@@ -114,7 +114,9 @@ export const providerResponseSchema = z.object({
   name: z.string(),
   type: z.enum(["openai", "anthropic"]),
   baseUrl: z.string(),
-  apiKeyMasked: z.string(), // 如 `sk-****abcd`；明文永不下发
+  // 如 `sk-mock-ope****`；明文永不下发。**空串 = 该行未配置上游密钥**（不是 `"****"`）——
+  // 前端据此渲染「未配置」标记而不是看起来像掩码的星号（R-A15/A16）
+  apiKeyMasked: z.string(),
   models: z.record(z.string(), z.string()),
   weight: z.number().int().min(1).max(1000),
   enabled: z.boolean(),

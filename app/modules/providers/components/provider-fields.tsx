@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { FieldErrors, ProviderFormState } from "../form";
+import { ApiKeyMask } from "./api-key-mask";
 
 // ============= 基础信息（Add / Edit basics 共用）=============
 
@@ -132,7 +133,10 @@ function ApiKeyField({ value, onChange, errors, mode }: ApiKeyFieldProps) {
             id="provider-key-readonly"
             className="flex h-9 min-w-0 flex-1 items-center rounded-md border border-input bg-muted/50 px-3 font-mono text-xs text-muted-foreground"
           >
-            <span className="truncate">{mode.masked}</span>
+            {/* 空串 = 未配置上游密钥 ⇒ 渲染明确标记（与表格 Key 列同一组件，R-A16） */}
+            <span className="truncate">
+              <ApiKeyMask masked={mode.masked} />
+            </span>
           </code>
           <Button type="button" variant="outline" size="sm" onClick={mode.onEdit}>
             <Pencil aria-hidden="true" />

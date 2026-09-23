@@ -18,6 +18,7 @@ import { ProviderCreateDialog } from "@/modules/providers/components/provider-cr
 import { ProviderBasicsDialog } from "@/modules/providers/components/provider-basics-dialog";
 import { ProviderAdvancedDialog } from "@/modules/providers/components/provider-advanced-dialog";
 import { ProviderTestDialog } from "@/modules/providers/components/provider-test-dialog";
+import { ApiKeyMask } from "@/modules/providers/components/api-key-mask";
 import { formatDateTime, formatNumber } from "@/lib/format";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
@@ -176,8 +177,10 @@ export default function ProvidersPage() {
                         {provider.baseUrl}
                       </TableCell>
                       <TableCell>
+                        {/* 空串（= 未配置上游密钥）渲染成明确标记，不是看着像掩码的 `****`：
+                            迁移后 prod 的 10/10 行都是这一态，见 api-key-mask.tsx 文件头 */}
                         <code className="font-mono text-xs text-muted-foreground">
-                          {provider.apiKeyMasked}
+                          <ApiKeyMask masked={provider.apiKeyMasked} />
                         </code>
                       </TableCell>
                       <TableCell className="hidden text-muted-foreground md:table-cell">

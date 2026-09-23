@@ -26,8 +26,12 @@ export function toProviderResponse(
     name: provider.name,
     type: provider.type as ProviderType,
     baseUrl: provider.baseUrl,
-    // 仅用明文前缀脱敏展示（如 `sk-mock-ope****`）；AES-GCM 密文永不下发
-    apiKeyMasked: maskSecret(provider.apiKeyPrefix),
+    // 仅用明文前缀脱敏展示（如 `sk-mock-ope****`）；AES-GCM 密文永不下发。
+    // **空前缀 ⇒ 空串，不是 `"****"`**（09-21-seed-migration-tooling R-A15）：`"****"` 与
+    // 真实密钥的掩码逐字相同 ⇒ 管理台会把「未配置」显示成「已配置」。判据属**响应契约**，
+    // 故放在这里而不是 maskSecret 里 —— 后者是通用脱敏工具（任何入参都该吐出掩码）。
+    // 迁移后 prod 的 10/10 个 provider 都是空前缀，这条不是边角路径。
+    apiKeyMasked: provider.apiKeyPrefix ? maskSecret(provider.apiKeyPrefix) : "",
     models,
     weight: typeof provider.weight === "number" ? provider.weight : 1,
     enabled: provider.enabled,
