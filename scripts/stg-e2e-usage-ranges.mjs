@@ -11,7 +11,7 @@ import { createHash, randomBytes, scryptSync } from "node:crypto";
 
 const DB = "cf-ai-gateway-db-staging";
 const WRANGLER_JS = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
-const BASE = process.env.BASE_URL ?? "https://stg-router.lmlh.net";
+const BASE = process.env.BASE_URL ?? "https://stg-platform.lmlh.net";
 const TZ = 480; // 本机 UTC+8，与浏览器 getTzOffsetMin() 一致
 
 const q = (sql) => JSON.parse(execFileSync(process.execPath,

@@ -10,7 +10,7 @@ OpenAI 兼容的 **AI API 网关**：单入口代理多家模型供应商（Open
 
 - 管理 API：`/api/*`（Better Auth 会话鉴权，角色 admin/member）；代理 API：`/v1/*`、`/anthropic/*`（网关 key 鉴权）。
 - 技术栈：Cloudflare Workers（Wrangler v4+）、Hono、Drizzle ORM、D1（SQLite）、KV、Queues、Better Auth、Zod v4、React 19 + React Router v7 + Vite + Tailwind v4、Vitest + Miniflare。
-- 已上线：生产 `https://router.lmlh.net`、staging `https://stg-router.lmlh.net`（资源完全隔离）。
+- 已上线：**staging** `https://stg-platform.lmlh.net`（公开 API `https://stg-api.lmlh.net`；旧域 `stg-router.lmlh.net` 保留为转发源）、**生产** `https://router.lmlh.net`（本次发布将切至 `platform.lmlh.net` + `api.lmlh.net`，旧域同样留作转发源）。资源完全隔离。
 
 ## 常用命令
 

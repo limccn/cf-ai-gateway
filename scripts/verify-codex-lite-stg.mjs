@@ -1,5 +1,5 @@
 // Codex Responses Lite 全量适配 stg 真实链路模拟（09-01-codex-responses-lite-full 批次）：
-// stg（https://stg-router.lmlh.net）无法访问本地 mock，字节级断言（扁平 tools 上游收到）
+// stg（https://stg-api.lmlh.net）无法访问本地 mock，字节级断言（扁平 tools 上游收到）
 // 由本地 verify-codex-lite.mjs（16/16）与单测覆盖；本脚本验证真实环境行为：
 //   1) D1 直插 auth（仿 stg-e2e-bootstrap）+ 价格 + bravo.b.ai provider 模型映射
 //   2) lite 请求（additional_tools[functions namespace] + tool_search/web + reasoning 回放
@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-const BASE = "https://stg-router.lmlh.net";
+const BASE = "https://stg-api.lmlh.net";
 const DB = "cf-ai-gateway-db-staging";
 const ADMIN_EMAIL = "e2e-codex-admin@staging.test";
 const PROVIDER_NAME = "bravo.b.ai";

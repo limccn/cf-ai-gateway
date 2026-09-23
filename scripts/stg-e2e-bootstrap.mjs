@@ -7,7 +7,11 @@ import { createHash, randomBytes } from "node:crypto";
 
 const DB = "cf-ai-gateway-db-staging";
 const WRANGLER_JS = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
-const BASE = process.env.BASE_URL ?? "https://stg-router.lmlh.net";
+// 双域名分流（09-21-dual-domain-split）：管理面与公开 API 面各走自己的域。
+// 本脚本只直插 D1、不发请求，BASE/API_BASE 仅用于打印给后续 verify 脚本用。
+const BASE = process.env.BASE_URL ?? "https://stg-platform.lmlh.net";
+// 由 BASE 派生（`replace` 无匹配时原样返回）⇒ 传 localhost 时不会指到线上。
+const API_BASE = process.env.API_BASE_URL ?? BASE.replace("stg-platform.lmlh.net", "stg-api.lmlh.net");
 
 const ADMIN = { email: "e2e-admin@staging.test", name: "E2E Admin", role: "admin", balance: 50 };
 const MEMBER = { email: "e2e-user@staging.test", name: "E2E User", role: "member", balance: 20 };
@@ -59,3 +63,4 @@ console.log(`KEY=${keyPlain}`);
 console.log(`ADMIN_ID=${adminId}`);
 console.log(`MEMBER_ID=${memberId}`);
 console.log(`BASE=${BASE}`);
+console.log(`API_BASE=${API_BASE}`);

@@ -1,10 +1,10 @@
-// stg 环境（https://stg-router.lmlh.net）真实模型矩阵验证：
+// stg 环境（https://stg-api.lmlh.net）真实模型矩阵验证：
 // 双入口（/v1 OpenAI 形态、/anthropic Anthropic 形态）× 各协议模型列表，
 // 每 10s 发送一次请求，逐个上报 PASS/FAIL。
 // 用法：E2E_KEY=<网关key> node scripts/verify-stg-models.mjs
 import { fileURLToPath } from "node:url";
 
-const BASE = "https://stg-router.lmlh.net";
+const BASE = "https://stg-api.lmlh.net";
 const KEY = process.env.E2E_KEY;
 const INTERVAL_MS = 10_000; // 每 10s 一个请求
 const TIMEOUT_MS = 120_000; // 单请求超时（慢上游兜底）

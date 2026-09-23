@@ -1,4 +1,4 @@
-// stg 环境（https://stg-router.lmlh.net）任务③ 真实 E2E：/v1/messages 双协议自动感知。
+// stg 环境（https://stg-api.lmlh.net）任务③ 真实 E2E：/v1/messages 双协议自动感知。
 // 前置：scripts/stg-e2e-bootstrap.mjs 已运行（KEY 输出）；E2E_KEY=<网关key>。
 // 场景（上游限定 4 模型：deepseek-v4-flash / qwen3.8-flash / glm-5.3-flash / hy3）：
 //   anthropic 体（anthropic-version 头 + max_tokens）→ Anthropic 响应（零回归）；
@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-const BASE = "https://stg-router.lmlh.net";
+const BASE = "https://stg-api.lmlh.net";
 const KEY = process.env.E2E_KEY;
 const DB = "cf-ai-gateway-db-staging";
 const WRANGLER_JS = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));

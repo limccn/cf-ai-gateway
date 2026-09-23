@@ -1,4 +1,4 @@
-// stg 环境（https://stg-router.lmlh.net）真实全流程 E2E：
+// stg 环境（管理面 https://stg-platform.lmlh.net / 公开 API 面 https://stg-api.lmlh.net）真实全流程 E2E：
 // 四协议入口 × 非流式/流式 × 真实 DeepSeek 上游 × 计费 × 缓存 × 错误形态。
 // 前置：scripts/stg-e2e-bootstrap.mjs 已运行（KEY 输出）。
 // 用法：E2E_KEY=<网关key> node scripts/stg-e2e-verify.mjs [--model deepseek-v4-flash]
@@ -6,7 +6,13 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-const BASE = "https://stg-router.lmlh.net";
+// 双域名分流（09-21-dual-domain-split）：管理面与公开 API 面各走自己的域。
+// **不再指向旧域 stg-router** —— 走转发路径会让每次验证多吃一跳 301，且掩盖分流回归
+// （新域分流坏掉时脚本照样绿）。
+const BASE = "https://stg-platform.lmlh.net";
+const API_BASE = "https://stg-api.lmlh.net";
+/** 按路径选域：/v1 与 /anthropic 归 API 面，其余归管理面（/api/health 在所有 host 上均放行）。 */
+const target = (p) => (/^\/(v1|anthropic)(\/|$)/.test(p) ? API_BASE : BASE);
 const KEY = process.env.E2E_KEY;
 const MODEL = (process.argv.find((a) => a.startsWith("--model=")) ?? "--model=deepseek-v4-flash").split("=")[1];
 const DB = "cf-ai-gateway-db-staging";
@@ -34,11 +40,11 @@ async function api(path, { method = "GET", headers = {}, body } = {}) {
   if (body !== undefined) finalHeaders["Content-Type"] = "application/json";
   let res;
   try {
-    res = await fetch(BASE + path, { method, headers: finalHeaders, body: body !== undefined ? JSON.stringify(body) : undefined });
+    res = await fetch(target(path) + path, { method, headers: finalHeaders, body: body !== undefined ? JSON.stringify(body) : undefined });
   } catch (error) {
     console.log(`  [retry] ${method} ${path} (${error.cause?.code ?? error.message})`);
     await new Promise((r) => setTimeout(r, 800));
-    res = await fetch(BASE + path, { method, headers: finalHeaders, body: body !== undefined ? JSON.stringify(body) : undefined });
+    res = await fetch(target(path) + path, { method, headers: finalHeaders, body: body !== undefined ? JSON.stringify(body) : undefined });
   }
   const text = await res.text();
   let json = null;
@@ -124,7 +130,7 @@ const respEvents = parseSse(respStream.text);
 report("/v1/responses stream completed", respStream.status === 200 && respEvents.some((e) => e.type === "response.completed"), `events=${respEvents.length}`);
 
 // [7] 错误形态
-const badKey = await fetch(`${BASE}/v1/chat/completions`, { method: "POST", headers: { Authorization: "Bearer sk-wrong-key", "Content-Type": "application/json" }, body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "hi" }] }) });
+const badKey = await fetch(`${API_BASE}/v1/chat/completions`, { method: "POST", headers: { Authorization: "Bearer sk-wrong-key", "Content-Type": "application/json" }, body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: "hi" }] }) });
 const badKeyJson = await badKey.json().catch(() => null);
 report("wrong key → 401 OpenAI form", badKey.status === 401 && badKeyJson?.error?.message?.length > 0, `status=${badKey.status}`);
 const noModel = await api("/v1/chat/completions", { method: "POST", body: { model: "no-such-model-xyz", messages: [{ role: "user", content: "hi" }] } });

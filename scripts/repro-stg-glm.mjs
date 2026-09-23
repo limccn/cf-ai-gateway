@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-const BASE = "https://stg-router.lmlh.net";
+const BASE = "https://stg-api.lmlh.net";
 const DB = "cf-ai-gateway-db-staging";
 const ADMIN_EMAIL = "repro-glm-admin@staging.test";
 const MODEL = "glm-5.3-flash";

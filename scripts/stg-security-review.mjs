@@ -2,7 +2,7 @@
 // 基线安全断言（S1-S12）+ 评审发现修复验证（F1 计费注入观测 / F4 限流头矩阵；
 // F4b/F4c 已翻转：「有头」= 修复生效，与 09-01-fix-security-review-findings 任务对应）。
 // 独立前缀数据（sec-* 用户 / sk-sec-* key），默认运行末尾清理，可重跑（开头同样清理）。
-// 用法：node scripts/stg-security-review.mjs [--base https://stg-router.lmlh.net] [--keep]
+// 用法：node scripts/stg-security-review.mjs [--base https://stg-platform.lmlh.net] [--keep]
 // 依赖：wrangler d1 execute --remote --env staging --config wrangler.toml（同 stg-e2e-bootstrap）
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,14 @@ import { createHash, randomBytes } from "node:crypto";
 
 const DB = "cf-ai-gateway-db-staging";
 const WRANGLER_JS = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
-const BASE = (process.argv.find((a) => a.startsWith("--base=")) ?? "--base=https://stg-router.lmlh.net").split("=")[1];
+// 双域名分流：`--base` 指**管理面**（也是 Better Auth 的 Origin 来源，必须与 BETTER_AUTH_URL 一致）；
+// 公开 API 面（/v1、/anthropic）另走 API_BASE，不再经旧域 stg-router 转发。
+const BASE = (process.argv.find((a) => a.startsWith("--base=")) ?? "--base=https://stg-platform.lmlh.net").split("=")[1];
+// 由 BASE 派生（`replace` 无匹配时原样返回）⇒ 只在 BASE 确为 stg 管理面时才分流；
+// 传 `--base http://localhost:5173` 时两者同域，不会把请求打到线上 stg。
+const API_BASE = process.env.API_BASE_URL ?? BASE.replace("stg-platform.lmlh.net", "stg-api.lmlh.net");
+/** 按路径选域：/v1 与 /anthropic 归 API 面，其余归管理面。 */
+const target = (p) => (/^\/(v1|anthropic)(\/|$)/.test(p) ? API_BASE : BASE);
 const KEEP = process.argv.includes("--keep");
 // stg 现有真实上游模型（verify 脚本同款，deepseek 为自发 usage 的非规范上游）
 const MODEL = "deepseek-v4-flash";
@@ -49,7 +56,7 @@ async function poll(fn, timeoutMs = 30000, intervalMs = 500) {
 async function raw(path, opts = {}, body) {
   const headers = { ...(opts.headers ?? {}) };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${target(path)}${path}`, {
     method: opts.method ?? (body !== undefined ? "POST" : "GET"),
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
