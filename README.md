@@ -146,9 +146,12 @@ npx wrangler d1 execute cf-ai-gateway-db --local \
 
 ## Deployment
 
-Live environments: **production** `https://router.lmlh.net` and **staging**
-`https://stg-router.lmlh.net` (fully isolated resources — separate D1 / KV /
-Queues / secrets). Deploy with:
+Live environments: **staging** `https://stg-platform.lmlh.net` (public API
+`https://stg-api.lmlh.net`) and **production** `https://router.lmlh.net`
+(this release moves it to `platform.lmlh.net` + `api.lmlh.net`). The legacy
+hostnames stay bound as forwarding sources, so existing `base_url` values keep
+working unchanged. Fully isolated resources — separate D1 / KV / Queues /
+secrets. Deploy with:
 
 ```bash
 npm run build
@@ -244,8 +247,9 @@ both are accepted at every proxy entry point (`x-api-key` falls back when
 - **Live environments require user-provided credentials** (GitHub OAuth App
   client secrets via `wrangler secret put`, real upstream provider keys
   configured through the admin console) — see `CLAUDE.md §部署要点` for the
-  production checklist. Live deployment is done (production
-  `router.lmlh.net`, staging `stg-router.lmlh.net`).
+  production checklist. Live deployment is done (staging
+  `stg-platform.lmlh.net`; production `router.lmlh.net`, moving to
+  `platform.lmlh.net` + `api.lmlh.net` with this release).
 
 ## Project layout
 

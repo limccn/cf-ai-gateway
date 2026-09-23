@@ -12,7 +12,7 @@
 //       （R5 回归护栏：flag on 后 OpenAI 系模型容忍度；400 则回退 flag 重议）
 // 前置：stg 已部署本任务代码；5 个 b.ai provider reasoning_roundtrip=1。
 // 用法：E2E_KEY=<网关key> node scripts/verify-stg-reasoning-roundtrip.mjs
-const BASE = "https://stg-router.lmlh.net";
+const BASE = "https://stg-api.lmlh.net";
 const KEY = process.env.E2E_KEY;
 const MODEL = process.env.MODEL ?? "deepseek-v4-flash";
 const GPT_MODEL = process.env.GPT_MODEL ?? "gpt-5.6-luna";

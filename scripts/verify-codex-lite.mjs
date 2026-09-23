@@ -11,9 +11,13 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-// stg 模式（E2E_STG=1）：BASE 指向 stg-router，D1 用 --remote --env staging（仿 stg-e2e-verify.mjs）
+// stg 模式（E2E_STG=1）：BASE 指 stg 管理面、API_BASE 指 stg 公开 API 面（双域名分流），
+// D1 用 --remote --env staging（仿 stg-e2e-verify.mjs）
 const STG = process.env.E2E_STG === "1";
-const BASE = STG ? "https://stg-router.lmlh.net" : (process.env.BASE_URL ?? "http://localhost:5173");
+const BASE = STG ? "https://stg-platform.lmlh.net" : (process.env.BASE_URL ?? "http://localhost:5173");
+// 公开 API 面（/v1、/anthropic）走独立域；本地模式下分流关闭（环回例外）⇒ 两者同域。
+const API_BASE = STG ? "https://stg-api.lmlh.net" : BASE;
+const target = (p) => (/^\/(v1|anthropic)(\/|$)/.test(p) ? API_BASE : BASE);
 const MOCK_BASE = process.env.MOCK_URL ?? "http://127.0.0.1:8788";
 const DB = STG ? "cf-ai-gateway-db-staging" : "cf-ai-gateway-db";
 const D1_ARGS = STG
@@ -78,7 +82,7 @@ async function api(path, { method = "GET", headers = {}, body, cookie } = {}) {
   };
   let res;
   try {
-    res = await fetch(`${BASE}${path}`, {
+    res = await fetch(`${target(path)}${path}`, {
       method,
       headers: requestHeaders,
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -86,7 +90,7 @@ async function api(path, { method = "GET", headers = {}, body, cookie } = {}) {
   } catch (error) {
     console.log(`  [retry] ${method} ${path} failed (${error.cause?.code ?? error.message}), retrying...`);
     await sleep(500);
-    res = await fetch(`${BASE}${path}`, {
+    res = await fetch(`${target(path)}${path}`, {
       method,
       headers: requestHeaders,
       body: body !== undefined ? JSON.stringify(body) : undefined,
