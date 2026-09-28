@@ -4,10 +4,12 @@
 //   2. domainSplit（双域名分流：按 Host 放行/互跳；未配置 API_DOMAIN 时整体关闭）
 //   3. zod 校验错误统一中间件（M8：@hono/zod-validator 400 响应统一为 {error:{message}}）
 //   4. GET /api/health（public）+ GET /api/config（public）
-//   5. /api/auth/*（Better Auth，public）—— 必须先于 requireSession 注册
-//   6. requireSession 挂载 /api/*（未登录 401）
-//   7. 管理面模块路由（/api/users、/api/keys、/api/providers 等）
-//   8. notFound 兜底：/api/* 与 /v1/* 返回 JSON 404；其余路径交给 env.ASSETS 托管
+//   5. authRateLimit 挂载 /api/auth/*（认证面限流，09-28-auth-rate-limit-fix / security-audit F1）
+//      —— **必须先于 authRouter 注册**，否则永远不跑
+//   6. /api/auth/*（Better Auth，public）—— 必须先于 requireSession 注册
+//   7. requireSession 挂载 /api/*（未登录 401）
+//   8. 管理面模块路由（/api/users、/api/keys、/api/providers 等）
+//   9. notFound 兜底：/api/* 与 /v1/* 返回 JSON 404；其余路径交给 env.ASSETS 托管
 //      （M6 前端：SPA index.html + 构建产物；wrangler.toml assets run_worker_first=true）
 // 代理面 /v1/*（M3）：网关 Key 鉴权，独立于会话鉴权，在 requireSession 之前注册（互不冲突）。
 import { Hono } from "hono";
@@ -15,6 +17,7 @@ import { HTTPException } from "hono/http-exception";
 import { ZodError } from "zod";
 import { requestContext } from "./middleware/request-context";
 import { domainSplit } from "./middleware/domain-split";
+import { authRateLimit } from "./middleware/auth-rate-limit";
 import { requireSession } from "./middleware/auth";
 import { apiBaseUrl, platformBaseUrl } from "./lib/domains";
 import authRouter from "./routes/auth/router";
@@ -91,6 +94,12 @@ app.get("/api/config", (c) => {
     platformBaseUrl: platformBaseUrl(c.env, origin),
   });
 });
+
+// 认证面限流（09-28-auth-rate-limit-fix / security-audit F1）：此前 /api/auth/* 零速率成本
+// （Better Auth 自带限流挂 NODE_ENV === "production"，而 Workers 里它是 undefined ⇒ 从未启用），
+// 匿名口令爆破与邮件放大都无上界。**必须在 authRouter 之前**（Hono 按注册顺序匹配）。
+// 策略（10 次 / 5 次每 60 秒）在 wrangler.toml 的 [[ratelimits]]，改档位不用改代码、不用发版。
+app.use("/api/auth/*", authRateLimit());
 
 // Better Auth（public）：必须先于 requireSession 注册
 app.route("/api/auth", authRouter);

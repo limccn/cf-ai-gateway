@@ -98,6 +98,7 @@ git branch -d feat/<name>                          # ⑤ 删除
 - secrets 每环境独立（`--env staging`）；`GATEWAY_SECRET_KEY` / `BETTER_AUTH_SECRET` 分别生成独立随机值（`crypto.randomBytes(32)`），二者不得相同。
 - 首个 admin 无自提升端点：GitHub OAuth 登录（白名单内）→ 直接 D1 `UPDATE users SET role='admin'`（唯一合法 bootstrap；**禁止 SQL INSERT 造用户**——Better Auth 哈希/绑定会被绕过）。
 - `[env.staging]` 不继承顶层 `[vars]`；顶层 assets / compatibility_date 继承。
+- **`[[ratelimits]]`（认证面限流，09-28-auth-rate-limit-fix）同样不继承**——`[env.staging]` 段必须另写 `[[env.staging.ratelimits]]`，漏写不报错、只会让 staging 静默不限流（运行时落在中间件的 binding 缺席 fail-open 分支，日志 `auth_rate_limit_binding_missing`）。且 `namespace_id` 是**账号级**命名空间、同值跨 Worker 共享计数 ⇒ prod（1001/1002）与 stg（2001/2002）段位必须不同。`deploy --dry-run` 同样判不了这套绑定是否真正生效（套餐门槛文档无记载），以真实 deploy 后 AC11 探针为准。
 - GitHub OAuth 回调必须精确等于 `https://<origin>/api/auth/callback/github`（origin 与 `BETTER_AUTH_URL` 一致）；`GITHUB_ALLOWED_EMAILS` 为空 = 拒绝所有登录（fail-closed）。
 - **`BETTER_AUTH_URL` 同时是双域名分流的「平台域」真源**（`new URL(BETTER_AUTH_URL).hostname`，见 `src/lib/domains.ts`；刻意不新增 `PLATFORM_DOMAIN` token 以免多一个真源）⇒ 生产/staging 部署 shell **必须** export 它（`https://platform.lmlh.net` / `https://stg-platform.lmlh.net`）。忘了 export 的后果是**部分可用**：`/v1` 照常，但管理面（`/api/*` 与 SPA）会被 301 到 `https://localhost/...`。部署后探针：`curl -sI https://<平台域>/` 与 `https://<api 域>/api/health` 均须 200。
 - cron 每日 02:00 UTC 清理 `request_logs`（保留 `REQUEST_LOG_RETENTION_DAYS`，默认 30）。

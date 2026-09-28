@@ -60,6 +60,39 @@ function leakedAcrossSections(rendered: string): string[] {
   return leaked;
 }
 
+type RateLimitBinding = { section: string; name: string; namespaceId: string; simple: string };
+
+/**
+ * 从模板文本里抽出 `[[ratelimits]]` / `[[env.staging.ratelimits]]` 块（09-28 认证面限流）。
+ * 只认**行首锚定**的表头 —— 注释行里出现的 `[[ratelimits]]` 文字不是表头（与 classifySections
+ * 同一纪律，否则本文件的注释会把自己解析成绑定）。
+ */
+function ratelimitBindings(lines: string[]): RateLimitBinding[] {
+  const out: RateLimitBinding[] = [];
+  let current: Partial<RateLimitBinding> | null = null;
+  for (const { line } of classifySections(lines)) {
+    const text = line.trim();
+    const header = /^\[\[([\w.]*ratelimits)\]\]$/.exec(text);
+    if (header) {
+      current = { section: header[1] as string };
+      out.push(current as RateLimitBinding);
+      continue;
+    }
+    if (text.startsWith("[") || text.startsWith("#")) {
+      current = null;
+      continue;
+    }
+    if (!current) continue;
+    const kv = /^(\w+)\s*=\s*(.+)$/.exec(text);
+    if (!kv) continue;
+    const value = (kv[2] as string).replace(/"/g, "").trim();
+    if (kv[1] === "name") current.name = value;
+    if (kv[1] === "namespace_id") current.namespaceId = value;
+    if (kv[1] === "simple") current.simple = value;
+  }
+  return out;
+}
+
 describe("sectionOf — 表头归属", () => {
   it.each([
     ["vars", SECTION_BASE, null],
@@ -349,5 +382,40 @@ describe("真实模板 wrangler.toml.template 的结构契约", () => {
     for (const c of classified.slice(varsIndex, envIndex)) {
       expect(c.section).toBe(SECTION_BASE);
     }
+  });
+
+  // 09-28-auth-rate-limit-fix（AC9）：认证面限流的 [[ratelimits]] 配置契约。
+  // 这里锁的是**静默失效**的两个坑 —— 少一段 = staging 不限流（不报错），
+  // 两段同 namespace_id = 跨 Worker 共享计数（不报错）。两者在部署侧都没有任何报错。
+  it("[[ratelimits]]：顶层与 [env.staging] 各恰好两个绑定，档位与 namespace 段位符合契约", () => {
+    const bindings = ratelimitBindings(lines);
+    // 先钉规模：空数组会让下面的 every / 长度断言恒真（恒真假绿）
+    expect(bindings.length).toBe(4);
+
+    const base = bindings.filter((b) => b.section === "ratelimits");
+    const env = bindings.filter((b) => b.section === "env.staging.ratelimits");
+    expect(base.map((b) => b.name).sort()).toEqual(["AUTH_CREDENTIAL_LIMIT", "AUTH_EMAIL_LIMIT"]);
+    expect(env.map((b) => b.name).sort()).toEqual(["AUTH_CREDENTIAL_LIMIT", "AUTH_EMAIL_LIMIT"]);
+
+    const byName = (list: typeof bindings, name: string) => {
+      const hit = list.find((b) => b.name === name);
+      expect(hit, `缺少绑定 ${name}`).toBeDefined();
+      return hit as (typeof bindings)[number];
+    };
+    // 档位与 tests/auth-rate-limit.test.ts 的 CREDENTIAL_LIMIT / EMAIL_LIMIT 是同一组数字，
+    // 两处必须一起改（period 只能是 10 或 60，是 wrangler schema 的 enum）。
+    expect(byName(base, "AUTH_CREDENTIAL_LIMIT").simple).toBe("{ limit = 10, period = 60 }");
+    expect(byName(base, "AUTH_EMAIL_LIMIT").simple).toBe("{ limit = 5, period = 60 }");
+    expect(byName(env, "AUTH_CREDENTIAL_LIMIT").simple).toBe("{ limit = 10, period = 60 }");
+    expect(byName(env, "AUTH_EMAIL_LIMIT").simple).toBe("{ limit = 5, period = 60 }");
+
+    // ⚠ 两段的 namespace_id 必须**互不相同**（namespace 是账号级的，同 namespace + 同 key
+    // 的绑定跨 Worker 共享计数 ⇒ prod 与 stg 的额度会互相吃掉，且全程无报错）。
+    expect(byName(base, "AUTH_CREDENTIAL_LIMIT").namespaceId).toBe("1001");
+    expect(byName(base, "AUTH_EMAIL_LIMIT").namespaceId).toBe("1002");
+    expect(byName(env, "AUTH_CREDENTIAL_LIMIT").namespaceId).toBe("2001");
+    expect(byName(env, "AUTH_EMAIL_LIMIT").namespaceId).toBe("2002");
+    const baseNs = base.map((b) => b.namespaceId);
+    expect(baseNs.some((ns) => env.some((b) => b.namespaceId === ns))).toBe(false);
   });
 });
