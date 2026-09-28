@@ -62,6 +62,15 @@ declare namespace Cloudflare {
      * 会先撞重复邮箱）。与 withSwitch 同一纪律：只在本 isolate 内可见、try/finally 还原。
      */
     SEED_USERS?: string;
+    /**
+     * 认证面限流绑定（09-28-auth-rate-limit-fix / security-audit F1）。**不是** vitest.config.ts 的
+     * miniflare bindings 注入 —— 它由 `vitest.config.ts` 的 `wrangler.configPath` 读**渲染产物**
+     * wrangler.toml 自动获得（`cloudflareTest` 读 wrangler 配置里的绑定），故本文件只需声明类型。
+     * 声明为可选与 src/env.d.ts 一致：中间件的 fail-open 分支要能处理 binding 缺席
+     * （AC6 就在验这条），必填声明会让该用例在类型上无法表达。
+     */
+    AUTH_CREDENTIAL_LIMIT?: RateLimit;
+    AUTH_EMAIL_LIMIT?: RateLimit;
     /** vitest.config.ts 注入的 drizzle 迁移 SQL（applyD1Migrations 用）。 */
     TEST_MIGRATIONS: D1Migration[];
   }

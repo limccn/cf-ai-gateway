@@ -76,4 +76,13 @@ interface Env {
   // 绕过邀请码"的豁免已删除，本变量的唯一读者是 dev-only 路由自身（它自铸一次性邀请码，
   // 种子用户走与真实用户相同的校验 + 消费链路）。生产禁止设置。格式见 src/lib/seed-users.ts
   SEED_USERS?: string;
+  // 认证面限流绑定（09-28-auth-rate-limit-fix / security-audit F1；wrangler.toml `[[ratelimits]]`）。
+  // 两个绑定的**档位（limit/period）只在配置里** —— workerd 的 `RateLimitOptions` 只有 `key` 字段，
+  // 代码侧无法逐调用覆写，故策略不同的类别必须各占一个绑定（namespace_id 即计数命名空间）。
+  // ⚠ **声明为可选（`?`）是如实的**：中间件有一条 fail-open 分支专门处理 binding 缺席
+  //   （`[[ratelimits]]` 是 wrangler 的 notInheritable key —— `[env.*]` 段漏写不报错，
+  //   只是让该环境静默不限流，见 design §2.2）。声明为必填会把这条真实运行时形态挡在类型之外。
+  // 与 tests/test-env.d.ts 的 Cloudflare.Env 声明必须一致（那是 cloudflare:test 侧的平行声明）。
+  AUTH_CREDENTIAL_LIMIT?: RateLimit;
+  AUTH_EMAIL_LIMIT?: RateLimit;
 }

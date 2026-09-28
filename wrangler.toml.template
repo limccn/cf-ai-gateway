@@ -64,6 +64,34 @@ migrations_dir = "drizzle"
 binding = "CACHE_KV"
 id = "{KV_ID}"
 
+# --- 认证面限流（09-28-auth-rate-limit-fix；修复 security-audit 2026-09-23 的 F1） ---
+# `/api/auth/*` 此前零速率成本（Better Auth 自带限流挂在 `NODE_ENV === "production"` 上，
+# 而 Workers 里 NODE_ENV 是 undefined ⇒ 从未启用）。现改用 Cloudflare 原生 [[ratelimits]] 绑定。
+# **策略（limit/period）只在这里，代码侧只传 `{ key }`** —— workerd 生成的 `RateLimitOptions`
+# 只有 key 字段（worker-configuration.d.ts），本地 miniflare 虽接受逐调用覆写但生产无此契约。
+# 故「同一绑定多策略」不可行 ⇒ 策略不同的类别各占一个 binding，namespace_id 即计数器命名空间。
+#
+# 三条写配置前必须知道的约束（详见 .trellis/tasks/09-28-auth-rate-limit-fix/design.md §2）：
+#  1. **namespace_id 是字面量，不走 RENDER-ENV token 链** —— 与 D1/KV/Queue 刻意不同：那些是
+#     Cloudflare 生成的资源 ID，而它是我们自己挑的账号级命名空间，**无需 dashboard 注册**。
+#     好处是 RENDER-ENV 键数（22）不变、.dev.vars 两个模板与 config-inventory 均不必动。
+#  2. **prod 与 staging 必须用不同 namespace_id** —— 该命名空间是**账号级**的，同 namespace + 同 key
+#     的绑定**跨 Worker 共享计数**；本仓两环境是同账号下两个 Worker，共用会导致额度互相吃掉，
+#     **且全程无任何报错**。段位约定：prod 用 1xxx、stg 用 2xxx。
+#  3. **本字段不继承**（wrangler 标为 notInheritable）—— [env.staging] 段必须另写一份，
+#     漏写不报错、只会让 staging 静默不限流。
+# period 只能是 10 或 60（wrangler schema 的 enum），limit 为「每周期每 IP 允许次数」。
+# 改档位改这里即可，**不用改代码、不用发版**。
+[[ratelimits]]
+name = "AUTH_CREDENTIAL_LIMIT"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "AUTH_EMAIL_LIMIT"
+namespace_id = "1002"
+simple = { limit = 5, period = 60 }
+
 # --- Queues：用量聚合异步管道（M5 使用） ---
 [[queues.producers]]
 binding = "USAGE_QUEUE"
@@ -164,6 +192,20 @@ migrations_dir = "drizzle"
 [[env.staging.kv_namespaces]]
 binding = "CACHE_KV"
 id = "{KV_ID}"
+
+# --- 认证面限流 stg 段（09-28-auth-rate-limit-fix） ---
+# ⚠ **这段不是上一段的冗余复制**：`[[ratelimits]]` 是 notInheritable（wrangler 标死），
+#   漏掉这段的后果**不是报错**，而是 staging 上 `env.AUTH_*_LIMIT` 为 undefined ⇒ 限流静默失效。
+#   同时 namespace_id **必须与顶层不同**（账号级命名空间，跨 Worker 共享计数）——段位 2xxx。
+[[env.staging.ratelimits]]
+name = "AUTH_CREDENTIAL_LIMIT"
+namespace_id = "2001"
+simple = { limit = 10, period = 60 }
+
+[[env.staging.ratelimits]]
+name = "AUTH_EMAIL_LIMIT"
+namespace_id = "2002"
+simple = { limit = 5, period = 60 }
 
 [[env.staging.queues.producers]]
 binding = "USAGE_QUEUE"
