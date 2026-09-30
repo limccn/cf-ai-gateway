@@ -66,6 +66,10 @@ export function ProviderBasicsFields({
           >
             <option value="openai">openai</option>
             <option value="anthropic">anthropic</option>
+            {/* 09-28 批次 5：custom = 「OpenAI/Anthropic 兼容的其余上游」，选中即要求
+                显式协议面声明（下方 protocols 字段）；运行时行为由解析真源决定，
+                type 本身只是方言/面表语义的入口。 */}
+            <option value="custom">custom</option>
           </Select>
         </div>
       </div>
@@ -81,7 +85,60 @@ export function ProviderBasicsFields({
           aria-invalid={errors.baseUrl !== undefined}
         />
         {errors.baseUrl ? <p className="text-xs text-destructive">{errors.baseUrl}</p> : null}
+        {/* 09-17 OpenRouter 事故（baseurl-shape-finding.md §2.2）：openai 面按字面拼接、
+            不自动补 /v1 —— 提示常驻（custom 面对此最敏感，但 legacy 面同样适用）。 */}
+        <p className="text-xs text-muted-foreground">
+          Complete path including the version segment (e.g. /v1, /api/v1) — it is never
+          auto-completed.
+        </p>
       </div>
+
+      {value.type === "custom" ? (
+        <div className="space-y-2">
+          <Label htmlFor="provider-protocols">Protocol faces (JSON, required for custom)</Label>
+          <Textarea
+            id="provider-protocols"
+            rows={6}
+            className="font-mono text-xs"
+            placeholder={JSON.stringify(
+              {
+                chat: { policy: "verbatim" },
+                messages: { baseUrl: "https://api.deepseek.com/anthropic", policy: "verbatim" },
+                responses: { policy: "convert" },
+              },
+              null,
+              2,
+            )}
+            value={value.protocolsText}
+            onChange={(e) => onChange({ protocolsText: e.target.value })}
+            aria-invalid={errors.protocols !== undefined}
+          />
+          <p className="text-xs text-muted-foreground">
+            Declares which protocol faces this upstream natively serves (chat / completions /
+            embeddings / messages / responses). A face baseUrl takes effect only for{" "}
+            <code>verbatim</code> faces; <code>convert</code> faces always hit this record&apos;s
+            base URL. Declared faces replace the implicit face table of the openai/anthropic types
+            entirely.
+          </p>
+          {errors.protocols ? (
+            <p className="text-xs text-destructive">{errors.protocols}</p>
+          ) : null}
+        </div>
+      ) : (
+        // 09-28 批次 5 复核补（legacy 残留语义的如实呈现）：切回 openai/anthropic 时本表单
+        // 不提交声明（buildProtocolsPayload 按 type 载荷），但库里已存的 protocols **不会被
+        // 清掉**——解析真源对非 NULL protocols 一律按声明面表解析（完全取代隐式面表，与
+        // type 无关）。没有这条提示，protocols 字段随 type 切换消失，用户会误以为已回退。
+        // 编辑态才显示（新建态不存在「已存的声明」）；清空回退走 API（PATCH protocols: null），
+        // 前端表单 schema 刻意不带该键（update.ts 省略 = 不改动）。
+        editing && value.protocolsText.trim() !== "" ? (
+          <p className="text-xs text-muted-foreground">
+            A stored protocol-face declaration remains in effect on this record even while the type
+            is openai/anthropic — switching the type does not clear it. It stays authoritative until
+            removed via the API (PATCH with <code>protocols: null</code>).
+          </p>
+        ) : null
+      )}
 
       <ApiKeyField value={value} onChange={onChange} errors={errors} mode={apiKeyMode} />
 
@@ -214,6 +271,12 @@ export function ProviderAdvancedFields({ value, onChange, errors }: ProviderAdva
           Overrides User-Agent, adds/overrides headers and body fields on upstream requests. Stored
           header values are shown masked — leave the field empty to keep them, or retype a full
           value to replace it.
+        </p>
+        {/* 09-28 批次 5：多协议记录的覆盖面语义（implement.md 批次 5 #3）——httpOptions 是
+            provider 级配置，不按协议面拆分：body/headers 覆盖对这条记录的**所有**协议面生效。 */}
+        <p className="text-xs text-muted-foreground">
+          These overrides apply to every protocol face of this record — body/header rewrites are
+          provider-level, not per-face.
         </p>
         {httpOptionsError ? <p className="text-xs text-destructive">{httpOptionsError}</p> : null}
       </div>

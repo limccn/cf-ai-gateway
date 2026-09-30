@@ -76,6 +76,35 @@ export async function extractUpstreamError(resp: Response): Promise<string> {
   }
 }
 
+/**
+ * 从**已读取**的错误体原文提取可读消息（09-28 批次 4 verbatim 错误路径专用：错误体被
+ * 原文消费后不能再走 extractUpstreamError(resp)。提取规则与 extractUpstreamError 完全一致
+ * —— OpenAI 风格 `{error:{message}}` 优先，非 JSON 退回状态行，日志字段两条路同形）。
+ */
+export function extractErrorMessageFromRawBody(
+  raw: string,
+  status: number,
+  statusText: string,
+): string {
+  const fallback = `Upstream provider returned ${status} ${statusText}`.trim();
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      const obj = parsed as Record<string, unknown>;
+      const err = obj["error"];
+      if (err && typeof err === "object") {
+        const message = (err as Record<string, unknown>)["message"];
+        if (typeof message === "string" && message.length > 0) {
+          return message;
+        }
+      }
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 /** 上游调用错误 → OpenAI 风格日志字段（避免记录密钥等敏感字段）。 */
 export function logUpstreamError(
   logger: Logger,

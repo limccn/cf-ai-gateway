@@ -1,21 +1,24 @@
 // Test connection 弹窗相位状态机 + 文案单元测试（09-14 批次 O，2026-09-21；PRD D14–D16）。
 //
 // 为什么文案要单独测：批次 N 的独立复核揪出过一句「Nothing is billed」—— 那是**兑现不了的承诺**
-// （第二步是三条真实上游调用，且 provider 的 `httpOptions.body` 会覆盖 max_tokens=16 这个默认值，
-// 配了 {"max_tokens": 8192} 就是三条真实大生成）。当时的结论是「文案错了」，改完就完了；
+// （第二步是逐面真实上游调用，且 provider 的 `httpOptions.body` 会覆盖 max_tokens=16 这个默认值，
+// 配了 {"max_tokens": 8192} 就是逐行真实大生成）。当时的结论是「文案错了」，改完就完了；
 // 本批次把同一类错误变成**可执行断言**：文案与相位的绑定关系一旦漂移，这里立刻红。
 //
 // 三类断言，各有各的失败模式：
 //   1. **不许出现的**（全相位）：任何「不产生费用」的说法。语义上无解 —— 网关确实不记账，
 //      但用户读到的是「这次测试不花钱」，而账单在 provider 那边。
 //   2. **必须出现的**：`probing`/`ready` 必须披露上游计费风险；`skipped` 必须说清
-//      「跳过了三条协议」「没往上游发任何模型调用」「这不是对密钥的判决」。第③条是为
+//      「跳过了逐面探测」「没往上游发任何模型调用」「这不是对密钥的判决」。第③条是为
 //      D14 的已知假阴性兜底：挂在反向代理 / mTLS 后面的主机可能**在连接层**拒掉无凭据请求，
 //      那时 ping 报不可达而主机其实是通的 —— 不说这句，用户会拿它当「key 失效」的证据。
 //   3. **两个谓词不许混**：`reachable`（收到任何 HTTP 回应，含 401/403/404）≠ `ok`（2xx）。
 //      混在一句汇总里必然说谎，混在状态串里会把「上游拒绝了这次调用」读成「网络不通」。
 import { describe, expect, it } from "vitest";
 import {
+  DECLARE_AFTER_NOTICE,
+  DECLARE_FAILED_HINT,
+  DECLARE_IMPLICIT_NOTICE,
   dialogDescription,
   INITIAL_PHASE,
   pingStatusLabel,
@@ -45,8 +48,9 @@ function ping(over: Partial<ProviderPingResult> = {}): ProviderPingResult {
 
 function probe(over: Partial<ProviderProbeResult> = {}): ProviderProbeResult {
   return {
-    protocol: "openai-chat",
-    label: "OpenAI Chat Completions",
+    face: "chat",
+    dialect: "openai",
+    label: "Chat Completions (OpenAI)",
     url: "https://upstream.example:8443/v1/chat/completions",
     ok: true,
     status: 200,
@@ -85,9 +89,9 @@ describe("dialogDescription —— 「不产生费用」是任何相位都不许
   });
 
   // 判别性用例，且**只**断言真正成立的那条性质：`probing`/`ready`/`failed@test` 三句
-  // 刻意共用同一段文案（三者都处在「三条真实调用已经发出去了」的语义里，措辞该一样），
+  // 刻意共用同一段文案（三者都处在「逐面真实调用已经发出去了」的语义里，措辞该一样），
   // 所以「五句两两不同」是过强的断言、不对应任何用户可见要求。真正不允许相同的是
-  // **「一条调用都没发生」与「刚发了三条调用」这两个语义相反的位置** ——
+  // **「一条调用都没发生」与「刚发了逐面调用」这两个语义相反的位置** ——
   // 批次 N 的缺陷正是这里：一句静态文案同时套在所有相位上。
   it("「没发生上游调用」的相位与「已发生」的相位，描述必须不同", () => {
     const didCall = descOf("ready");
@@ -99,7 +103,7 @@ describe("dialogDescription —— 「不产生费用」是任何相位都不许
 
 describe("dialogDescription —— 计费披露只在真的发了上游调用时出现", () => {
   // 正反两侧都断言：只断言「pinging 不说 bill」会在「所有相位都不说 bill」时静默变绿。
-  it("probing / ready 披露上游可能计费（那时三条真实调用已发出）", () => {
+  it("probing / ready 披露上游可能计费（那时逐面真实调用已发出）", () => {
     expect(descOf("probing")).toMatch(/may bill/i);
     expect(descOf("ready")).toMatch(/may bill/i);
   });
@@ -108,7 +112,7 @@ describe("dialogDescription —— 计费披露只在真的发了上游调用时
     expect(descOf("pinging")).not.toMatch(/bill/i);
   });
 
-  it("skipped 不提计费（三条协议根本没跑，说「可能计费」是凭空吓人）", () => {
+  it("skipped 不提计费（逐面探测根本没跑，说「可能计费」是凭空吓人）", () => {
     expect(descOf("skipped")).not.toMatch(/bill/i);
   });
 
@@ -132,8 +136,10 @@ describe("dialogDescription —— 计费披露只在真的发了上游调用时
 });
 
 describe("SKIP_NOTICE —— 未联通时用户必须知道的三件事", () => {
-  it("① 三条协议探测被跳过了", () => {
+  it("① 逐面探测被跳过了（文案不写死行数——行数是记录的函数）", () => {
     expect(SKIP_NOTICE).toMatch(/skipped/i);
+    // 行数会随记录变（legacy 2/3 行、custom 按声明面）——不许再写死「three」
+    expect(SKIP_NOTICE).not.toMatch(/three/i);
   });
 
   it("② 上游没有收到任何模型调用", () => {
@@ -212,5 +218,35 @@ describe("INITIAL_PHASE —— 首帧必须有内容", () => {
 
   it("pinging 的描述能独立成立（首帧就会显示它）", () => {
     expect(dialogDescription(INITIAL_PHASE)).toMatch(/reachab/i);
+  });
+});
+
+describe("DECLARE_* —— 「声明此端点」的解析语义必须转述给用户（批次 6 G2）", () => {
+  // 红线 4：声明面完全取代隐式面表（design §2.2 规则 1）。不说这句，管理员在 legacy 记录上
+  // 点一下声明就会踩到静默的服务面收窄（completions/embeddings 无跨面转换 ⇒ 直接 400）。
+  it("legacy 警示说清「取代隐式面表」与无跨面转换的后果", () => {
+    expect(DECLARE_IMPLICIT_NOTICE).toMatch(/implicit face table/i);
+    expect(DECLARE_IMPLICIT_NOTICE).toMatch(/replaces/i);
+    expect(DECLARE_IMPLICIT_NOTICE).toMatch(/no cross-face fallback/i);
+  });
+
+  it("声明成功反馈：取代语义 + 边界 J/K 的 responses 例句必须如实分叉（verbatim 打原生 /responses，convert 走 chat 出站）", () => {
+    expect(DECLARE_AFTER_NOTICE).toMatch(/replaces the implicit face table/i);
+    expect(DECLARE_AFTER_NOTICE).toMatch(/native \/responses endpoint/i);
+    expect(DECLARE_AFTER_NOTICE).toMatch(/under convert/i);
+    // 旧的失实断言（无条件「声明 responses 改变 /v1/responses 的上游 URL」——对 convert 为假，
+    // 批次 6 复核发现 ①）不得回来
+    expect(DECLARE_AFTER_NOTICE).not.toMatch(/changes which upstream url/i);
+  });
+
+  it("红行提示是「不建议」不是「禁止」（不硬拦——401 可能只是鉴权风格不对，端点本身存在）", () => {
+    expect(DECLARE_FAILED_HINT).toMatch(/not recommended/i);
+    expect(DECLARE_FAILED_HINT).not.toMatch(/disabled|blocked|cannot be declared/i);
+  });
+
+  it("任何声明文案都不许说「自动写回」「探测失败会自动声明」（人工动作是本动作的存在前提）", () => {
+    for (const text of [DECLARE_IMPLICIT_NOTICE, DECLARE_AFTER_NOTICE, DECLARE_FAILED_HINT]) {
+      expect(text).not.toMatch(/automatically|auto-write|writes back/i);
+    }
   });
 });

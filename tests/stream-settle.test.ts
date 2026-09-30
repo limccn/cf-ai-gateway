@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createAnthropicUsageDetector,
   createOpenAiUsageDetector,
+  createResponsesUsageDetector,
   wrapStreamWithSettlement,
 } from "../src/lib/stream-settle";
 import { parseFrameBlock, splitNextFrame } from "../src/providers/sse-pipe";
@@ -303,6 +304,102 @@ describe("createAnthropicUsageDetector", () => {
       completionTokens: 0,
       cachedTokens: 150,
     });
+  });
+});
+
+// Responses 原生形态检测（09-28 批次 9 缺陷修复）：/v1/responses verbatim 直通的上游是
+// Responses SSE —— usage 只在终局事件 response.completed / response.incomplete 的
+// data.response.usage（嵌套一层，与 chat 尾包的顶层 usage 不同构）；chat 尾包提取器
+// 读不到 ⇒ 结算 null ⇒ 全部免计（缺陷：stg 11 条 responses verbatim 全部 0/0）。
+describe("createResponsesUsageDetector", () => {
+  it("response.completed：嵌套 response.usage → TokenUsage（含 input_tokens_details.cached_tokens）", () => {
+    const detector = createResponsesUsageDetector();
+    expect(
+      detector.feed({
+        event: "response.completed",
+        data: {
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 100,
+              output_tokens: 50,
+              total_tokens: 150,
+              input_tokens_details: { cached_tokens: 25 },
+              output_tokens_details: { reasoning_tokens: 0 },
+            },
+          },
+        },
+      }),
+    ).toEqual({ promptTokens: 100, completionTokens: 50, cachedTokens: 25 });
+  });
+  it("response.incomplete：同构嵌套 usage 同样检测（max_output_tokens 截断流也有 usage）", () => {
+    const detector = createResponsesUsageDetector();
+    expect(
+      detector.feed({
+        event: "response.incomplete",
+        data: {
+          type: "response.incomplete",
+          response: {
+            usage: { input_tokens: 30, output_tokens: 12 },
+          },
+        },
+      }),
+    ).toEqual({ promptTokens: 30, completionTokens: 12 });
+  });
+  it("response.created（response.usage=null）→ null：终局事件前无用量；无 snapshot（无已观测部分）", () => {
+    const detector = createResponsesUsageDetector();
+    expect(
+      detector.feed({
+        event: "response.created",
+        data: {
+          type: "response.created",
+          response: { usage: null },
+        },
+      }),
+    ).toBeNull();
+    // U2：Responses 事件在终局前 usage 恒为 null，取消路径无已观测部分可快照 ——
+    // 与 openai 检测器一致缺省（无 snapshot 方法）
+    expect(detector.snapshot).toBeUndefined();
+  });
+  it("chat 尾包事件（顶层 usage.prompt_tokens）→ null：不跨形态误读（负向判别）", () => {
+    const detector = createResponsesUsageDetector();
+    expect(
+      detector.feed({
+        event: "message",
+        data: {
+          id: "chatcmpl-x",
+          object: "chat.completion.chunk",
+          choices: [],
+          usage: { prompt_tokens: 100, completion_tokens: 50 },
+        },
+      }),
+    ).toBeNull();
+  });
+  it("终局事件但 usage 字段非数字 / 缺失 → null（不抛）", () => {
+    const detector = createResponsesUsageDetector();
+    expect(
+      detector.feed({
+        event: "response.completed",
+        data: {
+          type: "response.completed",
+          response: { usage: { input_tokens: 100 } },
+        },
+      }),
+    ).toBeNull();
+    expect(
+      detector.feed({
+        event: "response.completed",
+        data: {
+          type: "response.completed",
+          response: { usage: { input_tokens: "x", output_tokens: 1 } },
+        },
+      }),
+    ).toBeNull();
+  });
+  it("非对象 data（null / 原字符串）→ null", () => {
+    const detector = createResponsesUsageDetector();
+    expect(detector.feed({ event: "response.completed", data: null })).toBeNull();
+    expect(detector.feed({ event: "response.completed", data: "{raw" })).toBeNull();
   });
 });
 

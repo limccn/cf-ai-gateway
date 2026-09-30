@@ -39,6 +39,10 @@ export function createProviderRoute(app: Hono<AppEnv>): void {
         thinkingMode: body.thinkingMode ?? null,
         reasoningRoundtrip: body.reasoningRoundtrip ?? false,
         upstreamTimeoutMs: body.upstreamTimeoutMs ?? null,
+        // 09-28 custom（批次 1）：preset/protocols 直落库；protocols 存 JSON 文本（与 models 同惯例）
+        preset: body.preset ?? null,
+        protocols:
+          body.protocols !== undefined ? JSON.stringify(body.protocols) : null,
       })
       .returning();
     if (!provider) {

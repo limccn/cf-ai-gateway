@@ -7,6 +7,9 @@
 //   ② 故意多喂：表单 state 里明明有 weight=999，basics 的载荷里也不能出现 weight。
 //      （若哪天有人把 parseBasicsUpdate 改成 `{...form}` 再删几个键，这条会红。）
 //   ③ providerToForm 的 apiKey 恒为空 —— N2「密钥不预填」在数据层的保证。
+//
+// 09-28 批次 5 追加（只增不改——既有断言未动）：type 三值 custom + protocols 声明载荷、
+// 「从模板填充」预填（可改、不强约束）。
 import { describe, expect, it } from "vitest";
 import {
   emptyProviderForm,
@@ -17,10 +20,13 @@ import {
   parseBasicsUpdate,
   parseCreateForm,
   parseHttpOptionsText,
+  parseProtocolsText,
+  presetToFormFill,
   providerToForm,
 } from "../app/modules/providers/form";
 import type { ProviderFormState } from "../app/modules/providers/form";
 import type { ProviderResponse } from "../app/modules/providers/types";
+import { PROVIDER_PRESETS } from "../src/providers/presets";
 
 const PROVIDER: ProviderResponse = {
   id: 7,
@@ -357,5 +363,137 @@ describe("parseHttpOptionsText / httpOptionsToText", () => {
     expect(httpOptionsToText({ userAgent: "A/1.0", headers: {}, body: {} })).toBe(
       JSON.stringify({ userAgent: "A/1.0" }, null, 2),
     );
+  });
+});
+
+// ============ 09-28 批次 5（只增不改）：type 三值 + protocols 声明 + preset 模板预填 ============
+
+/** deepseek 档案（真实常量表取夹具，不造平行值——档案改了测试跟着红，正是想要的）。 */
+function deepseekPreset() {
+  const preset = PROVIDER_PRESETS.find((p) => p.id === "deepseek");
+  if (preset === undefined) {
+    throw new Error("deepseek preset missing from PROVIDER_PRESETS");
+  }
+  return preset;
+}
+
+const PROTOCOLS_TEXT = JSON.stringify({
+  chat: { policy: "verbatim" },
+  messages: { baseUrl: "https://api.deepseek.com/anthropic", policy: "verbatim" },
+});
+
+describe("type=custom 与协议面声明（09-28 批次 5）", () => {
+  it("type=custom + protocols 文本 ⇒ create 载荷带 protocols；basics 同样携带（键集更新）", () => {
+    const form = fullForm({ type: "custom", protocolsText: PROTOCOLS_TEXT, apiKey: "sk-typed-by-user" });
+    const created = parseCreateForm(form);
+    expect(created.ok).toBe(true);
+    if (created.ok) {
+      expect(created.data.type).toBe("custom");
+      expect(created.data.protocols).toEqual({
+        chat: { policy: "verbatim" },
+        messages: { baseUrl: "https://api.deepseek.com/anthropic", policy: "verbatim" },
+      });
+    }
+    const updated = parseBasicsUpdate(fullForm({ type: "custom", protocolsText: PROTOCOLS_TEXT }));
+    expect(updated.ok).toBe(true);
+    if (updated.ok) {
+      expect(Object.keys(updated.data).sort()).toEqual([
+        "baseUrl",
+        "models",
+        "name",
+        "protocols",
+        "type",
+      ]);
+    }
+  });
+
+  it("type=custom 而 protocols 留空 ⇒ 错误落在 protocols 位（T1 的前端镜像，创建与编辑都拦）", () => {
+    for (const parse of [parseCreateForm, parseBasicsUpdate]) {
+      const parsed = parse(fullForm({ type: "custom", protocolsText: "" }));
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) {
+        expect(parsed.errors.protocols).toBeTruthy();
+      }
+    }
+  });
+
+  it("type=openai 时 protocolsText 残留也不进载荷（声明面只在 custom 下携带）", () => {
+    // 判别力前提：残留文本确实合法可解析（否则省略可能是「解析失败」的平凡结果）
+    const parsedText = parseProtocolsText(PROTOCOLS_TEXT);
+    expect(parsedText.ok).toBe(true);
+    const parsed = parseBasicsUpdate(fullForm({ protocolsText: PROTOCOLS_TEXT }));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.data).not.toHaveProperty("protocols");
+    }
+  });
+
+  it("面契约错误（未知面键 / 非 JSON / 非 object）⇒ 错误落在 protocols 位", () => {
+    for (const bad of ['{"mystery-face":{"policy":"verbatim"}}', "{oops", '"a string"', "null"]) {
+      const parsed = parseBasicsUpdate(fullForm({ type: "custom", protocolsText: bad }));
+      expect(parsed.ok, `protocolsText=${bad}`).toBe(false);
+      if (!parsed.ok) {
+        expect(parsed.errors.protocols, `protocolsText=${bad}`).toBeTruthy();
+      }
+    }
+  });
+});
+
+describe("从模板填充（presetToFormFill，design §2.4：选中即预填、可改、不强约束）", () => {
+  it("预填：type/baseUrl/protocolsText/timeout/preset 标签逐一落位，authStyle 被剥除", () => {
+    const patch = presetToFormFill(deepseekPreset());
+    expect(patch.type).toBe("custom");
+    expect(patch.baseUrl).toBe("https://api.deepseek.com/v1");
+    expect(patch.upstreamTimeoutMs).toBe("60000");
+    expect(patch.preset).toBe("deepseek");
+    // authStyle 是 advisory 元数据；strict 面契约会拒收多余键 ⇒ 序列化必须剥除，
+    // 否则「选中模板 → 保存」会 400。
+    expect(patch.protocolsText).not.toContain("authStyle");
+    const faces = JSON.parse(patch.protocolsText ?? "") as Record<string, unknown>;
+    expect(faces.messages).toEqual({
+      baseUrl: "https://api.deepseek.com/anthropic",
+      policy: "verbatim",
+    });
+  });
+
+  it("预填可改：改 baseUrl 后 create 载荷带用户的值，preset 标签仍随创建提交", () => {
+    const form = fullForm({
+      ...presetToFormFill(deepseekPreset()),
+      apiKey: "sk-typed-by-user",
+      name: "deepseek-main",
+      modelsText: "ds=deepseek-chat",
+      baseUrl: "https://api.deepseek.example/v1", // 用户手改
+    });
+    const created = parseCreateForm(form);
+    expect(created.ok).toBe(true);
+    if (created.ok) {
+      expect(created.data.baseUrl).toBe("https://api.deepseek.example/v1");
+      expect(created.data.type).toBe("custom");
+      expect(created.data.preset).toBe("deepseek");
+    }
+  });
+
+  it("未选模板（preset 空）⇒ create 载荷不带 preset 键", () => {
+    const created = parseCreateForm(fullForm({ apiKey: "sk-typed-by-user" }));
+    expect(created.ok).toBe(true);
+    if (created.ok) {
+      expect(created.data).not.toHaveProperty("preset");
+    }
+  });
+
+  it("取消选择（preset 清空）不回滚其他字段；清空后载荷不再携带 preset", () => {
+    const patch = presetToFormFill(deepseekPreset());
+    const cleared: ProviderFormState = { ...emptyProviderForm(), ...providerToForm(PROVIDER), ...patch };
+    cleared.preset = "";
+    expect(cleared.baseUrl).toBe("https://api.deepseek.com/v1"); // 预填的其他字段原样保留
+    const created = parseCreateForm({
+      ...cleared,
+      apiKey: "sk-typed-by-user",
+      modelsText: "ds=deepseek-chat",
+    });
+    expect(created.ok).toBe(true);
+    if (created.ok) {
+      expect(created.data).not.toHaveProperty("preset");
+    }
   });
 });

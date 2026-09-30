@@ -38,14 +38,16 @@ export const anthropicProxyOptions: ProxyEndpointOptions = {
   toInternal: toInternalSafe,
   transformResponse: transformResponseToAnthropic,
   // R2.4 帧级转换：OpenAI 上游时在结算管线上消费同一批帧（消除往返编解码）；
-  // anthropic 上游时协议短路（passthroughAnthropicStream），不经过本转换。
+  // anthropic 上游时协议短路（messages 面的流式直通门，批次 2 起由
+  // activeEndpoint.streamPassthrough × 入站方言合取判定），不经过本转换。
   streamConsumer: createStreamToAnthropicTransform,
-  passthroughAnthropicStream: true,
   // R1：顶层 thinking/output_config 直通 anthropic 上游（Claude Code effort 恢复）；
   // OpenAI 上游路径由适配器层天然忽略（extras 不进内部 body，零泄漏）。
   passthroughAnthropicExtras: true,
   cachePrefix: "anthropic:",
-  // 协议偏好：Anthropic 入站优先 type=anthropic 的 provider（上游原生 Anthropic 端点，
-  // 如 DeepSeek /anthropic），仅配 openai provider 时回退转换转发（零回归）。
-  providerType: "anthropic",
+  // 入站面（批次 2，design §4.1 面映射）：Anthropic Messages 入站 = "messages" 面 ——
+  // 偏好趟按「面表原生承载 messages 面」匹配，遗留 anthropic 记录经其 messages 面
+  // 命中（与旧 providerType:"anthropic" 偏好逐条等价），仅配 openai provider 时回退
+  // 转换转发（零回归）；流式直通门据此判定端点方言 === anthropic（messages 原生方言）。
+  inboundFace: "messages",
 };

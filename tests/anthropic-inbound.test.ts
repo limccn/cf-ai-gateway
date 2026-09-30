@@ -30,6 +30,7 @@ import {
   settleDelayedBilling,
   setupKey,
   setupPrice,
+  setupProvider,
   setupProviderWithModel,
   setupUser,
 } from "./helpers";
@@ -1483,3 +1484,95 @@ function anthropicBodyWithStream(): string {
     stream: true,
   });
 }
+
+// ============= 批次 2（09-28-upstream-custom-type-passthrough）：声明面路由回归 =============
+//
+// 锁两件零回归红线之外的新面行为：
+//   1. §4.2 回退趟转换兜底——custom 行只声明 chat 面（openai 方言）时，messages 入站在偏好趟
+//      不命中，必须由回退趟收进来并走 openai 适配器转换转发（候选池为空 404 = 回退趟被错误面过滤）；
+//   2. 直通门合取的**方言支**（design §4.1）——chat 面 verbatim ⇒ streamPassthrough=true，但端点
+//      方言（openai）≠ 入站面方言（messages → anthropic），门必须不命中：否则帧级转换被跳过，
+//      anthropic 客户端收到原始 openai 分帧（判别点 = 出站字节形态）。
+// 用独立模型名（本文件其他用例未用）：mock-provider 也服务 MODEL，会混入候选池污染判别。
+describe("端到端：custom 声明面（回退趟转换兜底 + 直通门方言合取）", () => {
+  /** 仅声明 chat 面（policy 缺省 = verbatim ⇒ streamPassthrough=true）的 custom provider。 */
+  async function setupCustomChatProvider(model: string): Promise<number> {
+    return setupProvider("mock-custom-chat-provider", model, {
+      type: "custom",
+      baseUrl: "http://custom-chat-upstream.test/v1",
+      protocols: JSON.stringify({ chat: {} }),
+    });
+  }
+
+  const FALLBACK_MODEL = "custom-chat-fallback-model";
+  const GATE_MODEL = "custom-chat-gate-model";
+  const EXPECTED_CUSTOM_URL = "http://custom-chat-upstream.test/v1/chat/completions";
+
+  it("非流式：chat 面 custom 行服务 /anthropic/v1/messages（偏好趟不中 → 回退趟 openai 转换转发 + 计费）", async () => {
+    const userId = await setupUser("custom-chat-fallback@test.dev", 10);
+    const { keyId, plaintext } = await setupKey(userId);
+    const providerId = await setupCustomChatProvider(FALLBACK_MODEL);
+    await setupPrice(FALLBACK_MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+
+    let capturedUrl = "";
+    stubUpstreamFetch((url) => {
+      capturedUrl = url;
+      return new Response(JSON.stringify({ ...CHAT_RESPONSE, model: FALLBACK_MODEL }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const res = await postAnthropic(
+      "/anthropic/v1/messages",
+      plaintext,
+      JSON.stringify({ model: FALLBACK_MODEL, max_tokens: 100, messages: [{ role: "user", content: "hello" }] }),
+    );
+    expect(res.status).toBe(200);
+    // 上游按 openai 方言 chat 面形态打（主端点 base_url + chat 路径）
+    expect(capturedUrl).toBe(EXPECTED_CUSTOM_URL);
+    const json = (await res.json()) as { type: string; usage: { input_tokens: number } };
+    expect(json["type"]).toBe("message"); // 转换转发：出站恒 anthropic 形态
+    expect(json["usage"]).toEqual({ input_tokens: 100, output_tokens: 50 });
+
+    // 承重点 5：openai 方言端点 → openai 适配器 parseUsage（延迟计费消费者落账）
+    await settleDelayedBilling([
+      { userId, keyId, providerId, model: FALLBACK_MODEL, promptTokens: 100, completionTokens: 50 },
+    ]);
+    expect(await getBalance(userId)).toBeCloseTo(10 - EXPECTED_COST, 10);
+    expect(await countTxByType(userId, "usage")).toBe(1);
+    expect(await latestLogStatus(userId)).toBe("success");
+  });
+
+  it("流式：chat 面（openai 方言）在 messages 入站不得字节直通（门缺方言支会吐原始 openai 分帧）", async () => {
+    const userId = await setupUser("custom-chat-gate@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    await setupCustomChatProvider(GATE_MODEL);
+    await setupPrice(GATE_MODEL, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+
+    const upstreamSse = [
+      'data: {"id":"chatcmpl-custom","object":"chat.completion.chunk","created":1700000000,"model":"' + GATE_MODEL + '","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}',
+      'data: {"id":"chatcmpl-custom","object":"chat.completion.chunk","created":1700000000,"model":"' + GATE_MODEL + '","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}',
+      'data: {"id":"chatcmpl-custom","object":"chat.completion.chunk","created":1700000000,"model":"' + GATE_MODEL + '","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      'data: {"id":"chatcmpl-custom","object":"chat.completion.chunk","created":1700000000,"model":"' + GATE_MODEL + '","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}',
+      "data: [DONE]",
+    ].join("\n\n") + "\n\n";
+    stubUpstreamFetch(
+      () => new Response(upstreamSse, { headers: { "Content-Type": "text/event-stream" } }),
+    );
+
+    const res = await postAnthropic(
+      "/anthropic/v1/messages",
+      plaintext,
+      JSON.stringify({ model: GATE_MODEL, max_tokens: 100, messages: [{ role: "user", content: "hello" }], stream: true }),
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // 直通门方言支的判别点：出站必须经过帧级转换（anthropic 事件形态），而非原样透传
+    expect(text).toContain("event: message_start");
+    expect(text).toContain('"type":"text_delta"');
+    expect(text).toContain("event: message_stop");
+    expect(text).not.toContain("[DONE]");
+    expect(text).not.toContain('"object":"chat.completion.chunk"');
+  });
+});

@@ -16,8 +16,9 @@ import {
 } from "../../providers/responses";
 import { responsesInputSchema } from "./responses-types";
 
-/** toInternal 的 AdapterError → HTTPException(400)（proxy 管道只在 adapter.buildRequest 处捕获
- * AdapterError；toInternal 在管道外执行，onError 兜底会映射为 500，必须在此提前归一）。 */
+/** toInternal 的 AdapterError → HTTPException(400)（proxy 管道在候选循环的构造 try/catch 处
+ * 捕获 AdapterError 归一 400——adapter.buildRequest 与 verbatimRequest 同一 catch；
+ * toInternal 在该管道外执行，onError 兜底会映射为 500，必须在此提前归一）。 */
 function toInternalSafe(body: Record<string, unknown>): Record<string, unknown> {
   try {
     return buildInternalFromResponses(body);
@@ -56,6 +57,9 @@ export const responsesProxyOptions: ProxyEndpointOptions = {
     createStreamToResponsesTransform(parseIncludeReasoning(body ?? {}, moduleLogger)),
   transformStream: transformStreamToResponses,
   cachePrefix: "responses:",
-  // 协议偏好：OpenAI 面请求优先 type=openai 的 provider；仅配 anthropic provider 时回退转换转发。
-  providerType: "openai",
+  // 入站面（批次 2，design §4.1 面映射）：/v1/responses = "responses" 面 —— 偏好趟按
+  // 「面表原生承载 responses 面」匹配（遗留 openai 记录经其 openai 方言 chat 面命中，
+  // supportsProtocol 的 responses 等价支与旧 providerType:"openai" 偏好逐条等价）；
+  // 仅配 anthropic provider 时回退转换转发（responses 角例字节链不变）。
+  inboundFace: "responses",
 };

@@ -613,3 +613,121 @@ describe("管理 API：weight 与断路状态", () => {
     expect(brokenItem?.["circuitReason"]).toBe("429");
   });
 });
+
+// ============= 批次 2（09-28-upstream-custom-type-passthrough）：声明面路由语义 =============
+//
+// 候选池隔离：沿用文件头约定，每个用例独立模型名（uniqueModel()）。
+describe("批次 2：声明面路由（fail-soft + 多候选跳过 + 遗留 400 语义）", () => {
+  it("fail-soft：一条 protocols 损坏的记录不拖垮候选池——不进池、其余候选照常服务", async () => {
+    const model = uniqueModel();
+    const userId = await setupUser("mu-corrupt-pool@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    // 损坏记录 id 更低（先插入）：若解析失败污染候选池/中断收集，本用例必红
+    await setupProvider("mu-corrupt-protocols", model, {
+      baseUrl: "http://corrupt.test/v1",
+      protocols: "{not-json",
+    });
+    await setupProvider("mu-corrupt-good", model, { baseUrl: BASE_A });
+    await setupPrice(model, INPUT_PRICE, INPUT_PRICE, INPUT_PRICE / 4, OUTPUT_PRICE, OUTPUT_PRICE);
+
+    const called = stubUpstreamFetch(() => {
+      return new Response(JSON.stringify(okResponse(model)), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const res = await postChat(plaintext, model);
+    expect(res.status).toBe(200);
+    // 损坏记录未进候选池：唯一一次上游调用来自健康记录
+    expect(called).toHaveLength(1);
+    expect(called[0]).toContain("a.test");
+  });
+
+  it("fail-soft：仅一条 protocols 损坏记录 ⇒ 候选池空 → 404 model_not_routed（不 500）", async () => {
+    const model = uniqueModel();
+    const userId = await setupUser("mu-corrupt-only@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    await setupProvider("mu-corrupt-alone", model, {
+      baseUrl: "http://corrupt.test/v1",
+      protocols: "{not-json",
+    });
+
+    stubUpstreamFetch(() => new Response("should not be called", { status: 200 }));
+    const res = await postChat(plaintext, model);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: { message?: string } };
+    expect(body["error"]?.["message"]).toContain("does not exist");
+  });
+
+  it("多候选跳过：回退趟中不承载 chat 的 custom 记录被跳过（不 400 不中断），另一候选照常服务", async () => {
+    const model = uniqueModel();
+    const userId = await setupUser("mu-skip-unsupported@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    // 两记录都无 chat 原生面 ⇒ 偏好趟空 → 回退趟全收（id 序）：completions-only 在前
+    await setupProvider("mu-skip-completions-only", model, {
+      type: "custom",
+      baseUrl: "http://skip.test/v1",
+      protocols: JSON.stringify({ completions: {} }),
+    });
+    await setupProvider("mu-skip-messages-only", model, {
+      type: "custom",
+      baseUrl: "http://serve.test/anthropic",
+      protocols: JSON.stringify({ messages: {} }),
+    });
+
+    const called = stubUpstreamFetch(() => {
+      return new Response(
+        JSON.stringify({
+          id: "msg_skip",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: "ok" }],
+          model,
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const res = await postChat(plaintext, model);
+    expect(res.status).toBe(200);
+    // completions-only 候选被 selectEndpoint 判 null → 跳过（无上游调用、不写断路器）；
+    // messages 面经跨方言兜底承载 chat 入站 → anthropic 方言 URL
+    expect(called).toHaveLength(1);
+    expect(called[0]).toBe("http://serve.test/anthropic/v1/messages");
+  });
+
+  it("遗留 400 语义逐字保留：anthropic provider 对 /v1/completions 与 /v1/embeddings 仍 400", async () => {
+    const model = uniqueModel();
+    const userId = await setupUser("mu-legacy-anthro-400@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    await setupProvider("mu-legacy-anthro", model, { type: "anthropic", baseUrl: "http://claude.test" });
+
+    stubUpstreamFetch(() => new Response("should not be called", { status: 200 }));
+
+    const completions = await selfFetch("http://localhost/v1/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${plaintext}` },
+      body: JSON.stringify({ model, prompt: "hi" }),
+    });
+    expect(completions.status).toBe(400);
+    const completionsBody = (await completions.json()) as { error?: { message?: string } };
+    expect(completionsBody["error"]?.["message"]).toBe(
+      "Provider type 'anthropic' does not support this endpoint",
+    );
+
+    const embeddings = await selfFetch("http://localhost/v1/embeddings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${plaintext}` },
+      body: JSON.stringify({ model, input: "hi" }),
+    });
+    expect(embeddings.status).toBe(400);
+    const embeddingsBody = (await embeddings.json()) as { error?: { message?: string } };
+    expect(embeddingsBody["error"]?.["message"]).toBe(
+      "Provider type 'anthropic' does not support this endpoint",
+    );
+  });
+});
