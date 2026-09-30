@@ -5,11 +5,16 @@ import type {
   CreateProviderInput,
   UpdateProviderInput,
   ThinkingMode,
-  ProbeProtocol,
+  ProbeFace,
+  ProbeDialect,
   ProviderProbeResult,
   TestProviderOutput,
+  DeclareEndpointInput,
   ProviderPingResult,
   PingProviderOutput,
+  ProviderProtocols,
+  ProviderPresetArchive,
+  ListProviderPresetsOutput,
 } from "../../../src/routes/providers/types";
 
 export type {
@@ -18,11 +23,16 @@ export type {
   CreateProviderInput,
   UpdateProviderInput,
   ThinkingMode,
-  ProbeProtocol,
+  ProbeFace,
+  ProbeDialect,
   ProviderProbeResult,
   TestProviderOutput,
+  DeclareEndpointInput,
   ProviderPingResult,
   PingProviderOutput,
+  ProviderProtocols,
+  ProviderPresetArchive,
+  ListProviderPresetsOutput,
 };
 
 export interface ListProvidersOutput {

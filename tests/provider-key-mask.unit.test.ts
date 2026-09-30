@@ -26,6 +26,10 @@ function provider(overrides: Partial<Provider> = {}): Provider {
     thinkingMode: null,
     reasoningRoundtrip: false,
     upstreamTimeoutMs: null,
+    // 09-28 批次 1 新增的可空列：夹具基座显式置 NULL（`...overrides` 的 Partial 展开会让
+    // 省略的字段变 optional，与 inferSelect 的 `string | null` 不兼容）
+    preset: null,
+    protocols: null,
     enabled: false,
     createdAt: new Date("2026-09-21T00:00:00.000Z"),
     ...overrides,
@@ -53,5 +57,37 @@ describe("toProviderResponse · apiKeyMasked", () => {
     //   改回原样后 2 passed；`git diff src/routes/providers/lib/convert.ts` 与变异前逐字相同。
     // 取值理由：`"sk"` 长度为 2，落在变异条件的否支，故该形态必被这条抓住。
     expect(toProviderResponse(provider({ apiKeyPrefix: "sk" })).apiKeyMasked).toBe("sk****");
+  });
+});
+
+describe("toProviderResponse · preset/protocols（09-28 批次 5，AC1 后半：null ⇒ 键整个省略）", () => {
+  it("两列全 NULL（存量行）⇒ 响应对象上没有这两个键 —— 旧客户端零感知", () => {
+    const res = toProviderResponse(provider());
+    // 判据必须是 Object.keys：`res.preset === undefined` 对「键存在但值为 undefined」
+    // 与「键整个不存在」两种世界都绿，是一条恒真断言。
+    expect(Object.keys(res)).not.toContain("preset");
+    expect(Object.keys(res)).not.toContain("protocols");
+  });
+
+  it("有值 ⇒ 两键在场、值保真（与上一条成对：否则「恒省略」实现也全绿）", () => {
+    const protocols = {
+      chat: { policy: "verbatim" as const },
+      messages: {
+        baseUrl: "https://api.deepseek.com/anthropic",
+        policy: "verbatim" as const,
+      },
+    };
+    const res = toProviderResponse(
+      provider({ preset: "deepseek", protocols: JSON.stringify(protocols) }),
+    );
+    expect(res.preset).toBe("deepseek");
+    expect(res.protocols).toEqual(protocols);
+  });
+
+  it("protocols JSON 损坏 / 面键非法 ⇒ 按未声明省略（防御性兜底，与 models 空映射同惯例）", () => {
+    for (const raw of ["{oops", '{"unknown-face":{"policy":"verbatim"}}']) {
+      const res = toProviderResponse(provider({ protocols: raw }));
+      expect(Object.keys(res), `protocols=${raw}`).not.toContain("protocols");
+    }
   });
 });

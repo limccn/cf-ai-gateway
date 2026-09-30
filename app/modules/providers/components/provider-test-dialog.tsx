@@ -1,31 +1,39 @@
-// Test connection 弹窗（批次 N 建，批次 O 加「先 ping 联通、再跑三条协议」）。
+// Test connection 弹窗（批次 N 建；批次 O 加「先 ping 联通、再跑探测」；批次 6 改逐面探测 + 声明动作）。
 //
 // **两步**（PRD 裁决 D16）：先打上游 origin 根的联通性（HEAD，不带任何凭据；收到**任何** HTTP
-// 回应含 401/403/404 即算联通），联通后才发第二步跑三条协议探测。未联通 ⇒ 三条协议**完全不跑**，
-// 上游一条模型调用都没有 —— 这是本功能存在的意义：把「网络/DNS/TLS 不通」与「上游拒绝了这次调用」
-// 分开，前者根本不该产生任何上游调用，也不该消耗任何 token。
+// 回应含 401/403/404 即算联通），联通后才发第二步按解析层端点**逐面**探测。未联通 ⇒ 探测
+// **完全不跑**，上游一条模型调用都没有 —— 这是本功能存在的意义：把「网络/DNS/TLS 不通」
+// 与「上游拒绝了这次调用」分开，前者根本不该产生任何上游调用，也不该消耗任何 token。
 //
-// 三条协议的口径必须说清（D11）：探的是**上游原生端点**，不是网关出站路径。网关出站只有两条
-// （openai → /chat/completions、anthropic → /v1/messages）；`/responses` 是入站协议，
-// 会被转换成 chat 形态后走 openai 那条出站，网关自己从不打上游的 /responses。
-// ⇒ responses 那一行回答的是「这个上游支不支持 Responses API」，与网关链路是否通无关。
-// 这句话不能只写在代码注释里 —— 用户看到一行红/绿就会据此判断，所以 UI 上原样说明。
+// 逐面探测的口径（批次 6）：探测行 = 解析层 resolved 端点集，每行都是**生产可达的 URL**
+// （「探测绿 = 生产同 URL」行级成立）。旧版「responses 行无生产对应物」的 D11 说明随逐面
+// 探测消失：未声明 responses 面的记录不再有该行；声明了的记录网关真的会打它（边界 J）。
+// 行数是记录的函数（legacy 2/3 行、custom 按声明面），UI 不写死「三条」。
 //
-// 本弹窗**对网关自身无副作用**：后端两条路由都不写断路器、不计网关的费、不落 request_logs，故：
-//   · 不 invalidate provider 列表（没有任何东西变了，闪一下反而像「测试把 provider 踢下线了」）；
-//   · 失败不代表 provider 被停用 —— 文案里要说明，否则用户会以为测试失败=已下线。
+// 「声明此端点」（批次 6 G2）：每行一个显式按钮，POST declare-endpoint **只写 protocols
+// 子对象**；成功后 invalidate 列表（与探测的「刻意不 invalidate」相反——这里真的改了状态）。
+// 文案有两条硬义务（provider-test-state.ts 的 DECLARE_*，单测守着）：legacy 记录要先警示
+// 「声明面完全取代隐式面表」；红行提示「不建议声明」但**不硬拦**。
 //
-// ⚠ **但不能说「不产生任何费用」**：第二步是三条**真实的上游调用**，用 provider 自己的 key，
+// 本弹窗对网关自身**除声明外无副作用**：后端探测两条路由不写断路器、不计网关的费、不落
+// request_logs，故探测失败不 invalidate 列表（闪一下反而像「测试把 provider 踢下线了」）；
+// 失败不代表 provider 被停用 —— 文案里要说明，否则用户会以为测试失败=已下线。
+//
+// ⚠ **但不能说「不产生任何费用」**：第二步是**逐面真实上游调用**，用 provider 自己的 key，
 // 多数上游按 token 计费（默认 max_tokens=16 仍是真实账单）；且 provider 的 `httpOptions.body`
 // 会覆盖这个默认值（`applyHttpBody` 是 Object.assign，配置值总是赢），配了
-// `{"max_tokens": 8192}` 就是三条真实大生成。**「Nothing is billed」是句无法兑现的承诺** ——
+// `{"max_tokens": 8192}` 就是逐行真实大生成。**「Nothing is billed」是句无法兑现的承诺** ——
 // 描述文案按相位分叉（见 provider-test-state.ts），第一条命令的 HEAD 才真的不产生费用。
 import { CircleCheck, CircleX, Loader2, Wifi, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { ErrorState } from "@/components/ui/states";
+import { useDeclareEndpoint } from "../hooks/use-declare-endpoint";
 import { useProviderTestRun } from "../hooks/use-provider-test-run";
 import {
+  DECLARE_AFTER_NOTICE,
+  DECLARE_FAILED_HINT,
+  DECLARE_IMPLICIT_NOTICE,
   dialogDescription,
   PING_ROW_LABEL,
   pingStatusLabel,
@@ -61,7 +69,10 @@ export function ProviderTestDialog({ open, onOpenChange, provider }: ProviderTes
   );
 }
 
-/** 纯展示：无自身状态、无 effect —— 相位由编排 hook 单向下发。 */
+/**
+ * 展示 + 显式声明动作。相位由编排 hook 单向下发（无 effect）；「声明此端点」是
+ * useMutation（**不自触发**——只由按钮的 onClick 驱动，StrictMode 双挂载不会多发出请求）。
+ */
 function TestRunView({
   phase,
   provider,
@@ -71,6 +82,8 @@ function TestRunView({
   provider: ProviderResponse;
   onRestart: () => void;
 }) {
+  const declare = useDeclareEndpoint();
+
   if (phase.kind === "pinging") {
     return <BusyLine text="Checking reachability… (up to 10s)" />;
   }
@@ -80,7 +93,7 @@ function TestRunView({
     return (
       <div className="space-y-3">
         <PingRow ping={phase.ping} />
-        <BusyLine text="Probing three protocols…" />
+        <BusyLine text="Probing the declared endpoints…" />
       </div>
     );
   }
@@ -112,6 +125,10 @@ function TestRunView({
   }
 
   const passed = phase.probes.filter((probe) => probe.ok).length;
+  // 已声明面（provider.protocols 缺席 = legacy 隐式面表，不是空声明表）
+  const declaredFaces = provider.protocols ?? {};
+  const declared = (face: ProviderProbeResult["face"]): boolean =>
+    declaredFaces[face] !== undefined;
   return (
     <div className="space-y-3">
       <PingRow ping={phase.ping} />
@@ -120,32 +137,35 @@ function TestRunView({
         <strong className="text-foreground">
           {passed} of {phase.probes.length}
         </strong>{" "}
-        protocols responded · model <code className="font-mono text-xs">{phase.model}</code> · timeout{" "}
+        endpoints responded · model <code className="font-mono text-xs">{phase.model}</code> · timeout{" "}
         {Math.round(phase.timeoutMs / 1000)}s
       </p>
 
+      {/* legacy 警示常驻在行列表上方：声明面完全取代隐式面表（design §2.2 规则 1），
+          不说这句，管理员点一下声明就会踩到静默的服务面收窄 */}
+      {provider.protocols === undefined ? (
+        <p className="text-xs text-muted-foreground">{DECLARE_IMPLICIT_NOTICE}</p>
+      ) : null}
+
       <div className="space-y-2">
         {phase.probes.map((probe) => (
-          <ProbeRow key={probe.protocol} probe={probe} />
+          <ProbeRow
+            key={probe.face}
+            probe={probe}
+            declared={declared(probe.face)}
+            declarePending={declare.isPending && declare.variables?.face === probe.face}
+            onDeclare={() => declare.mutate({ id: provider.id, face: probe.face })}
+          />
         ))}
       </div>
 
-      {/* D11 的口径说明：只在确有 responses 一行时渲染，且不塞进行内（那行本身已经很挤） */}
-      {phase.probes.some((p) => p.protocol === "openai-responses") ? (
-        <p className="text-xs text-muted-foreground">
-          <strong className="text-foreground">OpenAI Responses</strong> probes whether{" "}
-          <em>this upstream</em> supports the Responses API. The gateway never calls it — inbound
-          Responses requests are converted to Chat Completions before going out — so a green row
-          here does not mean the gateway path works, and a red one does not mean it is broken.
+      {declare.isError ? (
+        <p className="break-words text-xs text-destructive">
+          {declare.error instanceof Error ? declare.error.message : "Declare request failed"}
         </p>
       ) : null}
-
-      {provider.type === "anthropic" ? (
-        <p className="text-xs text-muted-foreground">
-          This provider is configured as <code className="font-mono">anthropic</code>. The two
-          OpenAI rows are expected to fail unless the upstream also exposes OpenAI-compatible
-          endpoints — only the Messages row reflects how the gateway actually calls it.
-        </p>
+      {declare.isSuccess ? (
+        <p className="text-xs text-muted-foreground">{DECLARE_AFTER_NOTICE}</p>
       ) : null}
 
       <p className="text-xs text-muted-foreground">
@@ -246,7 +266,24 @@ function PingRow({
   );
 }
 
-function ProbeRow({ probe }: { probe: ProviderProbeResult }) {
+/**
+ * 逐面探测行 + 「声明此端点」动作（批次 6 G2）。
+ * 独立动作按钮 ⇒ **原生 disabled**（该禁时不该可聚焦的灰项语义相反，见 spec 前端惯例）：
+ * 已声明（该面已在 protocols 里，按钮只发 {face} 是幂等 no-op，没有第二次可做）与
+ * 在途（该行的声明请求未落）时禁用；红行**不禁用**——「探测红不建议声明」是提示不是硬拦
+ * （401 可能只是鉴权风格不对，端点本身存在），提示文案在行内常驻。
+ */
+function ProbeRow({
+  probe,
+  declared,
+  declarePending,
+  onDeclare,
+}: {
+  probe: ProviderProbeResult;
+  declared: boolean;
+  declarePending: boolean;
+  onDeclare: () => void;
+}) {
   const statusLabel =
     probe.status !== null ? `${probe.status} ${probe.statusText}`.trim() : "no HTTP response";
   return (
@@ -303,6 +340,23 @@ function ProbeRow({ probe }: { probe: ProviderProbeResult }) {
       </div>
       {probe.error ? (
         <p className="break-words text-xs text-destructive">{probe.error}</p>
+      ) : null}
+      <div className="flex items-center justify-between gap-3 pt-1">
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={probe.url}>
+          {probe.dialect === "anthropic" ? "Anthropic Messages endpoint" : "OpenAI endpoint"} ·{" "}
+          {declared ? "declared in routing" : "not declared"}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={declared || declarePending}
+          onClick={onDeclare}
+        >
+          {declarePending ? "Declaring…" : declared ? "Declared" : "Declare this endpoint"}
+        </Button>
+      </div>
+      {!probe.ok && !declared ? (
+        <p className="text-xs text-muted-foreground">{DECLARE_FAILED_HINT}</p>
       ) : null}
     </div>
   );

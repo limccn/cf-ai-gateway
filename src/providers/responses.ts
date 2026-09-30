@@ -83,17 +83,19 @@ function toChatRole(role: unknown): string {
   return role === "developer" ? "system" : String(role);
 }
 
-// ============ 入站转换（Responses 请求 → 内部 OpenAI Chat 形态） ============
-
 /**
- * 入站 Responses 请求 → 内部 OpenAI Chat Completions body（OR §2.1 / design §3.2）。
- * 字段级转换失败抛 AdapterError（路由 toInternalSafe 包装为 400）。
- * logger 可选（默认模块级 logger）：toInternal 注入点无请求上下文，仅用于丢弃告警。
+ * 无状态红线（D7）：Responses 服务端会话状态字段（previous_response_id / conversation）任一
+ * 存在 → AdapterError（路由层归一 400，提示无状态 input items 用法）。
+ *
+ * 导出给两处调用（批次 9 前置 / 批次 3 边界 C）：
+ * ① `buildInternalFromResponses` 原位（convert 路径，行为逐字节不变）；
+ * ② `verbatim.ts verbatimRequest`（verbatim 路径**显式**执行）。
+ * 去伴随化的动机：今天红线对 verbatim 请求经 proxy.ts「toInternal 无条件先于候选分派」
+ * （:420）伴随生效——若将来 verbatim 候选跳过 toInternal（潜在优化），红线在 verbatim
+ * 路径**静默消失**。显式执行让红线不再依赖该结构事实；两处共用同一函数与同一文案，
+ * 「verbatim 抛 400」与「convert 抛 400」不可能漂移成两套措辞。
  */
-export function buildInternalFromResponses(
-  body: JsonObject,
-  logger: Logger = moduleLogger,
-): JsonObject {
+export function assertStatelessResponsesBody(body: JsonObject): void {
   // 拒绝：Responses 服务端会话状态（D7）——Chat 是无状态协议，无法表达 → 400，提示无状态用法
   if (body["previous_response_id"] !== undefined) {
     throw new AdapterError(
@@ -105,6 +107,22 @@ export function buildInternalFromResponses(
       "conversation is not supported by this gateway; include the full input items in each request (stateless mode)",
     );
   }
+}
+
+// ============ 入站转换（Responses 请求 → 内部 OpenAI Chat 形态） ============
+
+/**
+ * 入站 Responses 请求 → 内部 OpenAI Chat Completions body（OR §2.1 / design §3.2）。
+ * 字段级转换失败抛 AdapterError（路由 toInternalSafe 包装为 400）。
+ * logger 可选（默认模块级 logger）：toInternal 注入点无请求上下文，仅用于丢弃告警。
+ */
+export function buildInternalFromResponses(
+  body: JsonObject,
+  logger: Logger = moduleLogger,
+): JsonObject {
+  // 拒绝：Responses 服务端会话状态（D7）——提取为 assertStatelessResponsesBody（verbatim
+  // 路径同函数显式执行，见该函数注释）；convert 路径行为逐字节不变
+  assertStatelessResponsesBody(body);
 
   const messages: JsonObject[] = [];
   // additional_tools items（Codex Responses Lite）携带的工具原始定义（hoist 到请求级 tools）

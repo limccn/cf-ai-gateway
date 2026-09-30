@@ -95,6 +95,56 @@ export function createAnthropicUsageDetector(): StreamUsageDetector {
   };
 }
 
+/**
+ * Responses 原生形态（/v1/responses verbatim 直通，批次 9 缺陷修复）：usage 只在终局事件
+ * response.completed / response.incomplete 的 `data.response.usage`（嵌套一层，与 chat
+ * 尾包的顶层 usage 不同构）——故只在终局事件读取（input_tokens → promptTokens、
+ * output_tokens → completionTokens），其余事件一律返回 null，**不跨形态误读** chat 尾包。
+ * 不提供 snapshot：Responses 事件在终局前 usage 恒为 null（response.created 携带
+ * usage:null），取消路径无已观测部分可快照——与 openai 检测器一致缺省。
+ */
+export function createResponsesUsageDetector(): StreamUsageDetector {
+  return {
+    feed(event: SseEvent): TokenUsage | null {
+      if (typeof event.data !== "object" || event.data === null) {
+        return null;
+      }
+      const body = event.data as Record<string, unknown>;
+      if (body["type"] !== "response.completed" && body["type"] !== "response.incomplete") {
+        return null;
+      }
+      const response = body["response"];
+      if (response === null || typeof response !== "object") {
+        return null;
+      }
+      const usage = (response as Record<string, unknown>)["usage"];
+      if (usage === null || typeof usage !== "object") {
+        return null;
+      }
+      const u = usage as Record<string, unknown>;
+      const input = u["input_tokens"];
+      const output = u["output_tokens"];
+      if (typeof input !== "number" || typeof output !== "number") {
+        return null;
+      }
+      const details = u["input_tokens_details"];
+      const cachedRaw =
+        details !== null && typeof details === "object"
+          ? (details as Record<string, unknown>)["cached_tokens"]
+          : undefined;
+      const cachedTokens =
+        typeof cachedRaw === "number" && Number.isFinite(cachedRaw) && cachedRaw > 0
+          ? cachedRaw
+          : undefined;
+      return {
+        promptTokens: input,
+        completionTokens: output,
+        ...(cachedTokens !== undefined ? { cachedTokens } : {}),
+      };
+    },
+  };
+}
+
 export interface SettlementOptions {
   /** usage 检测器（缺省 = OpenAI 形态）。 */
   detector?: StreamUsageDetector;

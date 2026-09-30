@@ -97,6 +97,13 @@ export function updateProviderRoute(app: Hono<AppEnv>): void {
       if (body.upstreamTimeoutMs !== undefined) {
         patch.upstreamTimeoutMs = body.upstreamTimeoutMs;
       }
+      // 09-28 custom（批次 1）：preset 显式传 null = 清除（省略 = 不改动）；
+      // protocols 显式传 null = 清除（回落 type 的遗留等价面表），否则整体替换存 JSON（与 models 同惯例）
+      if (body.preset !== undefined) patch.preset = body.preset;
+      if (body.protocols !== undefined) {
+        patch.protocols =
+          body.protocols === null ? null : JSON.stringify(body.protocols);
+      }
 
       const [updated] = await db
         .update(providers)

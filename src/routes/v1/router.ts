@@ -8,7 +8,7 @@
 // POST /messages（统一入口，08-31-protocol-auto-detect）：Anthropic Messages / OpenAI Chat
 //   双协议自动感知（protocolDetectMiddleware 先行注入 detectedProtocol；error-adapt 按检测结果
 //   动态决定错误形态；proxy 按检测结果切换协议变体）。anthropic 语义请求（SDK 头/硬信号/
-//   claude-* 模型名）行为与现状一致（含缓存前缀、错误形态、providerType）；openai 语义请求
+//   claude-* 模型名）行为与现状一致（含缓存前缀、错误形态、入站面偏好 inboundFace）；openai 语义请求
 //   按 OpenAI Chat 形态处理。检测中间件与错误重写中间件必须注册在全局 gatewayAuth 之前
 //   （仅匹配 /messages 路径，对 /chat/completions 等现有端点零影响），否则鉴权 401 会短路跳过改写。
 import { Hono } from "hono";

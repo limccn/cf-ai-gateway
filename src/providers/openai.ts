@@ -27,8 +27,9 @@ export function openaiEndpointUrl(baseUrl: string, kind: EndpointKind): string {
 }
 
 /** 网关内部保留键：`_gateway_` 前缀（本地信号，如 Responses include reasoning），
- * 绝不转发给 OpenAI 上游（R4：一处剥离，通用安全；上游白名单构造不感知）。 */
-function stripGatewayReserved(
+ * 绝不转发给 OpenAI 上游（R4：一处剥离，通用安全；上游白名单构造不感知）。
+ * 导出仅为 verbatim 引擎复用（design §4.3 注入 2）；本文件行为零变化。 */
+export function stripGatewayReserved(
   body: Record<string, unknown>,
 ): Record<string, unknown> {
   const clean: Record<string, unknown> = {};
@@ -46,8 +47,9 @@ function stripGatewayReserved(
  * assistant 消息的 reasoning_content——OpenAI 系上游（OpenAI/b.ai 等）不接收该字段，
  * 保持现状语义（= 未开回传时的零变化）；flag on 时保留 → deepseek 思考模式上游要求
  * thinking 轮询中把 reasoning_content 原样回传（`must be passed back to the API`）。
+ * 导出仅为 verbatim 引擎复用（design §4.3 注入 4）；本文件行为零变化。
  */
-function stripReasoningRoundtrip(
+export function stripReasoningRoundtrip(
   body: Record<string, unknown>,
   keep: boolean,
 ): Record<string, unknown> {

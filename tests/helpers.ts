@@ -303,7 +303,9 @@ export interface SetupProviderOptions {
   weight?: number;
   /** 上游 baseUrl（缺省 127.0.0.1:1 不可达，仅供路由解析）。 */
   baseUrl?: string;
-  type?: "openai" | "anthropic";
+  type?: "openai" | "anthropic" | "custom";
+  /** 声明面 JSON（providers.protocols 列，批次 1+；缺省 NULL = 遗留隐式面表）。 */
+  protocols?: string | null;
 }
 
 /** 注册一个具名 Provider（多 upstream 测试用）：models 映射 model -> model，weight 可配。幂等（同名先查后改）。 */
@@ -324,6 +326,8 @@ export async function setupProvider(
     apiKeyEnc,
     models: JSON.stringify({ [model]: model }),
     weight: opts.weight ?? 1,
+    // 缺省 undefined = 不动列（新插入时落 NULL）——与「显式 null 清除」区分开
+    ...(opts.protocols !== undefined ? { protocols: opts.protocols } : {}),
   };
   if (existing) {
     await db.update(providers).set(values).where(eq(providers.id, existing.id));

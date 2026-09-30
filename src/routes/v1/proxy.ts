@@ -28,10 +28,26 @@ import type {
   InternalRequest,
   ProviderAdapter,
   ProviderConfig,
-  ProviderType,
   TokenUsage,
   UpstreamRequest,
 } from "../../providers/types";
+import {
+  EndpointResolutionError,
+  dialectForFace,
+  parseResolvedEndpoints,
+  selectEndpoint,
+  supportsProtocol,
+  type ProviderEndpointRow,
+  type ProviderFace,
+  type ResolvedEndpoint,
+} from "../../providers/endpoints";
+import { verbatimRequest } from "../../providers/verbatim";
+import {
+  errorHeadersWithContentTypeFallback,
+  forwardUpstreamHeaders,
+  mergeForwardedHeaders,
+} from "../../providers/forward-headers";
+import type { Logger } from "../../lib/logger";
 import { decryptSecret } from "../../lib/security";
 import {
   maskModelInData,
@@ -48,6 +64,7 @@ import {
   type RouteCandidate,
 } from "../../lib/provider-router";
 import {
+  extractErrorMessageFromRawBody,
   extractUpstreamError,
   fetchUpstream,
   logUpstreamError,
@@ -84,6 +101,7 @@ import { buildBillingEvent, sendBillingEvent } from "../../lib/billing-queue";
 import { enqueueUsageEvent } from "../../lib/usage-aggregation";
 import {
   createAnthropicUsageDetector,
+  createResponsesUsageDetector,
   wrapStreamWithSettlement,
 } from "../../lib/stream-settle";
 import type { SseFrameTransform } from "../../providers/sse-pipe";
@@ -125,6 +143,54 @@ async function readJsonBodyWithIdleTimeout(
   return JSON.parse(new TextDecoder().decode(buffer));
 }
 
+// 批次 3（verbatim 非流式，design §4.1 修订段）：上游体读一次**原文**，JSON.parse 由调用方
+// 仅用于用量提取与 model 反伪装判定——恒等映射时原始字节直返，不重序列化。与上面的
+// readJsonBodyWithIdleTimeout 同一套空闲超时循环（刻意复制而非抽公共函数：convert 路径
+// 逐字节零回归红线，本批次不碰它的实现）。
+// 边界 B（批次 4，灰度前必修）：idle 超时触发时 reader.cancel 会令挂起的 read 以 done 结束
+// —— 若不在此显式抛错，截断字节会被静默当完整体返回（合法前缀时甚至当 200 进缓存）。
+// 超时即抛，由调用方按 convert 同契约归一（502 + upstream_non_json_response + 明细错误行
+// + 不缓存）。
+async function readTextBodyWithIdleTimeout(
+  resp: Response,
+  timeoutMs: number | undefined,
+): Promise<string> {
+  if (timeoutMs === undefined || resp.body === null) {
+    return resp.text();
+  }
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let idleTimedOut = false;
+  for (;;) {
+    const timer = setTimeout(() => {
+      idleTimedOut = true;
+      void reader.cancel(new Error("idle timeout")).catch(() => {});
+    }, timeoutMs);
+    let result: ReadableStreamReadResult<Uint8Array>;
+    try {
+      result = await reader.read();
+    } finally {
+      clearTimeout(timer);
+    }
+    if (idleTimedOut) {
+      throw new Error("Upstream body idle timeout");
+    }
+    if (result.done) {
+      break;
+    }
+    chunks.push(result.value);
+    total += result.value.length;
+  }
+  const buffer = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return new TextDecoder().decode(buffer);
+}
+
 const PATH_BY_KIND: Record<EndpointKind, string> = {
   chat: "/chat/completions",
   completions: "/completions",
@@ -156,9 +222,6 @@ export interface ProxyEndpointOptions<B = Record<string, unknown>> {
    * 缺省 = 原始字节透传（P1）。R4：工厂可接入站 rawBody（含 include 等本地信号；
    * 参数可选，既有无参实现零改动兼容）。 */
   streamConsumer?: (body?: Record<string, unknown>) => SseFrameTransform;
-  /** anthropic 上游 + anthropic 原生入站 → 协议短路（P2a）：字节原样透传，
-   * settle 用 Anthropic 提取器，不经过转换器。 */
-  passthroughAnthropicStream?: boolean;
   /** R1：Anthropic 入站顶层 thinking/output_config 透传开关（缺省 false）。
    * 开启时 proxy 从 rawBody 提取 extras → InternalRequest.anthropicExtras →
    * anthropic 适配器逐字写回上游；openai 适配器不感知。仅 /anthropic/* 与
@@ -166,10 +229,13 @@ export interface ProxyEndpointOptions<B = Record<string, unknown>> {
   passthroughAnthropicExtras?: boolean;
   /** 缓存键协议命名空间前缀（协议间隔离，如 "anthropic:"）；默认 ""（现有端点键不变）。 */
   cachePrefix?: string;
-  /** 入站协议偏好的 provider 类型：模型路由优先匹配同类型 provider（如 Anthropic 协议
-   * → type=anthropic 的 provider 原生转发，OpenAI 协议 → type=openai），无同类型命中
-   * 时回退按 id 升序全量匹配（既有配置零回归）。默认不限定（行为不变）。 */
-  providerType?: ProviderType;
+  /** 入站方言面（design §4.1）：由入站路由声明（/v1/messages + /anthropic/* → "messages"、
+   * /v1/chat/completions → "chat"、/v1/completions → "completions"、/v1/embeddings → "embeddings"、
+   * /v1/responses → "responses"）。消费点三处：① 模型路由偏好趟只收「面表原生承载该面」
+   * 的候选（design §3 行 3）；② 字节直通门要求端点方言 === 本入站方言（§4.1 合取，
+   * 防 verbatim chat 面在 anthropic 入站回退趟被误判直通）；③ selectEndpoint 的原生面匹配。
+   * 缺省 undefined = 不做面偏好（行为同今日 providerType 缺省）。 */
+  inboundFace?: ProviderFace;
   /**
    * 协议变体（08-31-protocol-auto-detect，design §5）：detectedProtocol 命中时用变体字段
    * 覆盖 base；缺省 undefined → eff === options（现有端点逐字节不变）。
@@ -182,10 +248,9 @@ export interface ProxyEndpointOptions<B = Record<string, unknown>> {
       | "transformResponse"
       | "transformStream"
       | "streamConsumer"
-      | "passthroughAnthropicStream"
       | "passthroughAnthropicExtras"
       | "cachePrefix"
-      | "providerType"
+      | "inboundFace"
     >
   > & { protocol: import("../../lib/protocol-detect").Protocol };
 }
@@ -206,28 +271,66 @@ interface ResolvedProvider {
   reasoningRoundtrip: boolean | null;
   /** 上游超时（毫秒，09-01-stg-glm-ccswitch-fix；NULL ≡ 默认 60s）。 */
   upstreamTimeoutMs: number | null;
+  /** 解析后端点（design §2.3）：候选的能力面表。路由偏好（supportsProtocol）、
+   * 端点选择（selectEndpoint）、适配器方言、P2a 直通门、计费 detector 全部读它，
+   * 不再以 `type` 做运行时分支（AC2）。 */
+  resolved: ResolvedEndpoint[];
 }
 
 /**
- * 模型路由 → 候选池：优先收集 preferredType 的同类型 Provider（协议原生转发，如 Anthropic
- * 协议 → 上游 /anthropic 端点）；无同类型命中时回退按 id 升序全量收集（仅配 openai/anthropic
- * 单面 provider 的既有配置行为不变）。两趟均按 id 升序保证确定性。
- * 多候选构成负载均衡池（哈希分配 + 故障转移）；单候选 = 现状单赢家行为（零回归）。
+ * 解析全部启用记录的面表（一次，随候选池解析；design §3 行 2）。
+ *
+ * 解析失败 = 记录级配置损坏（`protocols` 非 JSON / 白名单外面键 / 未知 type）⇒ **跳过该
+ * 候选 + warn，绝不 500**：配置错误在写入门禁（zod .refine）已 fail-fast，运行时的唯一职责
+ * 是「一条坏记录不拖垮整个请求」（fail-soft for availability）。非 EndpointResolutionError
+ * 的异常照旧上抛（那是代码缺陷，不是配置问题）。
+ */
+function parseEnabledEndpoints<T extends ProviderEndpointRow & { id: number }>(
+  rows: readonly T[],
+  logger: Logger,
+): Array<{ row: T; resolved: ResolvedEndpoint[] }> {
+  const out: Array<{ row: T; resolved: ResolvedEndpoint[] }> = [];
+  for (const row of rows) {
+    try {
+      out.push({ row, resolved: parseResolvedEndpoints(row) });
+    } catch (error) {
+      if (!(error instanceof EndpointResolutionError)) {
+        throw error;
+      }
+      logger.warn("provider_endpoints_unresolvable", {
+        providerId: row.id,
+        type: row.type,
+        baseUrl: row.baseUrl,
+        error: error.message,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 模型路由 → 候选池：两趟扫描结构保持（design §3 行 2、§4.2）——
+ *   偏好趟：只收「面表原生承载 inboundFace」的候选（`supportsProtocol`，**仅此趟生效**）；
+ *   回退趟：按 id 升序全量收集（今天的跨方言转换兜底，一行不动）。
+ * 两趟均按 id 升序保证确定性。多候选构成负载均衡池（哈希分配 + 故障转移）；
+ * 单候选 = 现状单赢家行为（零回归）。
  */
 async function resolveCandidates(
   db: Db,
   model: string,
-  preferredType?: ProviderType,
+  logger: Logger,
+  inboundFace?: ProviderFace,
 ): Promise<ResolvedProvider[]> {
   const rows = await db
     .select()
     .from(providers)
     .where(eq(providers.enabled, true))
     .orderBy(asc(providers.id));
-  const collect = (wantType: ProviderType | null): ResolvedProvider[] => {
+  const parsed = parseEnabledEndpoints(rows, logger);
+  const collect = (wantFace: ProviderFace | null): ResolvedProvider[] => {
     const out: ResolvedProvider[] = [];
-    for (const row of rows) {
-      if (wantType !== null && row.type !== wantType) {
+    for (const { row, resolved } of parsed) {
+      if (wantFace !== null && !supportsProtocol(resolved, wantFace)) {
         continue;
       }
       const models = parseProviderModels(row.models);
@@ -244,13 +347,14 @@ async function resolveCandidates(
           thinkingMode: row.thinkingMode ?? null,
           reasoningRoundtrip: row.reasoningRoundtrip ?? null,
           upstreamTimeoutMs: row.upstreamTimeoutMs ?? null,
+          resolved,
         });
       }
     }
     return out;
   };
-  if (preferredType !== undefined) {
-    const preferred = collect(preferredType);
+  if (inboundFace !== undefined) {
+    const preferred = collect(inboundFace);
     if (preferred.length > 0) {
       return preferred;
     }
@@ -308,10 +412,9 @@ export function proxyRouteWithOptions(
         transformResponse,
         transformStream,
         streamConsumer,
-        passthroughAnthropicStream,
         passthroughAnthropicExtras,
         cachePrefix = "",
-        providerType,
+        inboundFace,
       } = eff;
       const rawBody = c.req.valid("json") as Record<string, unknown>;
       // 入站协议 → 内部 OpenAI Chat 形态（P1；缓存键仍以原始入站 body 为准，协议隔离由 cachePrefix 负责）
@@ -382,8 +485,8 @@ export function proxyRouteWithOptions(
         }
       }
 
-      // 4. 模型路由：候选池（协议偏好优先同类型，无命中回退全量）
-      const candidates = await resolveCandidates(db, model, providerType);
+      // 4. 模型路由：候选池（面偏好优先，无命中回退全量；design §4.2）
+      const candidates = await resolveCandidates(db, model, logger, inboundFace);
       if (candidates.length === 0) {
         logger.warn("model_not_routed", { model: billingModel, keyId: auth.key.id });
         const rejectedLog: RequestLogRecord = {
@@ -589,25 +692,33 @@ export function proxyRouteWithOptions(
       // 5/6. 尝试循环：解密 → 适配器构造 → 转发；失败分类（连接/超时/5xx/429）转移并写断路器
       let upstreamResp: Response | null = null;
       let adapter: ProviderAdapter | null = null;
+      // 本次成功端点（面表项）：方言选适配器 / detector、P2a 直通门、计费提取都读它
+      let activeEndpoint: ResolvedEndpoint | null = null;
+      // 批次 3：成功端点是否走 verbatim 分派（与 activeEndpoint 同生共死；非流式响应侧分流读它）
+      let activeVerbatim = false;
       let resolvedProviderId: number = attempts[0]?.providerId ?? 0;
       // 实际执行 provider 的模型映射（伪装层 upstreamModel 来源；失败路径记录最后一次尝试者）
       let resolvedModels: Record<string, string> = {};
       let lastErrorUpstreamModel = model;
-      let lastError: { status: number; message: string } | null = null;
+      // 批次 4（AC7，design §5.2）：最后一次尝试为 verbatim 端点且收到 429/5xx 时，
+      // 其错误体原文与转发头随 lastError 存续 —— 全部候选耗尽时原样回传（§5.2 逐字语义
+      // 对可转移错误同样成立；后续候选成功则随 lastError=null 一起作废，failover 不变）。
+      let lastError: {
+        status: number;
+        message: string;
+        verbatimRaw?: string;
+        verbatimHeaders?: Record<string, string>;
+      } | null = null;
       for (let i = 0; i < attempts.length; i++) {
         // i < attempts.length，索引必在界内（越界为不可达防御）
         const cand = atOrThrow(attempts, i, "attempts");
         const nextId = attempts[i + 1]?.providerId;
 
-        adapter = getAdapter(cand.type);
-        if (!adapter) {
-          logger.error("unknown_provider_type", {
-            providerId: cand.providerId,
-            type: cand.type,
-          });
-          return c.json({ error: { message: "Provider type not supported" } }, 500);
-        }
-        if (!adapter.supports(kind)) {
+        // 端点选择（design §3 行 2 + §1b）：按「入站方言面 × internal kind」查该候选面表，
+        // 取原生承载的端点；选不出 ⇒ 与今天 adapter.supports(kind) 为假**同义**
+        // （遗留 anthropic 对 completions/embeddings 仍走 :615 的 400）。
+        const endpoint = selectEndpoint(cand.resolved, inboundFace, kind);
+        if (endpoint === null) {
           if (!multiCandidate) {
             return c.json(
               {
@@ -618,7 +729,7 @@ export function proxyRouteWithOptions(
               400,
             );
           }
-          // 多候选：类型不支持是配置问题而非健康问题 → 跳过该候选，不写断路器
+          // 多候选：不支持是配置问题而非健康问题 → 跳过该候选，不写断路器
           logger.warn("provider_skip_unsupported", {
             providerId: cand.providerId,
             type: cand.type,
@@ -627,6 +738,33 @@ export function proxyRouteWithOptions(
           });
           continue;
         }
+
+        // 适配器按**端点方言**选（design §3 行 1；dialect 二值与现 ProviderType 同构）
+        adapter = getAdapter(endpoint.dialect);
+        if (!adapter) {
+          logger.error("unknown_provider_type", {
+            providerId: cand.providerId,
+            type: cand.type,
+            dialect: endpoint.dialect,
+          });
+          return c.json({ error: { message: "Provider type not supported" } }, 500);
+        }
+        activeEndpoint = endpoint;
+        // D2 逐候选分派（批次 3，design §4.2）：端点 policy=verbatim ∧ 端点方言 === 入站面
+        // 原生方言 ⇒ 逐字透传；否则现路径（convert）逐字节不变。与流式直通门同一合取结构：
+        // 入站面缺省（inboundFace undefined）⇒ 恒不 verbatim（无面声明即无方言配对依据）。
+        // 判定在候选循环内 —— 保住跨协议 failover（断路器/circuitMemo 语义不动）。
+        // 边界 A（批次 4，灰度前必修）：合取补第四要素 `endpoint.face === inboundFace` ——
+        // responses 入站 × 显式 verbatim chat 面候选时（selectEndpoint 的 viaChat 规则会把
+        // openai 方言 chat 面端点给 responses 入站），缺此要素会把 Responses 体逐字发往
+        // /chat/completions。面不匹配 ⇒ convert（adapter 转换）；convert 场景合取本就为假，
+        // 第四要素不影响遗留等价（本批次有显式断言证明）。
+        const useVerbatim =
+          endpoint.policy === "verbatim" &&
+          inboundFace !== undefined &&
+          endpoint.face === inboundFace &&
+          endpoint.dialect === dialectForFace(inboundFace);
+        activeVerbatim = useVerbatim;
 
         // 解密上游密钥（仅请求内存中使用）
         let upstreamKey: string;
@@ -671,8 +809,9 @@ export function proxyRouteWithOptions(
         }
 
         // 适配器构造上游请求（内部形态恒为 OpenAI Chat Completions 兼容，P1）
+        // cfg.type = 端点方言（与 cand.type 解耦：custom 记录的 type 不再是适配器键）
         const cfg: ProviderConfig = {
-          type: cand.type as ProviderType,
+          type: endpoint.dialect,
           baseUrl: cand.baseUrl,
           apiKey: upstreamKey,
           models: cand.models,
@@ -689,7 +828,11 @@ export function proxyRouteWithOptions(
         };
         let upstreamReq: UpstreamRequest;
         try {
-          upstreamReq = adapter.buildRequest(internalReq, cfg);
+          // D2 分派（批次 3）：verbatim ⇒ 开集体 + 7 项注入（verbatimRequest，URL = 该面端点）；
+          // convert ⇒ adapter.buildRequest 现路径逐字节不变（design §4.2）。
+          upstreamReq = useVerbatim
+            ? verbatimRequest(rawBody, endpoint, cfg)
+            : adapter.buildRequest(internalReq, cfg);
         } catch (error) {
           if (error instanceof AdapterError) {
             logger.warn("adapter_error", {
@@ -747,10 +890,37 @@ export function proxyRouteWithOptions(
           continue;
         }
 
-        // 上游非 2xx：归一化 OpenAI 风格错误体（4.3：不扣费，明细记 error）
+        // 上游非 2xx：归一化 OpenAI 风格错误体（4.3：不扣费，明细记 error）。
+        // 批次 4（verbatim 错误体逐字，design §5.2 / AC7）：verbatim 端点先读原始错误体
+        // （extractUpstreamError 会消费 resp.json()，两条路必须各自读一次）——原样回传 +
+        // 保留上游状态码，且**跳过 maskModelInErrorMessage**（有意取舍：LGP 自动重试恢复
+        // 靠匹配上游错误措辞，改文案破坏该依据；错误路径本就不计费，成功路径反伪装不受
+        // 影响 —— 见 design §9 #6）。convert 端点仍走 extractUpstreamError，逐字节不动。
         if (!upstreamResp.ok) {
-          const message = await extractUpstreamError(upstreamResp);
           const upstreamLatencyMs = Date.now() - startTime;
+          let message: string;
+          let verbatimErrorRaw: string | null = null;
+          let verbatimErrorHeaders: Record<string, string> | undefined;
+          if (useVerbatim) {
+            try {
+              verbatimErrorRaw = await upstreamResp.text();
+              verbatimErrorHeaders = forwardUpstreamHeaders(upstreamResp.headers);
+            } catch {
+              // 错误体读取失败 ⇒ 退回 convert 式归一错误（不在错误路径上二次 500）
+              verbatimErrorRaw = null;
+              verbatimErrorHeaders = undefined;
+            }
+            message =
+              verbatimErrorRaw !== null
+                ? extractErrorMessageFromRawBody(
+                    verbatimErrorRaw,
+                    upstreamResp.status,
+                    upstreamResp.statusText,
+                  )
+                : `Upstream provider returned ${upstreamResp.status} ${upstreamResp.statusText}`.trim();
+          } else {
+            message = await extractUpstreamError(upstreamResp);
+          }
           logger.warn("upstream_error", {
             providerId: cand.providerId,
             model: billingModel,
@@ -774,6 +944,15 @@ export function proxyRouteWithOptions(
           // 4xx（非 429）为客户端错误，转候选也不会成功：透传，不转移（错误消息伪装）
           const retryable = upstreamResp.status === 429 || upstreamResp.status >= 500;
           if (!retryable) {
+            if (verbatimErrorRaw !== null) {
+              // verbatim（AC7）：上游错误体原样 + 上游状态码 + 转发头（retry-after /
+              // x-should-retry / anthropic-ratelimit-unified-* / 上游 content-type，LGP
+              // 响应头与错误体重试恢复要求）；跳过错误文案伪装见 §5.2。
+              return c.body(verbatimErrorRaw, {
+                status: toContentStatus(upstreamResp.status),
+                headers: errorHeadersWithContentTypeFallback(verbatimErrorHeaders),
+              });
+            }
             return c.json(
               {
                 error: {
@@ -796,7 +975,13 @@ export function proxyRouteWithOptions(
               keyId: auth.key.id,
             });
           }
-          lastError = { status: upstreamResp.status, message };
+          lastError = {
+            status: upstreamResp.status,
+            message,
+            ...(verbatimErrorRaw !== null
+              ? { verbatimRaw: verbatimErrorRaw, verbatimHeaders: verbatimErrorHeaders }
+              : {}),
+          };
           lastErrorUpstreamModel = cand.models[model] ?? model;
           continue;
         }
@@ -813,6 +998,14 @@ export function proxyRouteWithOptions(
 
       // 全部尝试失败（网络/超时/5xx/429 转移后仍失败）：返回最后一次尝试的真实错误（错误消息伪装）
       if (lastError !== null) {
+        // 批次 4（AC7，design §5.2）：最后一次尝试为 verbatim 端点 ⇒ 原样回传其错误体与
+        // 上游状态码（可转移错误耗尽全部候选时的逐字语义；跳过文案伪装理由同上）。
+        if (lastError.verbatimRaw !== undefined) {
+          return c.body(lastError.verbatimRaw, {
+            status: toContentStatus(lastError.status),
+            headers: errorHeadersWithContentTypeFallback(lastError.verbatimHeaders),
+          });
+        }
         return c.json(
           {
             error: {
@@ -827,13 +1020,22 @@ export function proxyRouteWithOptions(
         );
       }
 
-      // 成功路径不变量：循环仅在成功时 break（upstreamResp.ok 且 adapter 已锁定）
-      if (upstreamResp === null || adapter === null) {
+      // 成功路径不变量：循环仅在成功时 break（upstreamResp.ok 且 adapter 已锁定；
+      // adapter 在 activeEndpoint 赋值前经 500 早退 ⇒ 三者同生共死）
+      if (upstreamResp === null || adapter === null || activeEndpoint === null) {
         logger.error("proxy_success_invariant_broken", { model: billingModel, keyId: auth.key.id });
         return c.json({ error: { message: "Upstream provider error" } }, 502);
       }
 
       const upstreamLatencyMs = Date.now() - startTime;
+
+      // 批次 4（AC6，design §5.1）：verbatim 路径响应头开集转发（上游 → 客户端）；
+      // convert 路径 undefined ⇒ mergeForwardedHeaders 退化为纯 fixed（头行为零变化）。
+      // 网关固定头优先（mergeForwardedHeaders 大小写不敏感剔除同名键，防 Headers 组装期
+      // append 合并出 "a, b" 复合值）。
+      const verbatimForwardedHeaders = activeVerbatim
+        ? forwardUpstreamHeaders(upstreamResp.headers)
+        : undefined;
 
       // 流式：适配器转换（OpenAI 透传 / Anthropic 事件转换）后以 SSE 返回；
       // 包装流在尾包 usage 到达（或流结束）后结算（4.2）
@@ -892,15 +1094,44 @@ export function proxyRouteWithOptions(
         };
         // R2.4 统一流式管线：settle 结算旁路挂在帧层（O(1)/帧，无字节累积），
         // 协议转换消费同一批帧（单次 decode/parse）；按上游形态组合出站：
-        //   P2a 短路：anthropic 入站 + anthropic 上游 → 字节原样透传（Anthropic 提取器）
+        //   P2a/verbatim 短路：流式直通门命中 → 字节原样透传（detector 按端点方言/面选）
         //   角例：anthropic 上游 + 字节出站转换（responses）→ 旧字节链（接受额外 parse）
         //   正向：anthropic 上游 → OpenAI 出站（adapter 帧级转换）
         //   P1/P2b/P3：openai 上游 → 出站帧级事件转换（如有）
+        // 上游方言：adapter 按**端点方言**选出（getAdapter(activeEndpoint.dialect)），
+        // adapter.type === "anthropic" ⇔ activeEndpoint.dialect === "anthropic" ——
+        // 各分支与 detector 均按端点方言（而非 provider.type 记录形态）判定（design §3）。
         const upstreamAnthropic = adapter.type === "anthropic";
+        // 流式直通门（承重点 4，design §4.1 合取）：端点声明 streamPassthrough ∧
+        // 端点方言 === 入站面原生方言 ∧ **端点面 === 入站面**（边界 A，批次 4）。前两条件
+        // 缺一不可：
+        //   - 入站面缺省（inboundFace undefined）⇒ 恒不直通（无面声明即无方言配对依据）；
+        //   - 防止 verbatim chat 面（openai 方言）在 anthropic 入站的回退趟（messages 面
+        //     承载）被误判直通 —— 那必须走帧级转换链。
+        //   - 边界 A：responses 入站 × verbatim chat 面（viaChat 承载）时 Responses 体不能
+        //     逐字节直通到 /chat/completions —— 面不匹配 ⇒ 帧级转换链。
+        // 遗留等价（零回归）：convert 端点 streamPassthrough 恒 false ⇒ 门恒不命中（今天
+        // 非直通分支照旧）；唯一命中面 = 遗留 anthropic 的 messages 面 × messages 入站
+        //（face 相等，第四要素不影响），即今天 P2a 的恒等复现。
+        const streamPassthrough =
+          inboundFace !== undefined &&
+          activeEndpoint.face === inboundFace &&
+          activeEndpoint.streamPassthrough === true &&
+          activeEndpoint.dialect === dialectForFace(inboundFace);
         let outboundStream: ReadableStream<Uint8Array>;
-        if (upstreamAnthropic && passthroughAnthropicStream === true) {
+        if (streamPassthrough) {
           outboundStream = wrapStreamWithSettlement(upstreamResp.body, settleCb, logger, {
-            detector: createAnthropicUsageDetector(),
+            // detector 按端点方言/面**三态**选（承重点 4/5；批次 9 缺陷修复）：anthropic
+            // 方言 = Anthropic 原生事件提取器（P2a 尾包 usage）；responses 面 verbatim =
+            // Responses 原生事件提取器（usage 嵌在 response.completed 的 data.response.usage
+            // ——chat 尾包提取器读不到 ⇒ 结算 null ⇒ 全部免计，stg 实测缺陷）；
+            // openai 方言其余 verbatim 面（chat/completions/embeddings）= OpenAI 尾包提取器
+            //（detector undefined ⇒ stream-settle 缺省，与今天 openai 流同款）。
+            detector: upstreamAnthropic
+              ? createAnthropicUsageDetector()
+              : activeEndpoint.face === "responses"
+                ? createResponsesUsageDetector()
+                : undefined,
             // U7：流空闲超时（每 chunk 重置；复用成功候选的 per-provider 配置）
             idleTimeoutMs: providerTimeoutMs,
           });
@@ -943,21 +1174,35 @@ export function proxyRouteWithOptions(
         // F4（安全评审）：c.body 而非 new Response —— 中间件 c.header() 写入的
         // #preparedHeaders 只在 #newResponse（c.json/c.body 同路径）merge；直接
         // new Response 绕过 merge 导致成功路径 X-RateLimit-* 头丢失。
+        // 批次 4（AC6）：verbatim 路径合并上游转发头（网关固定头优先）；convert 路径
+        // 头集合与改动前逐字段一致（零回归）。
         return c.body(maskedStream, {
-          headers: {
+          headers: mergeForwardedHeaders(verbatimForwardedHeaders, {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             Connection: "keep-alive",
             "X-Accel-Buffering": "no",
-          },
+          }),
         });
       }
 
-      // 非流式：OpenAI 透传 / Anthropic 格式转换
+      // 非流式：verbatim（批次 3，design §4.1 修订段）⇒ 原样回传 + 反伪装；
+      // convert ⇒ OpenAI 透传 / Anthropic 格式转换（现行链路逐字节不动）。
+      // verbatim：上游体读一次**原文**；JSON.parse 仅用于用量提取（与 convert 同源 extractor）
+      // 与 model 反伪装判定；模型映射恒等 ⇒ 原始字节直返不重序列化。
+      // 边界 B（09-28 check 边界记录）：verbatim 读体/解析失败与 convert 同契约 ——
+      // 中途流错 / idle 超时截断 / 非 JSON 一律 502 + upstream_non_json_response +
+      // 错误行 + 免计，绝不能把截断字节当 200 返回（更不得进缓存）。
+      let verbatimRaw: string | null = null;
       let data: unknown;
       try {
-        // U7：非流式 body 读取空闲超时（复用成功候选的 per-provider 配置）
-        data = await readJsonBodyWithIdleTimeout(upstreamResp, providerTimeoutMs);
+        if (activeVerbatim) {
+          verbatimRaw = await readTextBodyWithIdleTimeout(upstreamResp, providerTimeoutMs);
+          data = JSON.parse(verbatimRaw);
+        } else {
+          // U7：非流式 body 读取空闲超时（复用成功候选的 per-provider 配置）
+          data = await readJsonBodyWithIdleTimeout(upstreamResp, providerTimeoutMs);
+        }
       } catch {
         logger.error("upstream_non_json_response", {
           providerId: resolvedProviderId,
@@ -979,18 +1224,34 @@ export function proxyRouteWithOptions(
         return c.json({ error: { message: "Upstream returned a non-JSON response" } }, 502);
       }
       // P1：适配器正向转换在前（OpenAI 透传 / Anthropic 格式转换），协议出站转换在最后；
-      // 伪装在最终出站形态上（恒等映射时零开销恒等变换）；缓存内容即伪装形态
-      const output =
-        adapter.transformResponse !== undefined ? adapter.transformResponse(data) : data;
-      const outbound = transformResponse !== undefined ? transformResponse(output, c) : output;
-      const maskedOutbound = maskModelInData(
-        outbound,
-        model,
-        resolvedModels[model] ?? model,
-      );
+      // 伪装在最终出站形态上（恒等映射时零开销恒等变换）；缓存内容即伪装形态。
+      // verbatim 分支（批次 3）跳过两级转换（adapter.transformResponse / options.transformResponse
+      // ——上游已是该面原生形态）；反伪装仅非恒等映射时解析改写重序列化（此时保真让位）。
+      const upstreamModel = resolvedModels[model] ?? model;
+      let maskedOutbound: unknown;
+      if (activeVerbatim) {
+        if (
+          upstreamModel === model ||
+          typeof data !== "object" ||
+          data === null
+        ) {
+          // 恒等映射（常见配置）或体为非对象 JSON（标量）：verbatimRaw 保持原文，原始字节直返
+        } else {
+          maskedOutbound = maskModelInData(data, model, upstreamModel);
+          verbatimRaw = null;
+        }
+      } else {
+        const output =
+          adapter.transformResponse !== undefined ? adapter.transformResponse(data) : data;
+        const outbound = transformResponse !== undefined ? transformResponse(output, c) : output;
+        maskedOutbound = maskModelInData(outbound, model, upstreamModel);
+      }
 
       // 7. 计费（成功）：延迟计费 —— 组装计费事件 → BILLING_QUEUE（waitUntil 旁路，0 同步 D1 读写）；
       //    扣费 + 明细 + balance_tx + 聚合事件由消费者批内执行（结算时刻价格，request_id 幂等）。
+      //    承重点 5（design §3 行 5）：提取器随**端点方言**走 —— adapter 即
+      //    getAdapter(activeEndpoint.dialect)，parseUsage 按上游端点的协议形态解析
+      //    （anthropic 方言端点的非流式体是 anthropic JSON，由 anthropic 适配器提取）。
       const usage = adapter.parseUsage(data) ?? extractLooseUsage(data);
       if (usage === null) {
         // 无 usage → 免计策略（PRD R5.4 / M4 4.2；no_price 由消费者判定）
@@ -1024,7 +1285,9 @@ export function proxyRouteWithOptions(
       // （消除 c.json 二次 stringify 的瞬时峰值）；>5MB 跳过缓存（照常返回）。
       let serializedOutbound: string | null = null;
       if (cacheState !== null) {
-        const serialized = JSON.stringify(maskedOutbound);
+        // 批次 3：verbatim 恒等路径缓存内容 = 原始字节（不重序列化）；convert = 伪装形态序列化
+        const serialized =
+          verbatimRaw !== null ? verbatimRaw : JSON.stringify(maskedOutbound);
         if (typeof serialized === "string" && serialized.length > MAX_CACHE_RESPONSE_BYTES) {
           logger.info("cache_skip_large_response", {
             bytes: serialized.length,
@@ -1053,23 +1316,32 @@ export function proxyRouteWithOptions(
         model: billingModel,
         keyId: auth.key.id,
       });
-      // F4：c.body 同 c.json merge 语义（成功路径限流头保留），见流式分支注释
+      // F4：c.body 同 c.json merge 语义（成功路径限流头保留），见流式分支注释。
+      // 批次 3：verbatim 恒等路径原始字节直返（不重序列化）。
+      // 批次 4（AC6）：c.body 两分支合并上游转发头（网关固定头优先）；c.json 分支是
+      // convert 路径 —— verbatimForwardedHeaders 为 undefined，merge 退化为 {...fixed}，
+      // 与改动前逐字段一致（零回归）。
+      const jsonOutHeaders = mergeForwardedHeaders(verbatimForwardedHeaders, {
+        "Content-Type": "application/json",
+      });
       return serializedOutbound !== null
-        ? c.body(serializedOutbound, {
-            headers: { "Content-Type": "application/json" },
-          })
-        : c.json(maskedOutbound);
+        ? c.body(serializedOutbound, { headers: jsonOutHeaders })
+        : verbatimRaw !== null
+          ? c.body(verbatimRaw, { headers: jsonOutHeaders })
+          : c.json(maskedOutbound);
     },
   );
 }
 
 /** 现有三端点薄包装（P1）：默认参数（恒等 toInternal / 出站转换、空缓存前缀），行为逐字节不变。
- * providerType: "openai" 为协议偏好：OpenAI 面请求优先 openai provider；仅配 anthropic
- * provider 时回退命中（既有 claude 上游配置行为不变）。 */
+ * inboundFace: kind（design §4.1 面映射）为协议偏好：三端点各映射到自己的入站面
+ * （chat/completions/embeddings 与 internal kind 同名同义）——偏好趟按「面表原生承载该面」
+ * 匹配，对遗留 openai 记录逐条等价于旧 providerType:"openai"；仅配 anthropic provider 时
+ * 回退趟命中（既有 claude 上游配置行为不变；completions/embeddings 仍 400 保留）。 */
 export function proxyRoute(app: Hono<AppEnv>, kind: EndpointKind): void {
   proxyRouteWithOptions(app, PATH_BY_KIND[kind], {
     inputSchema: INPUT_SCHEMAS[kind],
     kind,
-    providerType: "openai",
+    inboundFace: kind,
   });
 }

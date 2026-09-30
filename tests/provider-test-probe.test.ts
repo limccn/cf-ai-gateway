@@ -1,9 +1,13 @@
-// 批次 N（2026-09-21）：POST /api/providers/:id/test 上游协议探测。
+// 批次 N 建（2026-09-21）；批次 6 改**逐面探测**（2026-09-29）——本文件属探测路径本身，
+// 断言随行为逐条更新（红线下允许的例外，逐条对应行为变化）。
 //
-// 口径（PRD 裁决 D11）：探的是**上游原生端点**（/chat/completions、/responses、/v1/messages），
-// 不是网关出站路径 —— 网关的 Responses 入站会转成 chat 出站，自己从不打上游的 /responses。
-// 故本文件的断言分两类：① 三条 URL 各按各的协议规则（含 anthropic baseUrl 带 /v1 时不双拼）；
-// ② 路由的**无副作用**契约（不写断路器、不回显密钥）。
+// 口径（批次 6）：探测行 = 解析层 resolved 端点集（parseResolvedEndpoints）——
+// legacy 记录按遗留等价面表展开（openai ⇒ chat/completions/embeddings 三行；anthropic ⇒
+// chat/messages 两行），custom 记录按声明面逐面一行；每行都是生产可达的 URL，旧行集里的
+// responses/anthropic 侦察行已不存在（它们不是该记录生产可达的面）。断言分三类：
+// ① 行集与 URL 按解析层规则（含 anthropic /v1 补全、逐面 baseUrl）；
+// ② 路由的**无副作用**契约（不写断路器、不回显密钥）；
+// ③ AC10 判别性：配错 A 面 baseUrl ⇒ A 行红且 B 行仍绿。
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { eq } from "drizzle-orm";
@@ -23,7 +27,7 @@ import {
 // 首版写成 `{ [MODEL]: MODEL }`（键值同串），于是 `expect(body.model).toBe(MODEL)` 在
 // 「取映射的值（正确）」与「取映射的键（错误）」两种实现下**都绿** —— 这是个恒真的假锁。
 // 构造性验证：把 pickProbeModel 的 `Object.values(models)[0]` 改成 `Object.keys(models)[0]`，
-// 8 条用例**全绿**；而生产后果是上游收到内部别名 → 三条探测全 400/404 → **整片假红**。
+// 当时全部用例**全绿**；而生产后果是上游收到内部别名 → 逐面探测全 400/404 → **整片假红**。
 // 判别力来自「候选值两两不等」，不是「值非空」——同 [[local-d1-fixture-cleanup-toll]]。
 const INTERNAL_MODEL = "gpt-4o-mini";
 const UPSTREAM_MODEL = "gpt-4o-mini-2024-07-18";
@@ -132,7 +136,8 @@ interface ProbeBody {
   model: string;
   timeoutMs: number;
   probes: Array<{
-    protocol: string;
+    face: string;
+    dialect: string;
     label: string;
     url: string;
     ok: boolean;
@@ -144,13 +149,13 @@ interface ProbeBody {
   }>;
 }
 
-describe("批次 N：POST /api/providers/:id/test", () => {
-  it("三条协议各打各的原生端点（含 anthropic 的 /v1 去重规则），鉴权头按协议分流", async () => {
+describe("批次 6：POST /api/providers/:id/test（逐面探测）", () => {
+  it("legacy openai = 隐式面表三行（chat/completions/embeddings），同款 URL 规则与 Bearer 鉴权", async () => {
     const cookie = await adminCookie("n-probe-urls@test.dev");
     const provider = await createProvider(cookie, {
       name: "n-probe-urls",
       type: "openai",
-      // 以 /v1 结尾：chat/responses 直接拼，anthropic 必须只补 /messages（不能变成 /v1/v1/messages）
+      // 以 /v1 结尾：三面直接拼路径（openaiEndpointUrl 的路径表，与 proxy 出站同一函数）
       baseUrl: "https://upstream.example/v1",
       apiKey: "sk-probe-secret",
       models: { [INTERNAL_MODEL]: UPSTREAM_MODEL },
@@ -161,32 +166,32 @@ describe("批次 N：POST /api/providers/:id/test", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ProbeBody;
 
+    // 行集 = 解析层 resolved 端点集（legacy 等价面表恰好三面）。旧版行集里的
+    // responses/anthropic 侦察行**不许再出现**——它们不是该记录生产可达的面。
     expect(calls.map((c) => c.url).sort()).toEqual([
       "https://upstream.example/v1/chat/completions",
-      "https://upstream.example/v1/messages",
-      "https://upstream.example/v1/responses",
+      "https://upstream.example/v1/completions",
+      "https://upstream.example/v1/embeddings",
     ]);
 
     // 回传的 url 与实际打的 url 逐条一致（防止「报一个 URL、打另一个」）
     expect(body.probes.map((p) => p.url).sort()).toEqual(calls.map((c) => c.url).sort());
 
-    const byProtocol = new Map(body.probes.map((p) => [p.protocol, p]));
-    expect([...byProtocol.keys()].sort()).toEqual([
-      "anthropic-messages",
-      "openai-chat",
-      "openai-responses",
-    ]);
+    const byFace = new Map(body.probes.map((p) => [p.face, p]));
+    expect([...byFace.keys()].sort()).toEqual(["chat", "completions", "embeddings"]);
+    // 方言逐行回传且恒为 openai（防「报一个方言、发另一种头」）
+    for (const probe of body.probes) {
+      expect(probe.dialect).toBe("openai");
+    }
 
-    // 鉴权头分流：openai 两条 Bearer，anthropic 一条 x-api-key + version
-    const chatCall = calls.find((c) => c.url.endsWith("/chat/completions"));
-    const messagesCall = calls.find((c) => c.url.endsWith("/messages"));
-    expect(chatCall?.headers["Authorization"]).toBe("Bearer sk-probe-secret");
-    expect(messagesCall?.headers["Authorization"]).toBeUndefined();
-    expect(messagesCall?.headers["x-api-key"]).toBe("sk-probe-secret");
-    expect(messagesCall?.headers["anthropic-version"]).toBe("2023-06-01");
+    // 鉴权头：openai 方言 = Bearer（x-api-key 一处都不许出现）
+    for (const call of calls) {
+      expect(call.headers["Authorization"]).toBe("Bearer sk-probe-secret");
+      expect(call.headers["x-api-key"]).toBeUndefined();
+    }
   });
 
-  it("baseUrl 不带 /v1 时 anthropic 补全为 /v1/messages", async () => {
+  it("legacy anthropic = 两行（chat/messages），同一条 /v1/messages、同款 x-api-key", async () => {
     const cookie = await adminCookie("n-probe-nov1@test.dev");
     const provider = await createProvider(cookie, {
       name: "n-probe-nov1",
@@ -199,10 +204,30 @@ describe("批次 N：POST /api/providers/:id/test", () => {
 
     const res = await runTest(cookie, provider["id"]);
     expect(res.status).toBe(200);
-    expect(calls.some((c) => c.url === "https://api.anthropic.example/v1/messages")).toBe(true);
+    const body = (await res.json()) as ProbeBody;
+
+    // 恰两行：chat 面 + messages 面（生产对 chat 与 messages 两条入站路径打的就是同一端点）
+    expect(body.probes.length).toBe(2);
+    expect(body.probes.map((p) => p.face).sort()).toEqual(["chat", "messages"]);
+    for (const probe of body.probes) {
+      expect(probe.dialect).toBe("anthropic");
+      // baseUrl 不带 /v1 ⇒ anthropicMessagesUrl 补全为 /v1/messages（不能变成 /v1/v1/messages）
+      expect(probe.url).toBe("https://api.anthropic.example/v1/messages");
+    }
+    expect(calls.map((c) => c.url).sort()).toEqual([
+      "https://api.anthropic.example/v1/messages",
+      "https://api.anthropic.example/v1/messages",
+    ]);
+
+    // 鉴权头：anthropic 方言 = x-api-key + version（Bearer 一处都不许出现）
+    for (const call of calls) {
+      expect(call.headers["x-api-key"]).toBe("sk-probe-secret");
+      expect(call.headers["anthropic-version"]).toBe("2023-06-01");
+      expect(call.headers["Authorization"]).toBeUndefined();
+    }
   });
 
-  it("逐条延迟真实回传：ttfb ≤ total，且总耗时 ≥ 上游延迟（三条并行而非串行）", async () => {
+  it("逐条延迟真实回传：ttfb ≤ total，且总耗时 ≥ 上游延迟（逐行并行而非串行）", async () => {
     const cookie = await adminCookie("n-probe-latency@test.dev");
     const provider = await createProvider(cookie, {
       name: "n-probe-latency",
@@ -249,7 +274,7 @@ describe("批次 N：POST /api/providers/:id/test", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
-      if (call.url.endsWith("/responses")) {
+      if (call.url.endsWith("/completions")) {
         return new Response("<html>502 Bad Gateway</html>", { status: 502, statusText: "Bad Gateway" });
       }
       throw new TypeError("fetch failed: ECONNREFUSED");
@@ -258,28 +283,28 @@ describe("批次 N：POST /api/providers/:id/test", () => {
     const res = await runTest(cookie, provider["id"]);
     expect(res.status).toBe(200);
     const body = (await res.json()) as ProbeBody;
-    const byProtocol = new Map(body.probes.map((p) => [p.protocol, p]));
+    const byFace = new Map(body.probes.map((p) => [p.face, p]));
 
-    const chat = byProtocol.get("openai-chat");
+    const chat = byFace.get("chat");
     expect(chat?.ok).toBe(false);
     expect(chat?.status).toBe(401);
     expect(chat?.error).toBe("Invalid API key provided");
 
     // 非 JSON 错误页 → 退回状态行（不能把整篇 HTML 塞进 UI）
-    const responses = byProtocol.get("openai-responses");
-    expect(responses?.ok).toBe(false);
-    expect(responses?.status).toBe(502);
-    expect(responses?.error).toBe("502 Bad Gateway");
+    const completions = byFace.get("completions");
+    expect(completions?.ok).toBe(false);
+    expect(completions?.status).toBe(502);
+    expect(completions?.error).toBe("502 Bad Gateway");
 
     // 网络层失败没有 HTTP 状态可言
-    const messages = byProtocol.get("anthropic-messages");
-    expect(messages?.ok).toBe(false);
-    expect(messages?.status).toBeNull();
-    expect(messages?.error).toContain("ECONNREFUSED");
+    const embeddings = byFace.get("embeddings");
+    expect(embeddings?.ok).toBe(false);
+    expect(embeddings?.status).toBeNull();
+    expect(embeddings?.error).toContain("ECONNREFUSED");
     // 不变式（UI 赖它分派两个分支）：status === null ⟺ 两个耗时取同一个数。
     // provider-test-dialog 用 `status !== null` 在「TTFB + Total」与「Elapsed」之间二选一，
     // 所以这条一破，UI 上就会出现「没有响应却标着 TTFB」。
-    expect(messages?.ttfbMs).toBe(messages?.totalMs);
+    expect(embeddings?.ttfbMs).toBe(embeddings?.totalMs);
   });
 
   it("超时：按 provider 配置的 upstreamTimeoutMs 触发，且实际用的超时随响应回传", async () => {
@@ -341,7 +366,7 @@ describe("批次 N：POST /api/providers/:id/test", () => {
       // 字面量 30000 是**产品决定**（PRD：诊断请求最多等 30s），不是实现的回声 ——
       // 故意不 import PROBE_TIMEOUT_CAP_MS，否则改常量时断言会跟着漂移，封顶就没人守了。
       expect(body.timeoutMs, name).toBe(30_000);
-      // 上游秒回 ⇒ 三条都成功：顺带证明这里**没有真等 30s**
+      // 上游秒回 ⇒ 逐行都成功：顺带证明这里**没有真等 30s**
       expect(
         body.probes.every((p) => p.ok),
         name,
@@ -388,7 +413,7 @@ describe("批次 N：POST /api/providers/:id/test", () => {
     });
     // 关键：fetch **已经 resolve 了**（响应头在），故 fetchUpstream 的 AbortController 已经作废。
     // 没有正文侧的上界时，这条探测会永远挂在 `await resp.text()` 上 —— 弹窗停在
-    // 「Probing three protocols…」而 UI 上还印着 timeout 30s。
+    // 「Probing the declared endpoints…」而 UI 上还印着 timeout 30s。
     stubUpstream(() => bodyNeverEnds());
 
     const started = Date.now();
@@ -496,5 +521,78 @@ describe("批次 N：POST /api/providers/:id/test", () => {
     const res = await runTest(admin, empty?.id);
     expect(res.status).toBe(400);
     await db.delete(providers).where(eq(providers.id, empty?.id ?? 0));
+  });
+
+  it("AC10 判别性：配错 A 面 baseUrl ⇒ A 行红且 B 行仍绿（逐面 baseUrl 各打各的）", async () => {
+    const cookie = await adminCookie("b6-probe-misconfig@test.dev");
+    // 夹具判别力：主端点与两面 baseUrl 三者**两两不同**——任两者相同，下面的断言就分不清
+    // 「行 URL 来自面的 baseUrl」还是「偷打主端点」（[[assertion-must-be-effect-not-derived]]）
+    const GOOD_BASE = "https://good-face.example/v1";
+    const BAD_BASE = "https://bad-face.example/v1";
+    expect(new Set([GOOD_BASE, BAD_BASE, "https://shared-main.example"]).size).toBe(3);
+    const provider = await createProvider(cookie, {
+      name: "b6-probe-misconfig",
+      type: "custom",
+      baseUrl: "https://shared-main.example",
+      apiKey: "sk-probe-secret",
+      models: { [INTERNAL_MODEL]: UPSTREAM_MODEL },
+      // verbatim 面：面 baseUrl 才参与 URL（convert 一律打主端点——那是解析层主端点规则，
+      // 本用例要的正是「两面各打各的 URL」的判别力）
+      protocols: {
+        chat: { policy: "verbatim", baseUrl: GOOD_BASE },
+        completions: { policy: "verbatim", baseUrl: BAD_BASE },
+      },
+    });
+    const calls = stubUpstream((call) =>
+      call.url.startsWith("https://good-face.example/")
+        ? ok200()
+        : new Response("face misconfigured", { status: 503, statusText: "Service Unavailable" }),
+    );
+
+    const res = await runTest(cookie, provider["id"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ProbeBody;
+
+    // 声明面完全取代隐式面表：恰好两行（custom 记录没有隐式面，更没有侦察行）
+    expect(body.probes.length).toBe(2);
+    const byFace = new Map(body.probes.map((p) => [p.face, p]));
+    const good = byFace.get("chat");
+    const bad = byFace.get("completions");
+    // B 行仍绿：URL 由它**自己声明**的 baseUrl 拼出（与主端点无关）
+    expect(good?.ok).toBe(true);
+    expect(good?.url).toBe("https://good-face.example/v1/chat/completions");
+    // A 行红：错的是 A 自己的 baseUrl，不连坐 B
+    expect(bad?.ok).toBe(false);
+    expect(bad?.status).toBe(503);
+    expect(bad?.url).toBe("https://bad-face.example/v1/completions");
+    // 实际调用与行 URL 一一对应——没有行偷打主端点（主端点值两两不同，出现即红）
+    expect(calls.map((c) => c.url).sort()).toEqual([
+      "https://bad-face.example/v1/completions",
+      "https://good-face.example/v1/chat/completions",
+    ]);
+  });
+
+  it("custom 记录 protocols 损坏（DB 直改绕过校验）⇒ /test 400 带解析错误，一行都不发", async () => {
+    const cookie = await adminCookie("b6-probe-broken@test.dev");
+    const provider = await createProvider(cookie, {
+      name: "b6-probe-broken",
+      type: "custom",
+      baseUrl: "https://upstream.example/v1",
+      apiKey: "sk-probe-secret",
+      models: { [INTERNAL_MODEL]: UPSTREAM_MODEL },
+      protocols: { chat: { policy: "convert" } },
+    });
+    const db = createDb(env);
+    await db
+      .update(providers)
+      .set({ protocols: "not-even-json" })
+      .where(eq(providers.id, Number(provider["id"])));
+
+    const calls = stubUpstream(() => ok200()); // 若被打到即失败
+    const res = await runTest(cookie, provider["id"]);
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("cannot be resolved");
+    // 解析失败先行：一行探测都不该发出去
+    expect(calls).toEqual([]);
   });
 });

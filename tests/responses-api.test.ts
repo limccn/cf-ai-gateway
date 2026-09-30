@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { env } from "cloudflare:test";
 import { AdapterError } from "../src/providers/types";
 import {
+  assertStatelessResponsesBody,
   buildInternalFromResponses,
   transformResponseToResponses,
   transformStreamToResponses,
@@ -725,6 +726,32 @@ describe("buildInternalFromResponses（入站映射）", () => {
     expect(() =>
       buildInternalFromResponses({ model: MODEL, input: "hi", conversation: "conv_1" }),
     ).toThrow(AdapterError);
+  });
+
+  it("assertStatelessResponsesBody：两字段各自抛出、文案逐字节精确；干净体（含未知字段）不抛（批次 9 前置，边界 C）", () => {
+    // 文案逐字节精确：toThrow(new AdapterError(...)) 断言 message **相等**（非子串）
+    expect(() =>
+      assertStatelessResponsesBody({ input: "hi", previous_response_id: "resp_prev-x" }),
+    ).toThrow(
+      new AdapterError(
+        "previous_response_id is not supported by this gateway; include the full input items in each request (stateless mode)",
+      ),
+    );
+    expect(() =>
+      assertStatelessResponsesBody({ input: "hi", conversation: "conv-x" }),
+    ).toThrow(
+      new AdapterError(
+        "conversation is not supported by this gateway; include the full input items in each request (stateless mode)",
+      ),
+    );
+    // 类钉：proxy 候选循环的 catch 与 toInternalSafe 都靠 instanceof AdapterError 归一 400
+    // （verbatimRequest 的显式执行走前者）——类丢了 = 400 语义丢失，必须单独钉
+    expect(() => assertStatelessResponsesBody({ conversation: "conv-x" })).toThrow(AdapterError);
+    // 干净体（未知字段 + 随机标记值 ≠ 任何已知常量）→ 不抛：红线只看两字段，开集字段不拦
+    const marker = `rnd-${crypto.randomUUID()}`;
+    expect(() =>
+      assertStatelessResponsesBody({ input: "hi", vendor_stateless_probe: marker }),
+    ).not.toThrow();
   });
 
   it("平台专属字段（store/metadata/include 等）丢弃，不进内部形态", () => {
@@ -1449,6 +1476,20 @@ describe("端到端：错误码（OpenAI 形态错误体）", () => {
     const res = await postResponses(
       plaintext,
       JSON.stringify({ model: MODEL, input: "hi", previous_response_id: "resp_123" }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body["error"]?.["message"]).toContain("stateless");
+    expect(await countTxByType(userId, "usage")).toBe(0);
+  });
+
+  it("400 conversation → 同一红线同文案（路由级；与 previous_response_id 各自命中同一提取函数）", async () => {
+    const userId = await setupUser("resp-400-conv@test.dev", 10);
+    const { plaintext } = await setupKey(userId);
+    await setupProviderWithModel(MODEL);
+    const res = await postResponses(
+      plaintext,
+      JSON.stringify({ model: MODEL, input: "hi", conversation: "conv_route_x" }),
     );
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { message: string } };

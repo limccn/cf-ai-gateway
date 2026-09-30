@@ -235,6 +235,37 @@ describe("usage 缓存 token 提取", () => {
   it("extractLooseUsage 对无 usage 返回 null（免计路径）", () => {
     expect(extractLooseUsage({ id: "x", choices: [] })).toBeNull();
   });
+
+  it("extractLooseUsage 兜底：Responses 原生形态（input_tokens/output_tokens + input_tokens_details）", () => {
+    expect(
+      extractLooseUsage({
+        usage: {
+          input_tokens: 30,
+          output_tokens: 12,
+          total_tokens: 42,
+          input_tokens_details: { cached_tokens: 7 },
+          output_tokens_details: { reasoning_tokens: 5 },
+        },
+      }),
+    ).toEqual({ promptTokens: 30, completionTokens: 12, cachedTokens: 7 });
+  });
+
+  it("extractLooseUsage：chat 两键与 Responses 两键并存 → chat 键优先（既有形态回归锚）", () => {
+    expect(
+      extractLooseUsage({
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 50,
+          input_tokens: 30,
+          output_tokens: 12,
+        },
+      }),
+    ).toEqual({ promptTokens: 100, completionTokens: 50, cachedTokens: undefined });
+  });
+
+  it("extractLooseUsage：chat 与 Responses 形态 token 键全缺 → null（免计路径不变）", () => {
+    expect(extractLooseUsage({ usage: { total_tokens: 42 } })).toBeNull();
+  });
 });
 
 describe("chargeUsage 扣费（D2 债务模型）", () => {

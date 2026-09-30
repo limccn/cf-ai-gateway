@@ -108,8 +108,14 @@ export async function findModelPrice(db: Db, model: string): Promise<ModelPrice 
 }
 
 /**
- * 宽松提取 usage（适配器 parseUsage 返回 null 时兜底，如 embeddings 仅 prompt_tokens）。
+ * 宽松提取 usage（适配器 parseUsage 返回 null 时兜底，如 embeddings 仅 prompt_tokens、
+ * Responses 原生面 input_tokens/output_tokens）。
  * 顶层 usage 对象中任一 token 数字存在即可；缺失项按 0 计；负数防御性截为 0。
+ * 两种形态（批次 9 缺陷修复）：**chat 两键优先**（prompt_tokens/completion_tokens ——
+ * 既有形态逐字节回归锚，embeddings 等仅 chat 键的调用点行为不变）；chat 两键全缺时
+ * 回退 **Responses 原生**（input_tokens/output_tokens —— /v1/responses verbatim 直通的
+ * 非流式体不落在 adapter.parseUsage 的 chat 口径上）。缓存细分与 token 键同形态：
+ * chat 用 prompt_tokens_details、Responses 用 input_tokens_details。
  */
 export function extractLooseUsage(body: unknown): TokenUsage | null {
   if (!body || typeof body !== "object") {
@@ -120,16 +126,22 @@ export function extractLooseUsage(body: unknown): TokenUsage | null {
     return null;
   }
   const u = usage as Record<string, unknown>;
-  const prompt = u["prompt_tokens"];
-  const completion = u["completion_tokens"];
+  // chat 两键优先；两键**均非数字**（含全缺）→ Responses 原生形态回退（不跨形态混取）：
+  // 任一 chat 键为数字即按 chat 形态取值，非法项按 0 计——与既有「任一 token 数字存在即可」
+  // 的宽松口径一致
+  const chatShaped =
+    typeof u["prompt_tokens"] === "number" || typeof u["completion_tokens"] === "number";
+  const prompt = chatShaped ? u["prompt_tokens"] : u["input_tokens"];
+  const completion = chatShaped ? u["completion_tokens"] : u["output_tokens"];
   if (typeof prompt !== "number" && typeof completion !== "number") {
     return null;
   }
   const promptTokens = typeof prompt === "number" && Number.isFinite(prompt) ? Math.max(0, prompt) : 0;
   const completionTokens =
     typeof completion === "number" && Number.isFinite(completion) ? Math.max(0, completion) : 0;
-  // OpenAI 形态缓存细分（prompt_tokens_details.cached_tokens）；缺失按 undefined（≈0 计）
-  const details = u["prompt_tokens_details"];
+  // 缓存细分（与 token 键同形态）：chat prompt_tokens_details / Responses input_tokens_details；
+  // 缺失按 undefined（≈0 计）
+  const details = chatShaped ? u["prompt_tokens_details"] : u["input_tokens_details"];
   const cachedRaw =
     details && typeof details === "object"
       ? (details as Record<string, unknown>)["cached_tokens"]

@@ -235,6 +235,17 @@ export const providers = sqliteTable(
     // 上游超时（毫秒，09-01-stg-glm-ccswitch-fix）：NULL ≡ 默认 60s（DEFAULT_UPSTREAM_TIMEOUT_MS）。
     // 长生成模型（如 b.ai glm-5.3-flash）慢生成易撞默认超时 → 按 provider 调大。
     upstreamTimeoutMs: integer("upstream_timeout_ms"),
+    // 厂商身份标签（09-28-upstream-custom-type-passthrough D1）：可空。preset 只是记录上的
+    // 标签（建档预填来源），**运行时零感知**——档案本体是代码 const（src/providers/presets.ts，
+    // 批次 5）；proxy / 适配器不得出现任何厂商名分支（AC2）。
+    preset: text("preset"),
+    // 协议面声明（同任务）：JSON 字符串（与 models 列同惯例），NULL ≡ 未声明。
+    // 语义（解析真源 = src/providers/endpoints.ts）：出现某面 = 该上游支持该面（不出现 ⇒
+    // 路由不命中该面）；面内省略 baseUrl ⇒ 继承 base_url（不复制 URL，避免两份漂移）；
+    // 省略 policy ⇒ 取该面默认（messages/chat = verbatim，其余 = convert）。
+    // 遗留等价规则：protocols=NULL 时按 type 复现今天的隐式面表（openai 3 面 / anthropic
+    // 2 面，messages 面 streamPassthrough=true = P2a 字节直通的恒等复现）。
+    protocols: text("protocols"),
     enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()

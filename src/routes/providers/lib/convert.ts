@@ -3,7 +3,28 @@ import type { Provider } from "../../../db/schema";
 import { maskHeaderValue, maskSecret } from "../../../lib/mask";
 import { parseProviderModels } from "../../../lib/provider-models";
 import type { HttpOptions } from "../../../providers/types";
-import type { ProviderResponse, ProviderType, ThinkingMode } from "../types";
+import type { ProviderProtocols, ProviderResponse, ProviderType, ThinkingMode } from "../types";
+import { providerProtocolsSchema } from "../types";
+
+/**
+ * providers.protocols JSON 列 → 输出结构（09-28 批次 5）。
+ * NULL / 空 / 损坏 ⇒ null（响应侧按「未声明」省略整键）。与 parseProviderModels 的
+ * 防御性兜底同惯例：响应构造不该因一条坏行 500；运行时语义由解析真源
+ * （src/providers/endpoints.ts 的 parseDeclaredProtocols）另行 fail-fast，两层独立。
+ */
+function parseProviderProtocols(raw: string | null): ProviderProtocols | null {
+  if (raw === null || raw === "") {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const result = providerProtocolsSchema.safeParse(parsed);
+  return result.success ? result.data : null;
+}
 
 /**
  * DB providers 行 → API 响应。
@@ -11,6 +32,9 @@ import type { ProviderResponse, ProviderType, ThinkingMode } from "../types";
  * - models 列是 JSON 字符串，解析失败按空映射处理（不应发生，防御性兜底）。
  * - httpOptions（解密后的明文）：headers 值一律掩码（`****abcd`），body 与 userAgent 明文；
  *   未配置（null）→ 空对象。
+ * - preset / protocols（09-28 批次 5，AC1 后半）：**null ⇒ 整键省略**——存量行（两列全
+ *   NULL）的响应逐字节不变（旧客户端零感知），有值才输出（AC1 序列化断言用
+ *   Object.keys 锁「键在场/缺席」，不是 `=== undefined` 的恒真形态）。
  */
 export function toProviderResponse(
   provider: Provider,
@@ -21,6 +45,8 @@ export function toProviderResponse(
   for (const [name, value] of Object.entries(httpOptions?.headers ?? {})) {
     headers[name] = maskHeaderValue(value);
   }
+  const preset = provider.preset ?? null;
+  const protocols = parseProviderProtocols(provider.protocols);
   return {
     id: provider.id,
     name: provider.name,
@@ -46,6 +72,9 @@ export function toProviderResponse(
       headers,
       body: httpOptions?.body ?? {},
     },
+    // 09-28 批次 5：null ⇒ 键整个省略（条件展开，不用 `as` 撒谎）
+    ...(preset !== null ? { preset } : {}),
+    ...(protocols !== null ? { protocols } : {}),
     createdAt: provider.createdAt.toISOString(),
   };
 }
