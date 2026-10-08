@@ -34,6 +34,7 @@
     "src/routes/settings/types.ts",
     "src/routes/billing/types.ts",
     "src/routes/onboarding/types.ts",
-    "src/routes/profile/types.ts"
+    "src/routes/profile/types.ts",
+    "src/routes/invites/types.ts"
   ]
 }

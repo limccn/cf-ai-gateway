@@ -6,7 +6,8 @@
 //   4. GET /api/health（public）+ GET /api/config（public）
 //   5. authRateLimit 挂载 /api/auth/*（认证面限流，09-28-auth-rate-limit-fix / security-audit F1）
 //      —— **必须先于 authRouter 注册**，否则永远不跑
-//   6. /api/auth/*（Better Auth，public）—— 必须先于 requireSession 注册
+//   6. /api/auth/*（Better Auth，public）与 /api/invites/validate（批次 U 公开预校验，
+//      同挂 authRateLimit）—— 必须先于 requireSession 注册
 //   7. requireSession 挂载 /api/*（未登录 401）
 //   8. 管理面模块路由（/api/users、/api/keys、/api/providers 等）
 //   9. notFound 兜底：/api/* 与 /v1/* 返回 JSON 404；其余路径交给 env.ASSETS 托管
@@ -21,6 +22,7 @@ import { authRateLimit } from "./middleware/auth-rate-limit";
 import { requireSession } from "./middleware/auth";
 import { apiBaseUrl, platformBaseUrl } from "./lib/domains";
 import authRouter from "./routes/auth/router";
+import invitesRouter from "./routes/invites/router";
 import seedRouter from "./routes/seed/router";
 import usersRouter from "./routes/users/router";
 import keysRouter from "./routes/keys/router";
@@ -103,6 +105,12 @@ app.use("/api/auth/*", authRateLimit());
 
 // Better Auth（public）：必须先于 requireSession 注册
 app.route("/api/auth", authRouter);
+
+// 邀请码预校验（批次 U，D29/D30）：GET /api/invites/validate —— 注册页**公开**端点
+// （未登录 200），必须先于下面的 requireSession 注册（否则注册页拿到 401、预校验整条失效）。
+// 限流先于路由挂载（同 /api/auth/* 的顺序纪律）：路径白名单在 auth-rate-limit.ts（credential 桶）。
+app.use("/api/invites/validate", authRateLimit());
+app.route("/api/invites", invitesRouter);
 
 // 测试用户初始化（dev-only）：POST /api/seed/users —— 必须先于 requireSession 注册；
 // 路由内部按 env.SEED_USERS 存在与否 gating（未配置 → 404，生产零暴露）
