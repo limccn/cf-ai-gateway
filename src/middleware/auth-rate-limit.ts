@@ -49,6 +49,11 @@ const BUCKET_BY_PATH: ReadonlyMap<string, AuthRateLimitBucket> = new Map([
   ["/api/auth/send-verification-email", "email"],
   ["/api/auth/request-password-reset", "email"],
   ["/api/auth/sign-up/email", "email"],
+  // 批次 U（D30）：注册页邀请码预校验（GET /api/invites/validate，**匿名可打**）——
+  // 不在 better-auth 路径表内（上面几条才是逐条比对 createAuthEndpoint 的产物）。
+  // 按「凭据猜测」口径压进 credential 桶：复用 AUTH_CREDENTIAL_LIMIT binding ⇒ 零 toml 改动。
+  // 与登录共享计数（校验 1 次 + 登录 ≤9 次每分钟）—— 副作用已由 prd D30 认可。
+  ["/api/invites/validate", "credential"],
 ]);
 
 /** 纯函数：请求路径落在哪个桶；不在白名单内则 `null`（导出供单测直接锁路径表）。 */

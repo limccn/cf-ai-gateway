@@ -28,6 +28,7 @@ import {
 } from "../../src/lib/admin-promotion-policy";
 import { formatDateTime, formatUsd } from "@/lib/format";
 import { copyToClipboard } from "@/lib/clipboard";
+import { buildInviteLink } from "@/lib/invite-link";
 import { PageContainer } from "@/components/layout/page-container";
 import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
@@ -179,8 +180,11 @@ export default function UsersPage() {
     setDeleteTarget(target);
   };
 
+  /** 复制**邀请链接**（D28，批次 U）：{origin}/register?invite={CODE} ——
+   *  收到链接的人点开即自动填充邀请码，码明文含在链接里（不再是裸码）。
+   *  copiedCode 仍以**裸码**为键（行内高亮与 aria-label 切换的判据不变）。 */
   const handleCopy = async (code: string) => {
-    const ok = await copyToClipboard(code);
+    const ok = await copyToClipboard(buildInviteLink(code, window.location.origin));
     if (ok) {
       setCopiedCode(code);
       setCopyError(null);
@@ -234,8 +238,9 @@ export default function UsersPage() {
                       </p>
                     </div>
                     {/* 只有图标（批次 L，2026-09-21 用户裁决：copy 按钮统一去文字）。
-                        一张卡一个按钮、编号还挨着，可访问名必须点名**是哪条**邀请码，
-                        否则屏幕阅读器只报一串同名的 "Copy"。成对复制按钮的新范式见 keys 页。 */}
+                        复制的是**邀请链接**（批次 U D28）；可访问名必须点名**是哪条**邀请码
+                        （aria-label 含码是探针唯一的行级定位器 —— 批次 R D23 三要件），
+                        否则屏幕阅读器只报一串同名的 "Copy invite link"。 */}
                     <Button
                       variant="ghost"
                       size="icon"
@@ -243,7 +248,7 @@ export default function UsersPage() {
                       onClick={() => handleCopy(invite.code)}
                       disabled={invite.status !== "active"}
                       aria-label={
-                        copiedCode === invite.code ? "Copied" : `Copy invite code ${invite.code}`
+                        copiedCode === invite.code ? "Copied" : `Copy invite link ${invite.code}`
                       }
                     >
                       {copiedCode === invite.code ? (
@@ -598,7 +603,7 @@ export default function UsersPage() {
                 variant="outline"
                 size="icon"
                 onClick={() => handleCopy(createdCode)}
-                aria-label={copiedCode === createdCode ? "Copied" : "Copy invite code"}
+                aria-label={copiedCode === createdCode ? "Copied" : `Copy invite link ${createdCode}`}
               >
                 {copiedCode === createdCode ? (
                   <Check className="text-success" aria-hidden="true" />

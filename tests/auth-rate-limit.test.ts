@@ -110,6 +110,10 @@ describe("authRateLimitBucket — 路径→桶映射（纯函数）", () => {
     expect(authRateLimitBucket("/api/auth/sign-up/email")).toBe("email");
   });
 
+  it("批次 U（D30）：/api/invites/validate 落 credential 桶（复用 AUTH_CREDENTIAL_LIMIT，零 toml 改动）", () => {
+    expect(authRateLimitBucket("/api/invites/validate")).toBe("credential");
+  });
+
   it("未列举端点一律 null（不限流也不耗配额）", () => {
     for (const path of [
       "/api/auth/get-session",

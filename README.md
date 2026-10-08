@@ -179,6 +179,7 @@ Management API (session auth, roles `admin`/`member`):
 | Endpoint | Access | Description |
 | --- | --- | --- |
 | `/api/auth/*` | public | Better Auth (email/password, GitHub OAuth) |
+| `/api/invites/validate` | public | Pre-check an invite code before sign-up (`valid: true/false`, non-consuming, rate-limited) |
 | `/api/me/usage` | member | Own usage aggregates + details (paged) |
 | `/api/me/transactions` | member | Own balance ledger (paged, type/time filters) |
 | `/api/keys` | member/admin | Own gateway keys CRUD (admin sees all) |
