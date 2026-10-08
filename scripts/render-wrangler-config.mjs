@@ -41,6 +41,9 @@ import {
   extractWorkerNames,
   renderBySection,
 } from "./lib/toml-sections.mjs";
+// 白名单 TOKENS + SEED_USERS 结构闸门（AC7）在纯模块 render-tokens.mjs —— 单测（Workers pool，
+// 无 node:fs）与本脚本 import **同一份真源**，白名单不再有两处拷贝。原位注释随 Set 一并移走。
+import { TOKENS, assertSeedUsersNeverConfigured } from "./lib/render-tokens.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const TEMPLATE_PATH = join(ROOT, "wrangler.toml.template");
@@ -48,43 +51,8 @@ const OUTPUT_PATH = join(ROOT, "wrangler.toml");
 const DOT_VARS = join(ROOT, ".dev.vars");
 const DOT_VARS_STAGING = join(ROOT, ".dev.vars.staging");
 
-// 白名单：与 .trellis/spec/governance/config-inventory.md「RENDER-ENV 移管清单」一一对应（22 键）。
-// 计数口径 = 本集合元素个数（非模板 {TOKEN} 出现次数：同名 token 在顶层段与环境段各出现一次）。
-// 顶层 [vars] 运行时配置（BETTER_AUTH_URL 等）与 infra 键同策略烘焙——wrangler 4.x 不解析
-// {KEY}，值必须在构建期就位。本地默认值（localhost / 占位）来自 .dev.vars，仅用于本地 dev
-// （wrangler dev 时 .dev.vars 优先于 [vars]，不受影响）；部署真实值走 shell export 覆盖。
-const TOKENS = new Set([
-  // --- infra 结构键（基段与管理段同名共用；值文件各给一份） ---
-  "WORKER_NAME",
-  "DOMAIN",
-  // 双域名分流（09-21-dual-domain-split）：API_DOMAIN = 公开 API 域（基段与 stg 段各一份值）。
-  "API_DOMAIN",
-  // 旧域转发源（prod = router.lmlh.net / stg = stg-router.lmlh.net）：**两段各一条 routes**，
-  // 故两个值文件都必须有该键（缺基段那份 ⇒ 基段第三条 route 无值可烘，fail-fast）。仅用于绑定：
-  // 中间件不读它（「host 不属于两类新域 ⇒ 按路径转发」已涵盖）。校验按「模板中实际出现的
-  // (token, 段)」逐条判定，**不比对两个值文件的键集合**。
-  "LEGACY_DOMAIN",
-  "D1_DB_NAME",
-  "D1_DB_ID",
-  "KV_ID",
-  "QUEUE_NAME",
-  "BILLING_QUEUE_NAME",
-  // --- [vars] 运行时配置（基段 = .dev.vars / 环境段 = .dev.vars.staging） ---
-  "API_KEY_PREFIX",
-  "BETTER_AUTH_URL",
-  "GITHUB_CLIENT_ID",
-  "GITHUB_ALLOWED_EMAILS",
-  "REQUEST_LOG_RETENTION_DAYS",
-  "CACHE_ENABLED",
-  "MODELCAP_BASE_TOKENS",
-  "MODELCAP_MULTIPLIER",
-  "SIGNUP_BONUS_AMOUNT",
-  "EMAIL_VERIFY_BONUS_AMOUNT",
-  "EMAIL_VERIFICATION_ENABLED",
-  "EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED",
-  // 事务邮件收件人白名单（08-27-email-notification）：**空是合法配置**（= 全放行），见 EMPTY_ALLOWED。
-  "EMAIL_ALLOWED_RECIPIENTS",
-]);
+// 白名单 TOKENS：已移至 scripts/lib/render-tokens.mjs（上方 import；与单测共用同一真源，
+// 含 22 键口径与逐键注释、SEED_USERS 结构闸门 assertSeedUsersNeverConfigured）。
 
 /**
  * 允许空值的 token：空是**合法配置**（空 = 全放行，见 src/lib/email.ts 的 parseEmailAllowlist），
@@ -281,6 +249,11 @@ const residual = [...rendered.split(/\r?\n/)]
 if (residual.length) {
   fail(`渲染后仍残留未展开 token: ${[...new Set(residual)].join(", ")}`);
 }
+
+// --- SEED_USERS 结构闸门（AC7，10-08-open-source-release-prep）：白名单 / 模板 / 渲染产物
+// 三层字面零命中，命中即 fail-fast（未写出生成物）；`--check` 模式同样经过此闸门。
+// 判据与阳性控制在 tests/render-config.unit.test.ts（纯模块 render-tokens.mjs 与单测共用）。
+assertSeedUsersNeverConfigured({ tokens: TOKENS, templateText: template, renderedText: rendered });
 
 // --- 环境 worker 名不得等于顶层（R-E10）：wrangler 以此为环境标识，同名意味着 `--env <name>`
 // 会部署到生产 worker 上。现状靠值本身的差异恰好成立，改造后必须显式拦截。

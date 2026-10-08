@@ -1,5 +1,8 @@
 # AI API Gateway
 
+[![CI](https://github.com/limccn/cf-ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/limccn/cf-ai-gateway/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 An **OpenAI-compatible AI API gateway** that proxies multiple model vendors
 (OpenAI-compatible APIs + Anthropic native) through a single entry point, with
 team key management, prepaid balance billing, rate limiting, response caching,
@@ -138,20 +141,20 @@ npx wrangler d1 execute cf-ai-gateway-db --local \
   node scripts/verify-m4.mjs         # billing, rate limit, cache, admin balance
   ```
 
-- **Acceptance verification record**: `CLAUDE.md §验收状态` (and the full spec
-  `.trellis/spec/governance/verification.md`) maps every PRD
+- **Acceptance verification record**: `CLAUDE.md §验收状态` maps every PRD
   acceptance criterion (AC1–AC9) to its verification method, commands, and
   result. AC6/AC9 (GitHub OAuth end-to-end + live deployment) are recorded as
-  executed against production and staging.
+  executed against production and staging. (The extended verification spec
+  lives in an internal, gitignored spec store and is not shipped with this
+  repository.)
 
 ## Deployment
 
 Live environments: **staging** `https://stg-platform.lmlh.net` (public API
-`https://stg-api.lmlh.net`) and **production** `https://router.lmlh.net`
-(this release moves it to `platform.lmlh.net` + `api.lmlh.net`). The legacy
-hostnames stay bound as forwarding sources, so existing `base_url` values keep
-working unchanged. Fully isolated resources — separate D1 / KV / Queues /
-secrets. Deploy with:
+`https://stg-api.lmlh.net`) and **production** `https://platform.lmlh.net`
+(public API `https://api.lmlh.net`). The legacy hostnames stay bound as
+forwarding sources, so existing `base_url` values keep working unchanged.
+Fully isolated resources — separate D1 / KV / Queues / secrets. Deploy with:
 
 ```bash
 npm run build
@@ -165,8 +168,9 @@ npx wrangler deploy --config wrangler.toml --env staging
 
 Deployment from scratch (create D1 / KV / Queue → migrate → secrets → GitHub
 OAuth App → first admin bootstrap → deploy → verify) is documented in
-**[`CLAUDE.md`](./CLAUDE.md) §部署要点** (full manual: local Trellis spec
-`.trellis/spec/governance/deployment.md`). The repository ships with
+**[`CLAUDE.md`](./CLAUDE.md) §部署要点** (the extended manual lives in an
+internal, gitignored spec store and is not shipped with this repository).
+The repository ships with
 `wrangler.toml.template` + `.dev.vars.example` — `wrangler.toml` is a gitignored
 generated file, so run `npm run render:config` (or `npm install` + pre-hooks)
 before any deploy. Validate without uploading via
@@ -249,8 +253,8 @@ both are accepted at every proxy entry point (`x-api-key` falls back when
   client secrets via `wrangler secret put`, real upstream provider keys
   configured through the admin console) — see `CLAUDE.md §部署要点` for the
   production checklist. Live deployment is done (staging
-  `stg-platform.lmlh.net`; production `router.lmlh.net`, moving to
-  `platform.lmlh.net` + `api.lmlh.net` with this release).
+  `stg-platform.lmlh.net`; production `platform.lmlh.net` + `api.lmlh.net`,
+  with `router.lmlh.net` kept as a legacy forwarding source).
 
 ## Project layout
 
@@ -264,6 +268,6 @@ src/                 Worker backend (Hono)
 app/                 React SPA (React Router v7, React Query, Tailwind)
 tests/               Vitest + Miniflare suite
 scripts/             mock upstream + E2E verification scripts
-CLAUDE.md            knowledge entry (git workflow / env config / deploy / AC summary; full specs: local .trellis/spec/governance/)
+CLAUDE.md            knowledge entry (git workflow / env config / deploy / AC summary; extended specs live in a local, gitignored store — not shipped)
 drizzle/             SQL migrations
 ```

@@ -18,6 +18,7 @@ import {
   renderBySection,
   sectionOf,
 } from "../scripts/lib/toml-sections.mjs";
+import { SEED_USERS_KEY, TOKENS, assertSeedUsersNeverConfigured } from "../scripts/lib/render-tokens.mjs";
 import template from "../wrangler.toml.template?raw";
 
 /** 段内 ALL_CAPS 键名 —— `[vars]` 的键全是大写，而 name / pattern / assets 是小写，天然排除。 */
@@ -417,5 +418,46 @@ describe("真实模板 wrangler.toml.template 的结构契约", () => {
     expect(byName(env, "AUTH_EMAIL_LIMIT").namespaceId).toBe("2002");
     const baseNs = base.map((b) => b.namespaceId);
     expect(baseNs.some((ns) => env.some((b) => b.namespaceId === ns))).toBe(false);
+  });
+});
+
+describe("SEED_USERS 渲染闸门（AC7，10-08-open-source-release-prep）", () => {
+  // 真源断言：TOKENS 由渲染脚本与本测试 import **同一模块**（scripts/lib/render-tokens.mjs），
+  // 非拷贝；渲染脚本在写出 wrangler.toml 前也调用同一闸门（结构性阻断），本组是其判据的单测面。
+  it("真源白名单 TOKENS 不含 SEED_USERS", () => {
+    expect([...TOKENS]).not.toContain(SEED_USERS_KEY);
+    // 规模下界防空集合恒真（白名单空掉时 not.toContain 平凡成立 = 恒假绿）；只卡下界，
+    // 将来合法加键不破坏本断言，render 的「模板有、白名单无 ⇒ fail」另管收窄方向。
+    expect(TOKENS.size).toBeGreaterThanOrEqual(22);
+  });
+
+  it("真实模板 wrangler.toml.template 不含 SEED_USERS 字面", () => {
+    expect(template).not.toContain(SEED_USERS_KEY);
+    expect(template.length).toBeGreaterThan(0);
+  });
+
+  // 阳性控制（design §4：塞入输入必须红）——三条注入各自证伪，证明闸门有牙而非恒真函数。
+  it("阳性控制：白名单注入 ⇒ throw", () => {
+    expect(() => assertSeedUsersNeverConfigured({ tokens: new Set([...TOKENS, SEED_USERS_KEY]) })).toThrow(
+      /SEED_USERS/,
+    );
+  });
+
+  it("阳性控制：模板注入 ⇒ throw", () => {
+    expect(() => assertSeedUsersNeverConfigured({ templateText: `${template}\nSEED_USERS = "oops"` })).toThrow(
+      /SEED_USERS/,
+    );
+  });
+
+  it("阳性控制：渲染产物注入 ⇒ throw", () => {
+    expect(() => assertSeedUsersNeverConfigured({ renderedText: 'NAME = "x"\nSEED_USERS = "oops"' })).toThrow(
+      /SEED_USERS/,
+    );
+  });
+
+  it("干净输入 ⇒ 通过（闸门不是恒红）", () => {
+    expect(() =>
+      assertSeedUsersNeverConfigured({ tokens: TOKENS, templateText: template, renderedText: 'NAME = "x"' }),
+    ).not.toThrow();
   });
 });

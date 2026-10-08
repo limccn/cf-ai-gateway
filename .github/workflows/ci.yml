@@ -1,0 +1,52 @@
+# CI —— 零 secrets 的验证流水线（10-08-open-source-release-prep，AC4 / design §3）
+#
+# 设计红线：
+#   - `permissions: contents: read`（最小权限）；**零 `secrets.*` 引用**；无 curl 外传；
+#     第三方 action 仅 actions/checkout 与 actions/setup-node。
+#   - CI 无 `.dev.vars`，而 `pretest` 会跑 `render:config`（缺键 fail-fast）⇒ 用 example
+#     造占位值文件（example 含占位特征 ⇒ render 只 WARN 不阻断）。
+#   - 全量并行 miniflare isolate 会 OOM ⇒ 测试限 `--maxWorkers=2`。
+#   - 本地等效验证见 C3（备份 → 占位覆盖 → 三件套 → 还原），判据 = 退出码。
+
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # pretest/render 需要值文件；example 全占位 ⇒ 渲染 WARN（占位特征）而非 fail。
+      - name: Create placeholder value files
+        run: |
+          cp .dev.vars.example .dev.vars
+          cp .dev.vars.staging.example .dev.vars.staging
+
+      - name: Test
+        run: npm test -- --maxWorkers=2
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
