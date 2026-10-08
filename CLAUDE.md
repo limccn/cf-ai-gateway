@@ -1,8 +1,8 @@
 # CLAUDE.md — cf-ai-gateway
 
 > 本文件是仓库知识入口（2026-08-28 重建）：合并了原 `docs/` 下 6 份文档的要点。
-> 原文档已移管至本地 Trellis spec（`.trellis/spec/governance/`，**不入 git**）；全量细节在那里，本文档是已提交的权威摘要与索引。
-> 开发任务流程另见 `.trellis/workflow.md`。
+> 原文档已移管至本地 Trellis spec（`.trellis/spec/governance/`，**不入 git、不随仓库分发**——本文各处 `.trellis/*` 路径均为本地内部 spec，开源仓库里不存在）；全量细节在那里，本文档是已提交的权威摘要与索引。
+> 开发任务流程另见 `.trellis/workflow.md`（同为本地文件，不随仓库分发）。
 
 ## 项目概览
 
@@ -10,7 +10,7 @@ OpenAI 兼容的 **AI API 网关**：单入口代理多家模型供应商（Open
 
 - 管理 API：`/api/*`（Better Auth 会话鉴权，角色 admin/member）；代理 API：`/v1/*`、`/anthropic/*`（网关 key 鉴权）。
 - 技术栈：Cloudflare Workers（Wrangler v4+）、Hono、Drizzle ORM、D1（SQLite）、KV、Queues、Better Auth、Zod v4、React 19 + React Router v7 + Vite + Tailwind v4、Vitest + Miniflare。
-- 已上线：**staging** `https://stg-platform.lmlh.net`（公开 API `https://stg-api.lmlh.net`；旧域 `stg-router.lmlh.net` 保留为转发源）、**生产** `https://router.lmlh.net`（本次发布将切至 `platform.lmlh.net` + `api.lmlh.net`，旧域同样留作转发源）。资源完全隔离。
+- 已上线：**staging** `https://stg-platform.lmlh.net`（公开 API `https://stg-api.lmlh.net`；旧域 `stg-router.lmlh.net` 保留为转发源）、**生产** `https://platform.lmlh.net`（公开 API `https://api.lmlh.net`；旧域 `router.lmlh.net` 保留为转发源）。资源完全隔离。
 
 ## 常用命令
 
@@ -118,9 +118,11 @@ git branch -d feat/<name>                          # ⑤ 删除
 > 全量：`.trellis/spec/governance/security-audit.md`。
 
 - 2026-08-26 gitleaks 全历史 **0 命中**；历史 PII 已全量 squash 清除（`03352b0`），远程零 PII；备份在本地 tag `backup/develop-pre-reorg-20260827` + `/tmp/gw-backup.bundle`。
-- 本仓库无 CI、无 .github 目录；转公开前执行 security-audit.md 的 checklist（分支保护、Secrets 检查、SEED_USERS 确认等）。
+- 已有零-secrets 轻量 CI（`.github/workflows/ci.yml`：test / lint / typecheck，`permissions: contents: read`，不引用任何 secrets，占位值文件由 example 派生）；转公开前执行 security-audit.md 的 checklist（分支保护、Secrets 检查、SEED_USERS 确认等）。
 
 ## Spec 索引与工作流
+
+> 以下 `.trellis/*` 路径均为**本地内部 spec / 工作流文件**（gitignored，不随开源仓库分发）；链接仅供参考，仓库读者不可达。
 
 - Spec 主索引：`.trellis/spec/README.md`（backend / frontend / shared / guides / big-question / **governance**）。
 - Governance 类目（本仓库治理/运维全量）：`.trellis/spec/governance/index.md`。
