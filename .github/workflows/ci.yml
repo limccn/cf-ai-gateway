@@ -42,9 +42,14 @@ jobs:
           cp .dev.vars.example .dev.vars
           cp .dev.vars.staging.example .dev.vars.staging
 
-      # ASSETS 托管 SPA，domain-split 断言回退页 200；缺 dist/client ⇒ 404（run 37741798464/37868304226 根因）。
+      # 构建必须在渲染之后：@cloudflare/vite-plugin 按 wrangler.toml 的 assets 配置把前端产物
+      # 切到 dist/client；wrangler.toml 是 gitignored 生成物，不先渲染则插件回退单构建 outDir=dist/
+      # ⇒ dist/client 缺失 ⇒ 测试里 ASSETS SPA 回退 404（run 37741798464 / 37868304226 / 8872c6b 根因链）。
+      # pretest 在 Test 步会再渲染一次（幂等）。
       - name: Build
-        run: npm run build
+        run: |
+          npm run render:config
+          npm run build
 
       - name: Test
         run: npm test -- --maxWorkers=2
