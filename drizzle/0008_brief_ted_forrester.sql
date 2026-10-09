@@ -1,0 +1,1 @@
+ALTER TABLE `providers` ADD `reasoning_roundtrip` integer DEFAULT false NOT NULL;

@@ -1,0 +1,1 @@
+ALTER TABLE `providers` ADD `http_options_enc` text;

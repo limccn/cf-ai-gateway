@@ -1,0 +1,37 @@
+// 生成物（勿手改）：scripts/render-modelcaps.mjs 解析 seed.sql 生成。
+// 权威源 = seed.sql（全量替换语义）；cap/常数变更 → 重跑 npm run render:modelcaps + 部署。
+// O3c（09-11-kv-ops-optimization）：modelcap 常量权威快路径（design.md §3.1）。
+// 档位化（09-16 用户裁决）：值为**档位**（xlarge 式，null = 不限）——
+//   运行时 cap = MODELCAP_BASE_TOKENS × MODELCAP_MULTIPLIER × 档位
+//   （env [vars] 烘焙，缺省 8192 × 2 = 16384 基准；本文件按生成时常数推导档位）。
+//   档位为 0.5 的正整数倍（管理台 Max output 下拉提供 0.5x/1x/2x/4x/8x）。
+export const MODELCAPS: Record<string, number | null> = {
+  "claude-fable-5": 1,
+  "claude-fable-5.1": 1,
+  "claude-haiku-4.5": 1,
+  "claude-opus-4.5": 1,
+  "claude-opus-4.8": 1,
+  "claude-opus-5": 1,
+  "claude-sonnet-4.5": 1,
+  "claude-sonnet-4.6": 1,
+  "claude-sonnet-5": 1,
+  "deepseek-v4-pro": 1,
+  "deepseek-v4.1-flash": 4,
+  "glm-5.3": 2,
+  "glm-5.3-flash": 4,
+  "gpt-5.6-codex": 1,
+  "gpt-5.6-luna": 1,
+  "gpt-5.6-sol": 1,
+  "gpt-5.6-terra": 1,
+  "gpt-6-astra": 1,
+  "hy3": 4,
+  "hy4-preview": 1,
+  "kimi-k2.6": 4,
+  "kimi-k3": 1,
+  "mimo-v2.5": 2,
+  "mimo-v2.5-pro": 2,
+  "minimax-m3": 1,
+  "qwen3.8-27b": 4,
+  "qwen3.8-flash": 2,
+  "qwen3.8-max": 1,
+};

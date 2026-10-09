@@ -1,0 +1,40 @@
+{
+  // 前端（app/）独立 tsconfig：DOM lib + react-jsx，与 worker 侧（root tsconfig，workers-types lib）
+  // 隔离，避免 DOM 与 @cloudflare/workers-types 的全局类型冲突。
+  // 后端路由类型文件（src/routes/*/types.ts，纯 zod）纳入以共享 API 类型（spec type-safety.md）。
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["vite/client"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": ["./app/*"]
+    }
+  },
+  "include": [
+    "app",
+    "src/routes/keys/types.ts",
+    "src/routes/providers/types.ts",
+    "src/routes/models/types.ts",
+    "src/routes/users/types.ts",
+    "src/routes/usage/types.ts",
+    "src/routes/settings/types.ts",
+    "src/routes/billing/types.ts",
+    "src/routes/onboarding/types.ts",
+    "src/routes/profile/types.ts",
+    "src/routes/invites/types.ts"
+  ]
+}

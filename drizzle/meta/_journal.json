@@ -1,0 +1,104 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1787630976235,
+      "tag": "0000_long_maelstrom",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787632379820,
+      "tag": "0001_tricky_winter_soldier",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787634558453,
+      "tag": "0002_tidy_la_nuit",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787731096315,
+      "tag": "0003_model_price_tiers",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787763850544,
+      "tag": "0004_lyrical_nighthawk",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787826777186,
+      "tag": "0005_friendly_photon",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788167996936,
+      "tag": "0006_dry_stature",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788224902221,
+      "tag": "0007_thinking_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788240086392,
+      "tag": "0008_brief_ted_forrester",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1788244738131,
+      "tag": "0009_shallow_karnak",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789554208782,
+      "tag": "0010_cool_thunderbolts",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1790067825742,
+      "tag": "0011_lame_silver_fox",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1790134398471,
+      "tag": "0012_last_warlock",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1790578555219,
+      "tag": "0013_spooky_enchantress",
+      "breakpoints": true
+    }
+  ]
+}
