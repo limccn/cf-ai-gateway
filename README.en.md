@@ -1,5 +1,7 @@
 # AI API Gateway
 
+![AI API Gateway](doc/banner.png)
+
 [![CI](https://github.com/limccn/cf-ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/limccn/cf-ai-gateway/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -22,6 +24,46 @@ For individuals and teams who want to manage multiple model vendors in one place
 - Built-in rate limiting and response caching: over-quota requests are rejected automatically, repeated requests are faster and cheaper
 - Web admin console: view usage reports; manage keys, members and model prices
 - Data and keys stay in your own Cloudflare account (self-hosted)
+
+## Quick start
+
+Deploy your own instance to Cloudflare in three steps:
+
+1. **Clone and install**: `git clone <your-repo-url> cf-ai-gateway && cd cf-ai-gateway && npm install`
+2. **Configure environment variables**: `cp .dev.vars.example .dev.vars`, then fill in the required values as described in the next section
+3. **Deploy**: `npm run deploy` (builds the app, renders the config, and runs `wrangler deploy --config wrangler.toml` automatically)
+
+> Before your first deployment you also need to create the D1 / KV / Queue resources on Cloudflare, apply the database migrations, write in the secrets, and set up the first admin — see the full from-scratch checklist in [CLAUDE.md](CLAUDE.md) §部署要点.
+
+### Required environment variables and configuration
+
+All configuration lives in `.dev.vars` (copied from `.dev.vars.example`; the file is gitignored — **never commit it**). Three categories:
+
+**① Infrastructure identifiers** (no fallback values — any missing one fails the config render) — fill these in after creating your Cloudflare resources:
+
+| Key | Description |
+| --- | --- |
+| `WORKER_NAME` | Worker name (resources follow the `<worker>-<purpose>` naming convention) |
+| `DOMAIN` / `API_DOMAIN` / `LEGACY_DOMAIN` | Platform domain / public API domain / legacy forwarding domain |
+| `D1_DB_NAME` / `D1_DB_ID` | D1 database name / id |
+| `KV_ID` | KV namespace id |
+| `QUEUE_NAME` / `BILLING_QUEUE_NAME` | Usage-aggregation / billing queue names |
+
+**② Runtime values** (rendered into `wrangler.toml` `[vars]`):
+
+| Key | Description |
+| --- | --- |
+| `BETTER_AUTH_URL` | Full platform URL (e.g. `https://platform.example.com`) — **required**; without it the admin console redirects to localhost |
+| `GITHUB_CLIENT_ID` / `GITHUB_ALLOWED_EMAILS` | Optional — fill in only when GitHub sign-in is enabled (the callback URL must equal `https://<your-domain>/api/auth/callback/github`; an empty email whitelist = all logins rejected) |
+| `API_KEY_PREFIX` / `REQUEST_LOG_RETENTION_DAYS` | Gateway key prefix (default `sk-`) / request-log retention in days |
+| `CACHE_ENABLED`, `EMAIL_VERIFICATION_ENABLED` and other policy switches | All have safe defaults (default = off); leave empty and enable as needed |
+
+**③ Real secrets** (must **never** enter a file or the repo; write them per key on the deploy side with `wrangler secret put`):
+
+- `BETTER_AUTH_SECRET`, `GATEWAY_SECRET_KEY` — both required (the latter encrypts upstream vendor keys; generate independent random values, they must differ)
+- `GITHUB_CLIENT_SECRET` — only needed when GitHub sign-in is enabled
+
+Authoritative comments for each key live in `.dev.vars.example`; the full three-category rules and complete key list are in [CLAUDE.md](CLAUDE.md) §环境与配置.
 
 ## Integration examples
 
