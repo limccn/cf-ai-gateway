@@ -42,6 +42,10 @@ jobs:
           cp .dev.vars.example .dev.vars
           cp .dev.vars.staging.example .dev.vars.staging
 
+      # ASSETS 托管 SPA，domain-split 断言回退页 200；缺 dist/client ⇒ 404（run 37741798464/37868304226 根因）。
+      - name: Build
+        run: npm run build
+
       - name: Test
         run: npm test -- --maxWorkers=2
 
