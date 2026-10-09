@@ -9,7 +9,16 @@
 OpenAI 兼容的 **AI API 网关**：单入口代理多家模型供应商（OpenAI 兼容 + Anthropic 原生格式转换），提供团队 key 管理、预付费余额计费、限流、响应缓存、用量分析、Web 管理台。**100% Cloudflare**（Workers / D1 / KV / Queues），无外部服务。SDK 只换 base URL 即可接入。
 
 - 管理 API：`/api/*`（Better Auth 会话鉴权，角色 admin/member）；代理 API：`/v1/*`、`/anthropic/*`（网关 key 鉴权）。
-- 技术栈：Cloudflare Workers（Wrangler v4+）、Hono、Drizzle ORM、D1（SQLite）、KV、Queues、Better Auth、Zod v4、React 19 + React Router v7 + Vite + Tailwind v4、Vitest + Miniflare。
+技术栈（分层）：
+
+| 层 | 技术 |
+| --- | --- |
+| Runtime | Cloudflare Workers（单 Worker，`nodejs_compat`；Wrangler v4+）、Hono |
+| Data | D1（SQLite，Drizzle ORM）、KV（缓存 + 限流计数）、Queues（用量聚合） |
+| Auth | Better Auth（邮箱密码 + GitHub OAuth，D1 adapter） |
+| Validation | Zod（`zod` v4 + `@hono/zod-validator`） |
+| Frontend | React 19、React Router v7、Vite、Tailwind CSS v4、shadcn-style UI、React Query |
+| Quality | TypeScript strict、ESLint（flat config）、Vitest + Miniflare、drizzle-kit migrations |
 - 已上线：**staging** `https://stg-platform.lmlh.net`（公开 API `https://stg-api.lmlh.net`；旧域 `stg-router.lmlh.net` 保留为转发源）、**生产** `https://platform.lmlh.net`（公开 API `https://api.lmlh.net`；旧域 `router.lmlh.net` 保留为转发源）。资源完全隔离。
 
 ## 常用命令
@@ -110,8 +119,68 @@ git branch -d feat/<name>                          # ⑤ 删除
 
 - 本地：`npm test`（46 tests）+ `npm run lint` + `npm run typecheck` + `wrangler deploy --dry-run` 全绿。
 - E2E：`node scripts/mock-upstream.mjs`（:8788）+ `npm run dev` + `node scripts/verify-m3.mjs` / `verify-m4.mjs`（auth → keys → providers → /v1/* → 计费/限流/缓存）。
+- **单测清单（现状 10-08）**：`tests/` 共 75 个 `*.test.ts`，按域归组（下列省略 `.test.ts` 后缀）：
+  - 代理管线与协议（26）：anthropic-inbound、config-enhance、disguise、endpoint-face-gate、error-adapt、error-format、forward-headers.unit、http-options.unit、max-tokens-clamp、model-id.unit、model-mask.unit、protocol-detect、protocol-detect-integration、proxy-pipeline、reasoning-effort-mapping、responses-api、responses-reasoning-visibility、sdk-integration、stream-include-usage、stream-settle、stream-thinking-interop、thinking-passthrough、verbatim-engine、verbatim-fidelity、verbatim-passthrough、verbatim-response-side
+  - 计费/余额/用量（9）：billing、billing-queue、bonus.unit、model-price-display.unit、settings、signup-bonus、transactions、usage、usage-series.unit
+  - 限流/缓存（4）：auth-rate-limit、cache、rate-counter、rate-limit
+  - 供应商与模型配置（15）：modelcap-fastpath、modelcap-grid.unit、modelcaps.unit、models-api、multi-upstream、provider-declare-endpoint、provider-endpoints.unit、provider-form.unit、provider-key-mask.unit、provider-ping、provider-presets-route、provider-presets.unit、provider-router、provider-test-probe、provider-test-state.unit
+  - 认证/账户/邀请（13）：admin-promotion-policy.unit、admin-users-delete、admin-users-promotion-switch、api-keys、change-password、email、email-verification-send、invite-check.unit、invite-link.unit、invite-register、invite-validate、onboarding、profile
+  - 管理台 UI（3）：format、menu-position.unit、popover-position.unit
+  - 基础设施/配置（5）：domain-split、migration-rebuild、queue-dispatch、render-config.unit、seed-users
 - AC6/AC9 已线上验证（2026-08-25，prod + staging，真实 GitHub OAuth 账号登录、双 admin 经 D1 提升）。
-- 已知偏差：`PATCH /api/admin/settings` 未实现（只读设计）；`recharge` 账目类型无端点写入（管理端充值记为 `adjust`）。
+- 已知偏差：`PATCH /api/admin/settings` 未实现（只读设计）；`recharge` 账目类型无端点写入（管理端充值记为 `adjust`）；**线上环境需用户自带凭据**（GitHub OAuth App client secret 经 `wrangler secret put`、上游供应商真实密钥部署后在管理台配置——生产清单见 §部署要点；线上已部署，域名见「项目概览」）。
+
+## API 参考
+
+**管理 API**（`/api/*`，会话鉴权）：
+
+| 端点 | 访问权限 | 说明 |
+| --- | --- | --- |
+| `/api/auth/*` | public | Better Auth（邮箱密码、GitHub OAuth） |
+| `/api/invites/validate` | public | 注册前预检邀请码（`valid: true/false`，只读不消耗，带限流） |
+| `/api/me/usage` | member | 本人用量聚合 + 明细（分页） |
+| `/api/me/transactions` | member | 本人余额账本（分页，类型/时间过滤） |
+| `/api/keys` | member/admin | 本人网关密钥 CRUD（admin 可见全部） |
+| `/api/users` | admin | 用户列表/角色/状态、邀请、余额调整 |
+| `/api/providers` | admin | 上游供应商 CRUD（密钥 AES-GCM 加密，响应中打码） |
+| `/api/models` | member/admin | 模型价格表（member 只读；admin CRUD + 每行免费/隐藏标志） |
+| `/api/admin/usage` | admin | 全局用量，按用户/密钥/模型/时间过滤 |
+| `/api/admin/transactions` | admin | 全局账本，可选 `userId` 过滤 |
+| `/api/admin/settings` | admin | 运行时默认值（只读） |
+| `/api/health` | public | 存活探针 |
+
+`/api/users` 的角色变更受部署侧账户安全开关 `EMAIL_ACCOUNT_ADMIN_PROMOTION_ENABLED` 约束：开关关闭（缺省）时，把邮箱注册账号提升为 `admin` 会被 `403` 拒绝，管理台对相应行禁用该操作。降级、状态变更、既有 admin 与首个 admin bootstrap（直接 D1 `UPDATE`）不受影响。
+
+**代理 API**（`/v1/*`、`/anthropic/*`，网关 key 鉴权，三个协议入口）：
+
+| 端点 | 协议 | 说明 |
+| --- | --- | --- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | 聊天补全（流式 + 非流式） |
+| `POST /v1/completions` | OpenAI | 文本补全 |
+| `POST /v1/embeddings` | OpenAI | 向量嵌入 |
+| `GET /v1/models` | OpenAI | 已配置模型列表 |
+| `POST /v1/messages` | 双协议自动探测 | Anthropic Messages **或** OpenAI Chat Completions——逐请求探测（硬信号，否则 `claude-*` → Anthropic / 其余 → OpenAI） |
+| `POST /v1/responses` | OpenAI Responses | Responses API（流式 SSE 无 `[DONE]` 终止符，遵循官方协议） |
+| `POST /anthropic/v1/messages` | Anthropic Messages | Anthropic Messages API——官方 Anthropic SDK 的 baseURL 目标 |
+| `POST /anthropic/messages` | Anthropic Messages | 上者的别名（无路径后缀的 SDK baseURL） |
+
+错误格式跟随入口协议：`/v1/*` 各面用 OpenAI 风格 `{ "error": { "message": "..." } }`（含 Zod 校验失败），`/anthropic/*` 用 Anthropic 风格 `{ "type": "error", "error": { "type": ..., "message": ... } }`。`/v1/messages` 的错误跟随**探测结果**协议：探测为 Anthropic 的请求回 Anthropic 错误形态，探测为 OpenAI 的回 OpenAI 形态；混合两种协议的请求以 `400` 拒绝。
+
+### SDK baseURL 约定
+
+官方 SDK 指向网关时用网关 API key（`Authorization: Bearer sk-…` 或 Anthropic SDK 的 `x-api-key`）：
+
+```ts
+// Anthropic TS SDK
+const anthropic = new Anthropic({ apiKey: "sk-…", baseURL: "https://<gateway>/anthropic" });
+await anthropic.messages.create({ model, max_tokens: 1024, messages: [{ role: "user", content: "hi" }] });
+
+// OpenAI TS SDK (Responses API)
+const openai = new OpenAI({ apiKey: "sk-…", baseURL: "https://<gateway>/v1" });
+await openai.responses.create({ model, input: "hi" });
+```
+
+Anthropic SDK 请求原生携带 `x-api-key` + `anthropic-version` 头；两者在所有代理入口均被接受（缺 `Authorization: Bearer` 时 `x-api-key` 兜底）。
 
 ## 安全（公开 repo 准备）
 
@@ -119,6 +188,22 @@ git branch -d feat/<name>                          # ⑤ 删除
 
 - 2026-08-26 gitleaks 全历史 **0 命中**；历史 PII 已全量 squash 清除（`03352b0`），远程零 PII；备份在本地 tag `backup/develop-pre-reorg-20260827` + `/tmp/gw-backup.bundle`。
 - 已有零-secrets 轻量 CI（`.github/workflows/ci.yml`：test / lint / typecheck，`permissions: contents: read`，不引用任何 secrets，占位值文件由 example 派生）；转公开前执行 security-audit.md 的 checklist（分支保护、Secrets 检查、SEED_USERS 确认等）。
+
+## 项目结构
+
+```
+src/                 Worker backend (Hono)
+  routes/            API modules (usage, billing, settings, keys, providers, models, users, v1)
+  middleware/        requestContext, requireSession/adminOnly, gateway auth
+  lib/               billing, rate limiting, cache, cleanup, security, adapters helpers
+  providers/         openai / anthropic adapters + SSE conversion
+  db/                Drizzle schema + D1 access
+app/                 React SPA (React Router v7, React Query, Tailwind)
+tests/               Vitest + Miniflare suite
+scripts/             mock upstream + E2E verification scripts
+CLAUDE.md            knowledge entry (git workflow / env config / deploy / AC summary; extended specs live in a local, gitignored store — not shipped)
+drizzle/             SQL migrations
+```
 
 ## Spec 索引与工作流
 
